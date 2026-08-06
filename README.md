@@ -278,9 +278,9 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 | Name | Role | Contact |
 |---|---|---|
 | **Collin** | Lead Developer — Frontend, UI/UX, Product Architecture | collin@meridianstudiollc.com |
-| **Scott Schoemaker** | Project Mentor / Capstone Instructor | scott.schoemaker@fullsail.edu |
+| **Scott Schoemaker** | Co-Developer — Backend, Firebase, System Architecture | scott.schoemaker@fullsail.edu |
 
-**Collin** is the primary developer and maintains the repository. **Scott Schoemaker** serves as the Full Sail University capstone instructor and project advisor, providing architectural review and assessment.
+**Collin** and **Scott Schoemaker** are the two co-developers of MedReach AI. Collin leads frontend, UI/UX, and product architecture. Scott leads backend infrastructure, Firebase integration, and system architecture. Both authors are listed on the design document and share responsibility for the codebase.
 
 > MedReach AI is a capstone project developed at **Full Sail University** — AI Software Development program.
 
@@ -519,7 +519,8 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
 | Name | Role |
 |---|---|
-| **Collins** | Lead Developer / Project Owner |
+| **Collin** | Lead Developer — Frontend, UI/UX, Product Architecture | collin@meridianstudiollc.com |
+| **Scott Schoemaker** | Co-Developer — Backend, Firebase, System Architecture | scott.schoemaker@fullsail.edu |
 
 > Want to contribute? Open an issue or submit a pull request!
 
@@ -557,7 +558,7 @@ MedReach AI is currently in **Alpha**. Core screens and UI are complete. Backend
 
 *Built with ❤️ for the healthcare industry.*
 
-A collaborative medical AI project developed by Collin and Scott.
+A collaborative medical AI project co-developed by **Collin** (`collin@meridianstudiollc.com`) and **Scott Schoemaker** (`scott.schoemaker@fullsail.edu`) as part of the Full Sail University AI Software Development capstone.
 
 ## Branch Structure
 
