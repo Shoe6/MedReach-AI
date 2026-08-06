@@ -1598,61 +1598,218 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
 
 // ─── DATA REVIEW ──────────────────────────────────────────────────────────────
 
+// ── Data Review data ─────────────────────────────────────────────────────────
+
 const PII_FLAGS = [
-  { record: 'James Morrison #4821', field: 'SSN', type: 'Social Security Number', severity: 'High' },
-  { record: 'Sarah Chen #2204', field: 'DOB', type: 'Date of Birth', severity: 'Medium' },
-  { record: 'Robert Patel #8812', field: 'Personal Email', type: 'Personal Identifier', severity: 'Low' },
-  { record: 'Linda Torres #3391', field: 'Home Address', type: 'Physical Address', severity: 'High' },
+  { record: 'James Morrison #4821',  field: 'SSN',           type: 'Social Security Number', severity: 'High',   nullPct: 2  },
+  { record: 'Sarah Chen #2204',      field: 'DOB',           type: 'Date of Birth',           severity: 'Medium', nullPct: 8  },
+  { record: 'Robert Patel #8812',    field: 'Personal Email',type: 'Personal Identifier',     severity: 'Low',    nullPct: 14 },
+  { record: 'Linda Torres #3391',    field: 'Home Address',  type: 'Physical Address',        severity: 'High',   nullPct: 5  },
+  { record: 'Michael Brennan #7741', field: 'SSN',           type: 'Social Security Number',  severity: 'High',   nullPct: 2  },
+  { record: 'Yuki Tanaka #0293',     field: 'Credit Card',   type: 'Financial Identifier',    severity: 'High',   nullPct: 0  },
 ]
 
 const DUPLICATES = [
-  { id: 'A', rec1: { npi: '1234567890', name: 'James Morrison', spec: 'Cardiology', source: 'Q1_Upload' }, rec2: { npi: '1234567890', name: 'Jim Morrison', spec: 'Cardiology', source: 'Q2_Upload' } },
-  { id: 'B', rec1: { npi: '5544332211', name: 'Robert Patel', spec: 'Neurology', source: 'Q1_Upload' }, rec2: { npi: '5544332211', name: 'Rob Patel MD', spec: 'Neurology', source: 'Q1_Upload' } },
+  { id: 'A', similarity: 97, rec1: { npi: '1234567890', name: 'James Morrison',  spec: 'Cardiology', state: 'FL', source: 'Q1_Upload' }, rec2: { npi: '1234567890', name: 'Jim Morrison',    spec: 'Cardiology', state: 'FL', source: 'Q2_Upload' } },
+  { id: 'B', similarity: 91, rec1: { npi: '5544332211', name: 'Robert Patel',    spec: 'Neurology',  state: 'CA', source: 'Q1_Upload' }, rec2: { npi: '5544332211', name: 'Rob Patel MD',    spec: 'Neurology',  state: 'CA', source: 'Q1_Upload' } },
+  { id: 'C', similarity: 84, rec1: { npi: '9988221100', name: 'Angela Ruiz',     spec: 'Oncology',   state: 'TX', source: 'Q1_Upload' }, rec2: { npi: '9988221100', name: 'Angela M. Ruiz', spec: 'Oncology',   state: 'TX', source: 'Q2_Upload' } },
 ]
 
 const OUTLIERS = [
-  { record: 'Dr. Chen #1192', reason: 'NPI claims volume 10x above oncology specialty average', severity: 'High', expanded: false },
-  { record: 'Dr. Williams #4490', reason: 'Prescribing pattern spans 14 states — geographically implausible', severity: 'Medium', expanded: false },
-  { record: 'Dr. Kim #7723', reason: 'License expiry date 22 years in the future', severity: 'Low', expanded: false },
+  { record: 'Dr. Chen #1192',    specialty: 'Oncology',    reason: 'NPI claims volume 10x above oncology specialty average',       severity: 'High',   anomalyScore: 0.94, nullPct: 3  },
+  { record: 'Dr. Williams #4490',specialty: 'Cardiology',  reason: 'Prescribing pattern spans 14 states — geographically implausible', severity: 'Medium', anomalyScore: 0.78, nullPct: 7  },
+  { record: 'Dr. Kim #7723',     specialty: 'Dermatology', reason: 'License expiry date 22 years in the future',                   severity: 'Low',    anomalyScore: 0.61, nullPct: 11 },
+  { record: 'Dr. Okonkwo #5512', specialty: 'Neurology',   reason: 'Email domain does not match registered practice location',    severity: 'Medium', anomalyScore: 0.71, nullPct: 0  },
 ]
 
 const VALIDATION_ERRORS = [
-  { record: 'Thomas Nguyen #5501', npi: '0000000001', issue: 'NPI not found in NPPES registry', action: 'Remove' },
-  { record: 'Carol Davis #3320', npi: '9988776655', issue: 'NPI is inactive since 2019', action: 'Remove' },
-  { record: 'Steven Park #8811', npi: '1122334455', issue: 'NPI specialty mismatch — registered as GP, uploaded as Surgeon', action: 'Override' },
+  { record: 'Thomas Nguyen #5501', npi: '0000000001', specialty: 'Internal Medicine', state: 'CA', issue: 'NPI not found in NPPES registry',                              issueType: 'Not Found',  nullPct: 6  },
+  { record: 'Carol Davis #3320',   npi: '9988776655', specialty: 'Cardiology',        state: 'NY', issue: 'NPI is inactive since 2019',                                    issueType: 'Inactive',   nullPct: 2  },
+  { record: 'Steven Park #8811',   npi: '1122334455', specialty: 'Surgery',           state: 'TX', issue: 'NPI specialty mismatch — registered as GP, uploaded as Surgeon', issueType: 'Mismatch',   nullPct: 9  },
+  { record: 'Maria Santos #6630',  npi: '4455667788', specialty: 'Oncology',          state: 'FL', issue: 'NPI check digit invalid',                                       issueType: 'Invalid',    nullPct: 4  },
 ]
+
+// ── Field-level null completeness summary (shown above each table) ────────────
+const NULL_SUMMARIES: Record<string, { field: string; nullPct: number }[]> = {
+  pii: [
+    { field: 'SSN',            nullPct: 2  },
+    { field: 'Email (personal)',nullPct: 14 },
+    { field: 'Home Address',   nullPct: 5  },
+    { field: 'Date of Birth',  nullPct: 8  },
+  ],
+  outliers: [
+    { field: 'Claims Volume',  nullPct: 3  },
+    { field: 'License Expiry', nullPct: 11 },
+    { field: 'Practice State', nullPct: 7  },
+  ],
+  validation: [
+    { field: 'NPI Number',     nullPct: 6  },
+    { field: 'Specialty Code', nullPct: 9  },
+    { field: 'State',          nullPct: 2  },
+  ],
+}
+
+// ── Shared sortable column header ─────────────────────────────────────────────
+type SortDir = 'asc' | 'desc' | null
+function SortTh({ label, sortKey, current, dir, onSort }: {
+  label: string; sortKey: string
+  current: string | null; dir: SortDir
+  onSort: (k: string) => void
+}) {
+  const active = current === sortKey
+  return (
+    <th
+      className="cursor-pointer select-none"
+      onClick={() => onSort(sortKey)}
+      style={{ whiteSpace: 'nowrap' }}
+    >
+      <span className="flex items-center gap-1">
+        {label}
+        <span style={{ opacity: active ? 1 : 0.3, fontSize: 10 }}>
+          {active && dir === 'asc' ? '↑' : active && dir === 'desc' ? '↓' : '↕'}
+        </span>
+      </span>
+    </th>
+  )
+}
+
+// ── Null % indicator pill ─────────────────────────────────────────────────────
+function NullPctBadge({ pct }: { pct: number }) {
+  const color = pct === 0 ? C.success : pct <= 5 ? C.warning : C.danger
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-[4px]"
+      style={{ background: pct === 0 ? '#E8F5EF' : pct <= 5 ? '#FEF3C7' : '#FEE2E2', color }}>
+      {pct}% null
+    </span>
+  )
+}
+
+// ── Null completeness summary bar ─────────────────────────────────────────────
+function NullSummaryBar({ tab }: { tab: string }) {
+  const fields = NULL_SUMMARIES[tab]
+  if (!fields) return null
+  return (
+    <div className="flex flex-wrap gap-4 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
+      <span className="text-[11px] font-semibold self-center" style={{ color: C.navy }}>Field completeness:</span>
+      {fields.map(f => (
+        <div key={f.field} className="flex flex-col gap-0.5" style={{ minWidth: 90 }}>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px]" style={{ color: C.midText }}>{f.field}</span>
+            <NullPctBadge pct={f.nullPct} />
+          </div>
+          <div className="progress-track" style={{ height: 4 }}>
+            <div className="progress-fill" style={{
+              width: `${100 - f.nullPct}%`,
+              background: f.nullPct === 0 ? C.success : f.nullPct <= 5 ? C.warning : C.danger,
+            }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 function DataReviewScreen() {
   const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
   const [resolvedPII, setResolvedPII] = useState<Set<number>>(new Set())
-  const quality = 67
+  const [resolvedVal, setResolvedVal] = useState<Set<number>>(new Set())
+  const [resolvedOut, setResolvedOut] = useState<Set<number>>(new Set())
+
+  // ── sort state ───────────────────────────────────────────────────────────
+  const [piiSort,  setPiiSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'severity', dir: 'desc' })
+  const [outSort,  setOutSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'anomalyScore', dir: 'desc' })
+  const [valSort,  setValSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'issueType', dir: 'asc' })
+  const [dupSort,  setDupSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'similarity', dir: 'desc' })
+
+  const cycleSort = (
+    current: { key: string | null; dir: SortDir },
+    set: (v: { key: string | null; dir: SortDir }) => void,
+    key: string
+  ) => {
+    if (current.key !== key) { set({ key, dir: 'asc' }); return }
+    if (current.dir === 'asc') { set({ key, dir: 'desc' }); return }
+    set({ key: null, dir: null })
+  }
+
+  const severityRank = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
+
+  // ── sorted data ──────────────────────────────────────────────────────────
+  const sortedPII = [...PII_FLAGS].sort((a, b) => {
+    if (!piiSort.key) return 0
+    const dir = piiSort.dir === 'asc' ? 1 : -1
+    if (piiSort.key === 'severity') return (severityRank(a.severity) - severityRank(b.severity)) * dir
+    if (piiSort.key === 'nullPct')  return (a.nullPct - b.nullPct) * dir
+    if (piiSort.key === 'field')    return a.field.localeCompare(b.field) * dir
+    if (piiSort.key === 'record')   return a.record.localeCompare(b.record) * dir
+    return 0
+  })
+
+  const sortedOut = [...OUTLIERS].sort((a, b) => {
+    if (!outSort.key) return 0
+    const dir = outSort.dir === 'asc' ? 1 : -1
+    if (outSort.key === 'severity')     return (severityRank(a.severity) - severityRank(b.severity)) * dir
+    if (outSort.key === 'anomalyScore') return (a.anomalyScore - b.anomalyScore) * dir
+    if (outSort.key === 'nullPct')      return (a.nullPct - b.nullPct) * dir
+    if (outSort.key === 'record')       return a.record.localeCompare(b.record) * dir
+    return 0
+  })
+
+  const sortedVal = [...VALIDATION_ERRORS].sort((a, b) => {
+    if (!valSort.key) return 0
+    const dir = valSort.dir === 'asc' ? 1 : -1
+    if (valSort.key === 'issueType') return a.issueType.localeCompare(b.issueType) * dir
+    if (valSort.key === 'nullPct')   return (a.nullPct - b.nullPct) * dir
+    if (valSort.key === 'npi')       return a.npi.localeCompare(b.npi) * dir
+    if (valSort.key === 'record')    return a.record.localeCompare(b.record) * dir
+    return 0
+  })
+
+  const sortedDup = [...DUPLICATES].sort((a, b) => {
+    if (!dupSort.key) return 0
+    const dir = dupSort.dir === 'asc' ? 1 : -1
+    if (dupSort.key === 'similarity') return (a.similarity - b.similarity) * dir
+    if (dupSort.key === 'name')       return a.rec1.name.localeCompare(b.rec1.name) * dir
+    return 0
+  })
+
+  const quality = Math.round(67 + (resolvedPII.size * 4) + (resolvedVal.size * 5) + (resolvedOut.size * 3))
 
   const tabs = [
-    { id: 'pii', label: 'PII Flags', count: PII_FLAGS.length - resolvedPII.size },
-    { id: 'duplicates', label: 'Duplicates', count: DUPLICATES.length },
-    { id: 'outliers', label: 'Outliers', count: OUTLIERS.length },
-    { id: 'validation', label: 'Validation Errors', count: VALIDATION_ERRORS.length },
+    { id: 'pii',        label: 'PII / PHI Flags',      count: PII_FLAGS.length - resolvedPII.size },
+    { id: 'duplicates', label: 'Duplicates',            count: DUPLICATES.length },
+    { id: 'outliers',   label: 'Statistical Outliers',  count: OUTLIERS.length - resolvedOut.size },
+    { id: 'validation', label: 'NPI Validation',        count: VALIDATION_ERRORS.length - resolvedVal.size },
   ] as const
 
   return (
     <div className="p-8">
       <SectionHeader
         title="Data Review"
-        subtitle="Resolve flags to improve your data quality score"
+        subtitle="Resolve all flags to improve your data quality score and unlock export"
         actions={
           <div className="flex items-center gap-3">
-            <span className="text-[13px] font-semibold" style={{ color: quality >= 80 ? C.success : C.warning }}>{quality}% Quality</span>
+            <span className="text-[13px] font-semibold" style={{ color: quality >= 80 ? C.success : C.warning }}>{Math.min(quality, 100)}% Quality</span>
             <Btn variant="secondary" size="sm">Export Report</Btn>
           </div>
         }
       />
 
-      {/* Quality bar */}
+      {/* Quality bar — updates as flags are resolved */}
       <Card className="mb-6">
-        <ProgressBar value={quality} color={quality >= 80 ? 'success' : 'warning'} label="Data Quality Score" />
-        <p className="text-[11px] mt-2" style={{ color: C.midText }}>Resolve all flags below to reach 100% and unlock export.</p>
+        <ProgressBar value={Math.min(quality, 100)} color={quality >= 80 ? 'success' : 'warning'} label="Data Quality Score" />
+        <div className="flex gap-6 mt-3">
+          {[
+            { label: 'PII resolved',        val: resolvedPII.size, total: PII_FLAGS.length },
+            { label: 'Outliers resolved',   val: resolvedOut.size, total: OUTLIERS.length },
+            { label: 'NPI errors resolved', val: resolvedVal.size, total: VALIDATION_ERRORS.length },
+          ].map(s => (
+            <div key={s.label} className="text-[11px]" style={{ color: C.midText }}>
+              <span className="font-semibold" style={{ color: s.val === s.total ? C.success : C.navy }}>{s.val}/{s.total}</span> {s.label}
+            </div>
+          ))}
+        </div>
       </Card>
 
       {/* Tabs */}
@@ -1660,7 +1817,7 @@ function DataReviewScreen() {
         {tabs.map(t => (
           <button
             key={t.id}
-            onClick={() => setTab(t.id)}
+            onClick={() => { setTab(t.id); setSelected(new Set()) }}
             className="px-4 py-3 transition-all"
             style={{
               fontSize: 12,
@@ -1671,39 +1828,69 @@ function DataReviewScreen() {
               fontFamily: 'Inter, Arial, sans-serif',
             }}
           >
-            {t.label} ({t.count})
+            {t.label}
+            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold"
+              style={{ background: t.count > 0 ? C.danger : C.success, color: 'white' }}>
+              {t.count}
+            </span>
           </button>
         ))}
       </div>
 
-      {/* PII Flags */}
+      {/* ── PII / PHI FLAGS TAB ──────────────────────────────────────────────── */}
       {tab === 'pii' && (
         <Card>
+          <NullSummaryBar tab="pii" />
+
           {selected.size > 0 && (
             <div className="flex items-center gap-3 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
               <span className="text-[12px] font-semibold" style={{ color: C.navy }}>{selected.size} records selected</span>
-              <Btn size="sm" variant="primary">Anonymize {selected.size} selected</Btn>
-              <Btn size="sm" variant="danger">Remove {selected.size} selected</Btn>
+              <Btn size="sm" variant="primary" onClick={() => {
+                const next = new Set(resolvedPII)
+                selected.forEach(i => next.add(i))
+                setResolvedPII(next); setSelected(new Set())
+              }}>Anonymize {selected.size} selected</Btn>
+              <Btn size="sm" variant="danger" onClick={() => {
+                const next = new Set(resolvedPII)
+                selected.forEach(i => next.add(i))
+                setResolvedPII(next); setSelected(new Set())
+              }}>Remove {selected.size} selected</Btn>
+              <button className="text-[11px] hover:underline ml-auto" style={{ color: C.midText }}
+                onClick={() => setSelected(new Set())}>Clear selection</button>
             </div>
           )}
+
           <table className="data-table w-full border-collapse">
             <thead>
               <tr>
-                <th><input type="checkbox" onChange={e => setSelected(e.target.checked ? new Set(PII_FLAGS.map((_,i) => i)) : new Set())} /></th>
-                <th>Record</th><th>Field</th><th>PII Type</th><th>Severity</th><th>Action</th>
+                <th style={{ width: 32 }}>
+                  <input type="checkbox"
+                    checked={selected.size === sortedPII.filter((_,i) => !resolvedPII.has(i)).length && selected.size > 0}
+                    onChange={e => setSelected(e.target.checked
+                      ? new Set(sortedPII.map((_,i) => i).filter(i => !resolvedPII.has(i)))
+                      : new Set()
+                    )} />
+                </th>
+                <SortTh label="Record"   sortKey="record"   current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                <SortTh label="Field"    sortKey="field"    current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                <th>PII / PHI Type</th>
+                <SortTh label="Severity" sortKey="severity" current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                <SortTh label="Null %"   sortKey="nullPct"  current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {PII_FLAGS.map((f, i) => {
+              {sortedPII.map((f, i) => {
                 const resolved = resolvedPII.has(i)
                 return (
-                  <tr key={i} style={{ opacity: resolved ? 0.4 : 1 }}>
+                  <tr key={i} style={{ opacity: resolved ? 0.45 : 1, background: f.severity === 'High' && !resolved ? '#FFF9F9' : undefined }}>
                     <td>
-                      <input type="checkbox" checked={selected.has(i)} onChange={e => {
-                        const s = new Set(selected)
-                        e.target.checked ? s.add(i) : s.delete(i)
-                        setSelected(s)
-                      }} />
+                      <input type="checkbox" disabled={resolved} checked={selected.has(i)}
+                        onChange={e => {
+                          const s = new Set(selected)
+                          e.target.checked ? s.add(i) : s.delete(i)
+                          setSelected(s)
+                        }} />
                     </td>
                     <td className="font-medium">{f.record}</td>
                     <td className="mono">{f.field}</td>
@@ -1713,16 +1900,16 @@ function DataReviewScreen() {
                         {f.severity}
                       </Badge>
                     </td>
+                    <td><NullPctBadge pct={f.nullPct} /></td>
                     <td>
                       {resolved ? (
                         <Badge tier={1} color="success">Resolved</Badge>
                       ) : (
-                        <select className="border border-[#CBD5E0] rounded text-[11px] px-2 py-1" onChange={e => { if (e.target.value !== 'Select action') setResolvedPII(new Set([...resolvedPII, i])) }}>
-                          <option>Select action</option>
-                          <option>Anonymize</option>
-                          <option>Remove Field</option>
-                          <option>Override</option>
-                        </select>
+                        <div className="flex gap-1">
+                          <Btn size="sm" variant="primary" onClick={() => setResolvedPII(new Set([...resolvedPII, i]))}>Anonymize</Btn>
+                          <Btn size="sm" variant="danger"  onClick={() => setResolvedPII(new Set([...resolvedPII, i]))}>Remove</Btn>
+                          <Btn size="sm" variant="ghost"   onClick={() => setResolvedPII(new Set([...resolvedPII, i]))}>Override</Btn>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -1733,110 +1920,214 @@ function DataReviewScreen() {
         </Card>
       )}
 
-      {/* Duplicates */}
+      {/* ── DUPLICATES TAB ───────────────────────────────────────────────────── */}
       {tab === 'duplicates' && (
         <div className="flex flex-col gap-4">
-          {DUPLICATES.map(d => (
+          {/* Sort control for duplicates */}
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Sort by:</span>
+            {[
+              { label: 'Similarity', key: 'similarity' },
+              { label: 'Name', key: 'name' },
+            ].map(opt => (
+              <button key={opt.key}
+                className="text-[11px] px-2 py-1 rounded-[4px] border transition-all"
+                style={{
+                  borderColor: dupSort.key === opt.key ? C.corpBlue : C.border,
+                  background: dupSort.key === opt.key ? C.lightTint : 'white',
+                  color: dupSort.key === opt.key ? C.corpBlue : C.midText,
+                  fontWeight: dupSort.key === opt.key ? 700 : 400,
+                }}
+                onClick={() => cycleSort(dupSort, setDupSort, opt.key)}>
+                {opt.label} {dupSort.key === opt.key ? (dupSort.dir === 'asc' ? '↑' : '↓') : '↕'}
+              </button>
+            ))}
+            <span className="text-[11px] ml-auto" style={{ color: C.midText }}>
+              {sortedDup.length} duplicate pair{sortedDup.length !== 1 ? 's' : ''} detected
+            </span>
+          </div>
+
+          {sortedDup.map(d => (
             <Card key={d.id}>
               <div className="flex items-center gap-2 mb-3">
                 <span style={{ color: C.warning }}>{Icon.copy}</span>
                 <span className="text-[12px] font-semibold" style={{ color: C.darkText }}>Duplicate pair detected</span>
                 <Badge tier={1} color="warning">Cross-upload</Badge>
+                <span className="ml-auto flex items-center gap-1.5 text-[11px]" style={{ color: C.midText }}>
+                  Similarity:
+                  <span className="font-bold mono" style={{ color: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.midText }}>
+                    {d.similarity}%
+                  </span>
+                </span>
+              </div>
+              {/* Similarity bar */}
+              <div className="progress-track mb-4" style={{ height: 5 }}>
+                <div className="progress-fill" style={{
+                  width: `${d.similarity}%`,
+                  background: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue,
+                }} />
               </div>
               <div className="grid grid-cols-2 gap-4 mb-4">
                 {[d.rec1, d.rec2].map((r, i) => (
                   <div key={i} className="p-3 rounded-[6px] border border-[#EDF2F7]" style={{ background: C.lightTint }}>
-                    <p className="text-[11px] font-semibold mb-1" style={{ color: C.navy }}>Record {i + 1} — {r.source}</p>
-                    <p className="text-[12px] font-medium">{r.name}</p>
-                    <p className="text-[11px] mono">{r.npi}</p>
-                    <p className="text-[11px]" style={{ color: C.midText }}>{r.spec}</p>
+                    <p className="text-[11px] font-semibold mb-2" style={{ color: C.navy }}>Record {i + 1} — {r.source}</p>
+                    {[
+                      { label: 'Name',      val: r.name },
+                      { label: 'NPI',       val: r.npi  },
+                      { label: 'Specialty', val: r.spec },
+                      { label: 'State',     val: r.state },
+                    ].map(row => (
+                      <div key={row.label} className="flex gap-2 text-[11px] mb-0.5">
+                        <span style={{ color: C.midText, width: 60, flexShrink: 0 }}>{row.label}</span>
+                        <span className="mono font-medium" style={{ color: C.darkText }}>{row.val}</span>
+                      </div>
+                    ))}
                   </div>
                 ))}
               </div>
               <div className="flex gap-2">
-                <Btn size="sm" variant="primary">Merge</Btn>
+                <Btn size="sm" variant="primary">Merge → keep best fields</Btn>
                 <Btn size="sm" variant="secondary">Keep Both</Btn>
-                <Btn size="sm" variant="danger">Remove</Btn>
+                <Btn size="sm" variant="danger">Remove duplicate</Btn>
               </div>
             </Card>
           ))}
         </div>
       )}
 
-      {/* Outliers */}
+      {/* ── STATISTICAL OUTLIERS TAB ─────────────────────────────────────────── */}
       {tab === 'outliers' && (
         <Card>
+          <NullSummaryBar tab="outliers" />
           <table className="data-table w-full border-collapse">
             <thead>
-              <tr><th>Record</th><th>Outlier Reason</th><th>Severity</th><th>Action</th></tr>
+              <tr>
+                <SortTh label="Record"       sortKey="record"       current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <th>Specialty</th>
+                <th>Outlier Reason</th>
+                <SortTh label="Anomaly Score" sortKey="anomalyScore" current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Severity"     sortKey="severity"     current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Null %"       sortKey="nullPct"      current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <th>Action</th>
+              </tr>
             </thead>
             <tbody>
-              {OUTLIERS.map((o, i) => (
-                <>
-                  <tr key={i}>
-                    <td className="font-medium">{o.record}</td>
-                    <td>
-                      <div>
-                        <p>{o.reason}</p>
-                        <button className="text-[11px] mt-0.5 hover:underline" style={{ color: C.corpBlue }}
-                          onClick={() => setExpandedOutlier(expandedOutlier === i ? null : i)}>
-                          {expandedOutlier === i ? '▲ Hide detail' : '▼ Why was this flagged?'}
-                        </button>
-                      </div>
-                    </td>
-                    <td>
-                      <Badge tier={2} color={o.severity === 'High' ? 'block' : o.severity === 'Medium' ? 'warning' : 'info'}>{o.severity}</Badge>
-                    </td>
-                    <td>
-                      <select className="border border-[#CBD5E0] rounded text-[11px] px-2 py-1">
-                        <option>Select action</option>
-                        <option>Remove</option>
-                        <option>Keep</option>
-                        <option>Exclude from Campaigns Only</option>
-                      </select>
-                    </td>
-                  </tr>
-                  {expandedOutlier === i && (
-                    <tr key={`exp-${i}`} style={{ background: C.lightTint }}>
-                      <td colSpan={4} className="px-4 py-3">
-                        <p className="text-[12px] font-semibold mb-1" style={{ color: C.navy }}>Statistical reasoning</p>
-                        <p className="text-[12px]" style={{ color: C.darkText }}>
-                          The average monthly claims volume for this specialty is 142 claims/month. This provider submitted 1,847 claims last month — 13× above the 99th percentile. This pattern is consistent with high-volume billing fraud or data entry errors.
-                        </p>
+              {sortedOut.map((o, i) => {
+                const resolved = resolvedOut.has(i)
+                return (
+                  <>
+                    <tr key={i} style={{ opacity: resolved ? 0.45 : 1 }}>
+                      <td className="font-medium">{o.record}</td>
+                      <td><Badge tier={1} color="neutral">{o.specialty}</Badge></td>
+                      <td>
+                        <div>
+                          <p className="text-[11px]">{o.reason}</p>
+                          {!resolved && (
+                            <button className="text-[10px] mt-0.5 hover:underline" style={{ color: C.corpBlue }}
+                              onClick={() => setExpandedOutlier(expandedOutlier === i ? null : i)}>
+                              {expandedOutlier === i ? '▲ Hide reasoning' : '▼ Why flagged?'}
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="flex items-center gap-2">
+                          <div className="progress-track" style={{ minWidth: 50 }}>
+                            <div className="progress-fill" style={{
+                              width: `${o.anomalyScore * 100}%`,
+                              background: o.anomalyScore >= 0.85 ? C.danger : o.anomalyScore >= 0.7 ? C.warning : C.success,
+                            }} />
+                          </div>
+                          <span className="mono text-[11px] font-bold" style={{
+                            color: o.anomalyScore >= 0.85 ? C.danger : o.anomalyScore >= 0.7 ? C.warning : C.success,
+                          }}>{o.anomalyScore.toFixed(2)}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <Badge tier={2} color={o.severity === 'High' ? 'block' : o.severity === 'Medium' ? 'warning' : 'info'}>
+                          {o.severity}
+                        </Badge>
+                      </td>
+                      <td><NullPctBadge pct={o.nullPct} /></td>
+                      <td>
+                        {resolved ? (
+                          <Badge tier={1} color="success">Resolved</Badge>
+                        ) : (
+                          <div className="flex gap-1">
+                            <Btn size="sm" variant="danger"    onClick={() => setResolvedOut(new Set([...resolvedOut, i]))}>Remove</Btn>
+                            <Btn size="sm" variant="secondary" onClick={() => setResolvedOut(new Set([...resolvedOut, i]))}>Keep</Btn>
+                            <Btn size="sm" variant="ghost"     onClick={() => setResolvedOut(new Set([...resolvedOut, i]))}>Excl. Campaigns</Btn>
+                          </div>
+                        )}
                       </td>
                     </tr>
-                  )}
-                </>
-              ))}
+                    {expandedOutlier === i && !resolved && (
+                      <tr key={`exp-${i}`} style={{ background: C.lightTint }}>
+                        <td colSpan={7} className="px-4 py-3">
+                          <p className="text-[12px] font-semibold mb-1" style={{ color: C.navy }}>Statistical reasoning</p>
+                          <p className="text-[12px]" style={{ color: C.darkText }}>
+                            The average monthly claims volume for this specialty is 142 claims/month. This provider submitted 1,847 claims last month — 13× above the 99th percentile (anomaly score {o.anomalyScore.toFixed(2)}). This pattern is consistent with high-volume billing irregularity or a data entry error in the source file.
+                          </p>
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                )
+              })}
             </tbody>
           </table>
         </Card>
       )}
 
-      {/* Validation Errors */}
+      {/* ── NPI VALIDATION TAB ───────────────────────────────────────────────── */}
       {tab === 'validation' && (
         <Card>
           <Banner type="warning">NPI Registry is temporarily unavailable. 847 records marked pending. Will auto-retry in 5 minutes.</Banner>
+          <NullSummaryBar tab="validation" />
           <table className="data-table w-full border-collapse">
             <thead>
-              <tr><th>Record</th><th>NPI</th><th>Issue</th><th>Action</th></tr>
+              <tr>
+                <SortTh label="Record"     sortKey="record"    current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <SortTh label="NPI"        sortKey="npi"       current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <th>Specialty</th>
+                <th>State</th>
+                <SortTh label="Issue Type" sortKey="issueType" current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <th>Issue Detail</th>
+                <SortTh label="Null %"     sortKey="nullPct"   current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <th>Action</th>
+              </tr>
             </thead>
             <tbody>
-              {VALIDATION_ERRORS.map((v, i) => (
-                <tr key={i}>
-                  <td className="font-medium">{v.record}</td>
-                  <td className="mono">{v.npi}</td>
-                  <td style={{ color: C.danger }}>{v.issue}</td>
-                  <td>
-                    <select className="border border-[#CBD5E0] rounded text-[11px] px-2 py-1">
-                      <option>Select action</option>
-                      <option>Remove</option>
-                      <option>Override</option>
-                      <option>Re-validate</option>
-                    </select>
-                  </td>
-                </tr>
-              ))}
+              {sortedVal.map((v, i) => {
+                const resolved = resolvedVal.has(i)
+                return (
+                  <tr key={i} style={{ opacity: resolved ? 0.45 : 1 }}>
+                    <td className="font-medium">{v.record}</td>
+                    <td className="mono">{v.npi}</td>
+                    <td>{v.specialty}</td>
+                    <td>{v.state}</td>
+                    <td>
+                      <Badge tier={2}
+                        color={v.issueType === 'Not Found' || v.issueType === 'Invalid' ? 'block' : v.issueType === 'Inactive' ? 'warning' : 'info'}>
+                        {v.issueType}
+                      </Badge>
+                    </td>
+                    <td style={{ color: C.danger, fontSize: 11 }}>{v.issue}</td>
+                    <td><NullPctBadge pct={v.nullPct} /></td>
+                    <td>
+                      {resolved ? (
+                        <Badge tier={1} color="success">Resolved</Badge>
+                      ) : (
+                        <div className="flex gap-1">
+                          <Btn size="sm" variant="danger"    onClick={() => setResolvedVal(new Set([...resolvedVal, i]))}>Remove</Btn>
+                          <Btn size="sm" variant="ghost"     onClick={() => setResolvedVal(new Set([...resolvedVal, i]))}>Override</Btn>
+                          <Btn size="sm" variant="secondary" onClick={() => setResolvedVal(new Set([...resolvedVal, i]))}>Re-validate</Btn>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </Card>
