@@ -2719,68 +2719,389 @@ function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
 
 // ─── DATA HEATMAP ─────────────────────────────────────────────────────────────
 
-const HEATMAP_FIELDS = ['NPI', 'First Name', 'Last Name', 'Specialty', 'State', 'Email', 'Phone', 'DEA #']
-const HEATMAP_RECORDS = Array.from({ length: 20 }, (_, i) => ({
+const HEATMAP_FIELDS: {
+  name: string
+  required: boolean
+  nullPct: number         // % of records where field is missing
+  invalidPct: number      // % of records where field fails validation
+  partialPct: number      // % partially filled
+}[] = [
+  { name: 'NPI',        required: true,  nullPct: 0,  invalidPct: 4,  partialPct: 0  },
+  { name: 'First Name', required: true,  nullPct: 0,  invalidPct: 0,  partialPct: 1  },
+  { name: 'Last Name',  required: true,  nullPct: 0,  invalidPct: 0,  partialPct: 0  },
+  { name: 'Specialty',  required: false, nullPct: 3,  invalidPct: 2,  partialPct: 4  },
+  { name: 'State',      required: false, nullPct: 2,  invalidPct: 1,  partialPct: 0  },
+  { name: 'Email',      required: false, nullPct: 14, invalidPct: 6,  partialPct: 3  },
+  { name: 'Phone',      required: false, nullPct: 18, invalidPct: 3,  partialPct: 8  },
+  { name: 'ZIP Code',   required: false, nullPct: 9,  invalidPct: 2,  partialPct: 5  },
+  { name: 'DEA #',      required: false, nullPct: 31, invalidPct: 1,  partialPct: 4  },
+  { name: 'Address',    required: false, nullPct: 22, invalidPct: 0,  partialPct: 11 },
+]
+
+type CellStatus = 'complete' | 'partial' | 'invalid' | 'missing'
+
+// Deterministic cell generator so grid is stable across renders
+function makeCellStatus(fieldIdx: number, recIdx: number): CellStatus {
+  const f = HEATMAP_FIELDS[fieldIdx]
+  // use a simple hash of indices for deterministic "random"
+  const h = ((fieldIdx * 31 + recIdx * 17) % 100)
+  if (h < f.nullPct)                          return 'missing'
+  if (h < f.nullPct + f.invalidPct)           return 'invalid'
+  if (h < f.nullPct + f.invalidPct + f.partialPct) return 'partial'
+  return 'complete'
+}
+
+const HEATMAP_RECORDS = Array.from({ length: 30 }, (_, i) => ({
   id: `#${4800 + i}`,
-  values: HEATMAP_FIELDS.map(() => {
-    const r = Math.random()
-    return r > 0.8 ? 'missing' : r > 0.6 ? 'partial' : 'complete'
-  })
+  lastName: ['Morrison','Chen','Patel','Torres','Brennan','Tanaka','Nguyen','Davis','Park','Santos',
+             'Williams','Kim','Okafor','Ruiz','Wang','Johnson','Lee','Brown','Garcia','Martinez',
+             'Anderson','Taylor','Thomas','Jackson','White','Harris','Martin','Thompson','Robinson','Clark'][i],
+  values: HEATMAP_FIELDS.map((_, fi) => makeCellStatus(fi, i)),
 }))
+
+// Per-field aggregated health (used in column summary row)
+const FIELD_HEALTH: (typeof HEATMAP_FIELDS[number] & { completePct: number })[] =
+  HEATMAP_FIELDS.map(f => ({
+    ...f,
+    completePct: 100 - f.nullPct - f.invalidPct - f.partialPct,
+  }))
 
 function DataHeatmapScreen() {
   const [hover, setHover] = useState<{ r: number; c: number } | null>(null)
+  const [filterField, setFilterField] = useState<string>('All fields')
+  const [filterStatus, setFilterStatus] = useState<CellStatus | 'all'>('all')
+  const [viewMode, setViewMode] = useState<'matrix' | 'field'>('matrix')
 
-  const getColor = (status: string) => status === 'complete' ? C.success : status === 'partial' ? C.warning : C.danger
-  const getLabel = (status: string) => status === 'complete' ? 'Complete' : status === 'partial' ? 'Partial' : 'Missing / Invalid'
+  const cellColor = (s: CellStatus) =>
+    s === 'complete' ? C.success : s === 'partial' ? C.warning : s === 'invalid' ? C.danger : '#CBD5E0'
+
+  const cellLabel = (s: CellStatus) =>
+    s === 'complete' ? 'Complete' : s === 'partial' ? 'Partial / truncated' : s === 'invalid' ? 'Validation failure' : 'Missing / null'
+
+  const bgOpacity = (ri: number, ci: number) =>
+    hover ? (hover.r === ri && hover.c === ci ? 1 : 0.55) : 0.8
+
+  // filter which columns to show
+  const visibleFields = filterField === 'All fields'
+    ? HEATMAP_FIELDS.map((_, i) => i)
+    : [HEATMAP_FIELDS.findIndex(f => f.name === filterField)]
+
+  // filter which rows to show
+  const visibleRecords = filterStatus === 'all'
+    ? HEATMAP_RECORDS
+    : HEATMAP_RECORDS.filter(rec =>
+        visibleFields.some(fi => rec.values[fi] === filterStatus)
+      )
+
+  const hoverField = hover !== null ? HEATMAP_FIELDS[hover.c] : null
+  const hoverRec   = hover !== null ? HEATMAP_RECORDS[hover.r] : null
+  const hoverStatus = hover !== null ? HEATMAP_RECORDS[hover.r]?.values[hover.c] : null
 
   return (
     <div className="p-8">
-      <SectionHeader title="Data Quality Heatmap" subtitle="Field-level completeness across all records" />
-
-      <Card className="overflow-auto">
-        <div className="flex items-center gap-4 mb-4">
+      <SectionHeader
+        title="Data Quality Heatmap"
+        subtitle="Visual matrix of field-level completeness and validation status across all records"
+        actions={
           <div className="flex items-center gap-2">
-            {['complete', 'partial', 'missing'].map(s => (
-              <div key={s} className="flex items-center gap-1.5">
-                <div className="w-3 h-3 rounded-sm" style={{ background: getColor(s) }} />
-                <span className="text-[11px] capitalize" style={{ color: C.midText }}>{s}</span>
-              </div>
+            <button
+              className="text-[12px] px-3 py-1.5 rounded-[6px] border transition-all"
+              style={{ borderColor: viewMode === 'matrix' ? C.navy : C.border, background: viewMode === 'matrix' ? C.navy : 'white', color: viewMode === 'matrix' ? 'white' : C.midText }}
+              onClick={() => setViewMode('matrix')}>
+              Matrix view
+            </button>
+            <button
+              className="text-[12px] px-3 py-1.5 rounded-[6px] border transition-all"
+              style={{ borderColor: viewMode === 'field' ? C.navy : C.border, background: viewMode === 'field' ? C.navy : 'white', color: viewMode === 'field' ? 'white' : C.midText }}
+              onClick={() => setViewMode('field')}>
+              Field summary
+            </button>
+          </div>
+        }
+      />
+
+      {/* ── LEGEND + FILTERS ──────────────────────────────────────────────── */}
+      <Card className="mb-5">
+        <div className="flex flex-wrap items-center gap-6">
+          {/* Legend */}
+          <div className="flex items-center gap-4">
+            <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Legend:</span>
+            {([
+              { status: 'complete', label: 'Complete' },
+              { status: 'partial',  label: 'Partial' },
+              { status: 'invalid',  label: 'Validation failure' },
+              { status: 'missing',  label: 'Missing / null' },
+            ] as { status: CellStatus; label: string }[]).map(l => (
+              <button
+                key={l.status}
+                className="flex items-center gap-1.5 text-[11px] transition-all rounded px-1.5 py-0.5"
+                style={{
+                  color: C.midText,
+                  background: filterStatus === l.status ? '#EBF4FA' : 'transparent',
+                  fontWeight: filterStatus === l.status ? 700 : 400,
+                  outline: filterStatus === l.status ? `2px solid ${C.corpBlue}` : 'none',
+                }}
+                onClick={() => setFilterStatus(filterStatus === l.status ? 'all' : l.status as CellStatus)}>
+                <div className="w-3.5 h-3.5 rounded-sm" style={{ background: cellColor(l.status as CellStatus) }} />
+                {l.label}
+              </button>
             ))}
+            {filterStatus !== 'all' && (
+              <button className="text-[11px] hover:underline" style={{ color: C.corpBlue }}
+                onClick={() => setFilterStatus('all')}>Clear filter ×</button>
+            )}
+          </div>
+
+          {/* Field filter */}
+          <div className="flex items-center gap-2 ml-auto">
+            <span className="text-[11px]" style={{ color: C.midText }}>Show field:</span>
+            <select
+              className="border border-[#CBD5E0] rounded-[6px] text-[12px] px-2 py-1"
+              style={{ color: C.darkText }}
+              value={filterField}
+              onChange={e => setFilterField(e.target.value)}>
+              <option>All fields</option>
+              {HEATMAP_FIELDS.map(f => <option key={f.name}>{f.name}</option>)}
+            </select>
+            <span className="text-[11px]" style={{ color: C.midText }}>
+              Showing <strong>{visibleRecords.length}</strong> of {HEATMAP_RECORDS.length} records
+            </span>
           </div>
         </div>
-
-        <div style={{ overflowX: 'auto' }}>
-          <table className="border-collapse">
-            <thead>
-              <tr>
-                <th className="text-[10px] text-left px-2 py-2 sticky left-0 bg-white z-10" style={{ color: C.midText, minWidth: 60 }}>Record</th>
-                {HEATMAP_FIELDS.map(f => (
-                  <th key={f} className="text-[10px] px-1 py-2" style={{ color: C.navy, minWidth: 56 }}>{f}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {HEATMAP_RECORDS.map((rec, ri) => (
-                <tr key={rec.id}>
-                  <td className="text-[10px] px-2 py-0.5 sticky left-0 bg-white mono" style={{ color: C.midText }}>{rec.id}</td>
-                  {rec.values.map((v, ci) => (
-                    <td key={ci} className="px-1 py-0.5">
-                      <div
-                        className="rounded-sm cursor-pointer transition-all hover:scale-110"
-                        style={{ width: 36, height: 20, background: getColor(v), opacity: hover?.r === ri && hover?.c === ci ? 1 : 0.75 }}
-                        onMouseEnter={() => setHover({ r: ri, c: ci })}
-                        onMouseLeave={() => setHover(null)}
-                        title={`${rec.id} · ${HEATMAP_FIELDS[ci]} · ${getLabel(v)}`}
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
       </Card>
+
+      {/* ── HOVER TOOLTIP PANEL ───────────────────────────────────────────── */}
+      {hover !== null && hoverField && hoverRec && hoverStatus && (
+        <div className="mb-4 p-4 rounded-[8px] border flex items-start gap-6 transition-all"
+          style={{ background: '#FAFBFC', borderColor: cellColor(hoverStatus), borderLeftWidth: 4 }}>
+          <div>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Record</p>
+            <p className="text-[13px] font-bold mono" style={{ color: C.navy }}>{hoverRec.id} — {hoverRec.lastName}</p>
+          </div>
+          <div>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Field</p>
+            <p className="text-[13px] font-bold" style={{ color: C.navy }}>{hoverField.name}</p>
+          </div>
+          <div>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Status</p>
+            <Badge tier={2}
+              color={hoverStatus === 'complete' ? 'approve' : hoverStatus === 'partial' ? 'warning' : 'block'}>
+              {cellLabel(hoverStatus)}
+            </Badge>
+          </div>
+          <div>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Field-level null %</p>
+            <div className="flex items-center gap-2">
+              <div className="progress-track" style={{ width: 80 }}>
+                <div className="progress-fill" style={{ width: `${hoverField.nullPct}%`, background: hoverField.nullPct > 10 ? C.danger : C.warning }} />
+              </div>
+              <span className="mono text-[12px] font-bold" style={{ color: hoverField.nullPct > 10 ? C.danger : C.warning }}>
+                {hoverField.nullPct}% null
+              </span>
+            </div>
+          </div>
+          <div>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Validation failures</p>
+            <span className="mono text-[13px] font-bold" style={{ color: hoverField.invalidPct > 0 ? C.danger : C.success }}>
+              {hoverField.invalidPct}% of records
+            </span>
+          </div>
+          {hoverField.required && (
+            <Badge tier={1} color="warning" className="self-center">Required field</Badge>
+          )}
+        </div>
+      )}
+
+      {/* ── VIEW: MATRIX ─────────────────────────────────────────────────── */}
+      {viewMode === 'matrix' && (
+        <Card className="overflow-auto">
+          <div style={{ overflowX: 'auto' }}>
+            <table className="border-collapse" style={{ minWidth: 500 }}>
+              <thead>
+                <tr>
+                  {/* Sticky record ID column header */}
+                  <th className="text-left px-2 py-1 text-[10px] sticky left-0 bg-white z-10"
+                    style={{ color: C.midText, minWidth: 110, borderBottom: `2px solid #EDF2F7` }}>
+                    Record
+                  </th>
+                  {visibleFields.map(fi => (
+                    <th key={fi} className="px-1 py-1 text-center"
+                      style={{ minWidth: 52, borderBottom: `2px solid #EDF2F7` }}>
+                      <div className="flex flex-col items-center gap-0.5">
+                        <span className="text-[9px] font-bold" style={{ color: HEATMAP_FIELDS[fi].required ? C.warning : C.navy }}>
+                          {HEATMAP_FIELDS[fi].name}
+                          {HEATMAP_FIELDS[fi].required && ' *'}
+                        </span>
+                        {/* Column health bar */}
+                        <div className="progress-track" style={{ width: 36, height: 3 }}>
+                          <div className="progress-fill" style={{
+                            width: `${FIELD_HEALTH[fi].completePct}%`,
+                            background: FIELD_HEALTH[fi].completePct >= 90 ? C.success
+                              : FIELD_HEALTH[fi].completePct >= 70 ? C.warning : C.danger,
+                          }} />
+                        </div>
+                        <span className="text-[8px] mono" style={{ color: C.midText }}>
+                          {FIELD_HEALTH[fi].completePct}%
+                        </span>
+                      </div>
+                    </th>
+                  ))}
+                  {/* Row health column */}
+                  <th className="px-2 py-1 text-center text-[9px]"
+                    style={{ color: C.midText, minWidth: 56, borderBottom: `2px solid #EDF2F7` }}>
+                    Row health
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRecords.map((rec, ri) => {
+                  const actualRi = HEATMAP_RECORDS.indexOf(rec)
+                  const rowStatuses = visibleFields.map(fi => rec.values[fi])
+                  const rowComplete = rowStatuses.filter(s => s === 'complete').length
+                  const rowHealth = Math.round((rowComplete / rowStatuses.length) * 100)
+                  return (
+                    <tr key={rec.id} style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC' }}>
+                      {/* Record ID — sticky */}
+                      <td className="px-2 py-0.5 sticky left-0 z-10 text-[10px]"
+                        style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC' }}>
+                        <span className="mono font-semibold" style={{ color: C.navy }}>{rec.id}</span>
+                        <span className="ml-1.5" style={{ color: C.midText }}>{rec.lastName}</span>
+                      </td>
+                      {/* Field cells */}
+                      {visibleFields.map(fi => {
+                        const s = rec.values[fi]
+                        const isHovered = hover?.r === actualRi && hover?.c === fi
+                        return (
+                          <td key={fi} className="px-1 py-0.5 text-center">
+                            <div
+                              className="rounded-[3px] cursor-pointer transition-all inline-block"
+                              style={{
+                                width: 36,
+                                height: 20,
+                                background: cellColor(s),
+                                opacity: bgOpacity(actualRi, fi),
+                                transform: isHovered ? 'scale(1.25)' : 'scale(1)',
+                                boxShadow: isHovered ? `0 2px 8px ${cellColor(s)}80` : 'none',
+                                transition: 'all 0.12s ease',
+                              }}
+                              onMouseEnter={() => setHover({ r: actualRi, c: fi })}
+                              onMouseLeave={() => setHover(null)}
+                            />
+                          </td>
+                        )
+                      })}
+                      {/* Row health bar */}
+                      <td className="px-2 py-0.5">
+                        <div className="flex items-center gap-1.5">
+                          <div className="progress-track" style={{ width: 32, height: 6 }}>
+                            <div className="progress-fill" style={{
+                              width: `${rowHealth}%`,
+                              background: rowHealth >= 90 ? C.success : rowHealth >= 70 ? C.warning : C.danger,
+                            }} />
+                          </div>
+                          <span className="text-[9px] mono font-bold" style={{
+                            color: rowHealth >= 90 ? C.success : rowHealth >= 70 ? C.warning : C.danger,
+                          }}>{rowHealth}%</span>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+              {/* Column summary footer */}
+              <tfoot>
+                <tr style={{ borderTop: `2px solid #EDF2F7` }}>
+                  <td className="px-2 py-2 text-[9px] font-bold sticky left-0 bg-white" style={{ color: C.midText }}>
+                    FIELD TOTALS
+                  </td>
+                  {visibleFields.map(fi => {
+                    const f = HEATMAP_FIELDS[fi]
+                    return (
+                      <td key={fi} className="px-1 py-2 text-center">
+                        <div className="flex flex-col items-center gap-0.5">
+                          <span className="text-[9px] mono" style={{ color: C.danger }}>{f.nullPct}% null</span>
+                          <span className="text-[9px] mono" style={{ color: f.invalidPct > 0 ? C.danger : C.success }}>
+                            {f.invalidPct}% invalid
+                          </span>
+                        </div>
+                      </td>
+                    )
+                  })}
+                  <td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* ── VIEW: FIELD SUMMARY ───────────────────────────────────────────── */}
+      {viewMode === 'field' && (
+        <div className="flex flex-col gap-3">
+          {HEATMAP_FIELDS.map((f, fi) => {
+            const isHoveredField = filterField === f.name || filterField === 'All fields'
+            return (
+              <Card key={f.name}
+                className={`transition-all ${!isHoveredField ? 'opacity-40' : ''}`}
+                onClick={() => setFilterField(filterField === f.name ? 'All fields' : f.name)}>
+                <div className="flex items-center gap-4">
+                  {/* Field name */}
+                  <div style={{ width: 120, flexShrink: 0 }}>
+                    <p className="text-[13px] font-bold" style={{ color: C.navy }}>{f.name}</p>
+                    {f.required && <Badge tier={1} color="warning">Required</Badge>}
+                  </div>
+
+                  {/* Stacked completion bar */}
+                  <div className="flex-1">
+                    <div className="flex rounded-[4px] overflow-hidden" style={{ height: 20 }}>
+                      <div title={`${FIELD_HEALTH[fi].completePct}% complete`} style={{ width: `${FIELD_HEALTH[fi].completePct}%`, background: C.success }} />
+                      <div title={`${f.partialPct}% partial`}  style={{ width: `${f.partialPct}%`,  background: C.warning }} />
+                      <div title={`${f.invalidPct}% invalid`}  style={{ width: `${f.invalidPct}%`,  background: C.danger }} />
+                      <div title={`${f.nullPct}% null`}        style={{ width: `${f.nullPct}%`,     background: '#CBD5E0' }} />
+                    </div>
+                    <div className="flex gap-4 mt-1">
+                      {[
+                        { label: `${FIELD_HEALTH[fi].completePct}% complete`, color: C.success },
+                        { label: `${f.partialPct}% partial`,  color: C.warning },
+                        { label: `${f.invalidPct}% invalid`,  color: C.danger  },
+                        { label: `${f.nullPct}% null`,        color: '#A0AEC0' },
+                      ].map(seg => (
+                        <span key={seg.label} className="text-[9px] font-semibold mono" style={{ color: seg.color }}>
+                          {seg.label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Right-side stats */}
+                  <div className="flex gap-6 text-right" style={{ flexShrink: 0 }}>
+                    <div>
+                      <p className="text-[10px]" style={{ color: C.midText }}>Null count</p>
+                      <p className="text-[14px] font-bold mono" style={{ color: f.nullPct > 10 ? C.danger : C.midText }}>
+                        {Math.round(f.nullPct / 100 * HEATMAP_RECORDS.length)}
+                        <span className="text-[10px] font-normal"> / {HEATMAP_RECORDS.length}</span>
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px]" style={{ color: C.midText }}>Validation failures</p>
+                      <p className="text-[14px] font-bold mono" style={{ color: f.invalidPct > 0 ? C.danger : C.success }}>
+                        {Math.round(f.invalidPct / 100 * HEATMAP_RECORDS.length)}
+                        <span className="text-[10px] font-normal"> / {HEATMAP_RECORDS.length}</span>
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px]" style={{ color: C.midText }}>Health score</p>
+                      <p className="text-[14px] font-bold mono" style={{ color: FIELD_HEALTH[fi].completePct >= 90 ? C.success : FIELD_HEALTH[fi].completePct >= 70 ? C.warning : C.danger }}>
+                        {FIELD_HEALTH[fi].completePct}%
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
