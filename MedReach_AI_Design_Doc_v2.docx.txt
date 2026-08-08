@@ -1,0 +1,898 @@
+﻿Design Document
+MedReach AI
+[Application Logo — To Be Added]
+
+
+
+
+collin@meridianstudiollc.com
+scott.schoemaker@fullsail.edu
+
+
+Version 2.0 — Revised After Architecture Review
+________________
+
+
+Contents
+1.    Introduction
+1.1.    Purpose
+1.2.    Goal
+1.3.    Definitions
+2.    Overall Description
+2.1.    Product Perspective
+2.1.1.    User Interface Hardware
+2.1.2.    Hardware Interfaces & Memory Constraints
+2.1.3.    Software Interfaces
+2.1.4.    Library Dependencies
+2.1.5.    Database
+2.1.6.    3rd Party Data and APIs
+2.2.    Technology Selection Rationale
+3.    Specific Requirements
+3.1.    Milestones (Phased Delivery Model)
+3.1.1.    Phase A — Data Management (MVP)
+3.1.2.    Phase B — Data Intelligence (Alpha)
+3.1.3.    Phase C — Visualization & Export (Beta)
+3.1.4.    Version 2.0 (Post-Capstone)
+4.    User Experience
+4.1.    Use Cases (Sunny & Rainy Day)
+4.2.    User Characteristics
+4.3.    User Interface
+5.    Development Environment
+5.1.    Developer Tools
+5.2.    Content-Generation Tools
+5.3.    Data Tools
+5.4.    3rd-Party Dependencies and APIs
+6.    System Architecture
+6.1.    High-Level Architecture Diagram
+6.2.    Multi-Tenant Security Model & RBAC
+6.3.    Data Flow Pipeline
+6.4.    Firestore Document Structure
+7.    Non-Functional Requirements
+7.1.    Performance Expectations (Per Stage)
+7.2.    Scalability & Stress Scenarios
+7.3.    Reliability, Availability & Backup
+7.4.    Maintainability
+8.    Production Plans
+8.1.    Code Review Plan
+8.2.    Integration Plan
+8.3.    Testing Plans
+9.    Folder Hierarchy
+AI Data Sets
+________________
+
+
+1. Introduction
+Purpose:
+MedReach AI is a web-based, multi-tenant SaaS platform that specializes in healthcare data intelligence for pharmaceutical and medical device companies. The platform's first module focuses on cleaning, standardizing, analyzing, and intelligently querying Healthcare Professional (HCP) datasets. Rather than positioning MedReach AI as a marketing automation system, we treat marketing campaign generation as one downstream use of the cleaned and analyzed data, not the core value proposition.
+The core capability is transforming inconsistent, unvalidated, and outdated HCP records into an analytics-ready dataset that a non-technical marketing or sales operations professional can query in natural language and export to downstream systems including CRMs, marketing automation platforms, and business intelligence tools.
+This document describes the software architecture, phased requirements, user experience design, database structure, development environment, non-functional requirements, and production plans for MedReach AI. It is intended to be used by all developers on the team as the authoritative reference for design and architectural decisions throughout the capstone build.
+
+
+Goal: What problem is this solving?
+Mid-size pharmaceutical and medical device companies rely on Healthcare Professional (HCP) databases to drive their marketing, sales, and clinical outreach. Those databases are almost universally dirty. Outdated records, duplicate contacts, retired physicians still active in the system, NPI numbers that have not been validated in years. Marketing teams have no accessible way to clean, understand, and act on that data without hiring a dedicated data analyst or paying six figures annually for enterprise software like Veeva or IQVIA.
+MedReach AI closes that gap by delivering the data intelligence capability that enterprise platforms provide, at a price point and accessibility level that a two- or three-person marketing team can actually operate. Cleaned data can then flow downstream into whatever marketing, CRM, or analytics tools the customer already uses. The platform's first module handles data intelligence. Future modules may extend into marketing automation, CRM integrations, sales enablement, and business intelligence — but the data foundation comes first.
+
+
+Existing Solution:
+MedReach AI is not based on a previous project. There is no existing codebase or prior version. The concept was developed as part of the AI Software Development capstone process at Full Sail University. This is Version 2.0 of the design document, revised after the Week 3 architecture review to reflect a repositioning of the product toward data intelligence rather than marketing automation, and to add enterprise-grade sections around multi-tenant security, non-functional requirements, and failure scenarios.
+
+
+Definitions:
+Term
+	Definition
+	HCP
+	Healthcare Professional — a physician, specialist, nurse practitioner, or other licensed medical provider targeted in pharmaceutical or medical device marketing
+	NPI
+	National Provider Identifier — a unique 10-digit ID assigned to every licensed US healthcare provider by the Centers for Medicare and Medicaid Services
+	CMS
+	Centers for Medicare and Medicaid Services — federal agency maintaining the NPI Registry and Open Payments database
+	PII
+	Personally Identifiable Information — any data that can identify an individual (SSNs, financial data, medical record numbers)
+	PHI
+	Protected Health Information — PII related to a person's health status or care; governed by HIPAA
+	Off-Label
+	Promotion of a pharmaceutical product for a use not approved by the FDA; a major regulatory risk in pharmaceutical marketing
+	Sunshine Act
+	Physician Payments Sunshine Act — requires pharmaceutical companies to publicly report financial relationships with physicians
+	Segmentation
+	Dividing an HCP database into distinct groups based on shared characteristics such as specialty, geography, or prescribing behavior
+	Ollama
+	Open-source local AI model runtime that allows large language models to run on-premise without transmitting data to external APIs
+	Presidio
+	Microsoft's open-source PII detection and anonymization library (Apache 2.0); used in enterprise data compliance pipelines
+	Multi-Tenant
+	Software architecture where a single platform instance serves multiple separate organizations with fully isolated data
+	RBAC
+	Role-Based Access Control — a security model that restricts platform actions based on the role assigned to each user within their tenant
+	Natural Language Query
+	A feature allowing users to ask questions of their dataset in plain English rather than writing SQL or code
+	Isolation Forest
+	A scikit-learn machine learning algorithm for anomaly and outlier detection in tabular datasets
+	K-Means
+	A scikit-learn clustering algorithm that groups records into K clusters based on feature similarity
+	FastAPI
+	Modern high-performance Python web framework used as the MedReach AI backend API server
+	Firestore
+	Firebase Firestore — Google's cloud-hosted NoSQL document database; primary data store for MedReach AI
+	________________
+
+
+2. Overall Description
+2.1. Product Perspective
+2.1.1. User Interface Hardware
+MedReach AI is a desktop-first web application accessed through a standard browser. The primary interaction mode is keyboard and mouse. No touch screen, voice control, or gestural interaction is required or supported in Version 1.0. The application targets standard office workstations and laptops. Minimum recommended display resolution is 1280x720. No local software installation is required — the application runs entirely in the browser.
+
+
+2.1.2. Hardware Interfaces & Memory Constraints
+MedReach AI requires no client-side installation. All heavy processing runs server-side on the FastAPI backend. Client hardware requirement is any modern desktop or laptop capable of running Chrome, Firefox, Edge, or Safari at version 120 or higher. The server hosting the self-hosted Ollama AI model requires a minimum of 16GB RAM and preferably 8GB VRAM for GPU-accelerated inference, or 32GB RAM for CPU-only operation. The application occupies no memory on the end-user device beyond what the browser requires.
+
+
+2.1.3. Software Interfaces
+● Client Operating Systems: Windows 10+, macOS 12+, Ubuntu 20.04+
+● Supported Browsers: Chrome 120+, Firefox 120+, Edge 120+, Safari 17+
+● Server Operating System: Ubuntu 22.04 LTS
+● Python Runtime: Python 3.11+
+● Node.js Runtime: Node.js 20 LTS (frontend build tooling only)
+● AI Model Runtime: Ollama 0.3+ installed on the backend server
+
+
+2.1.4. Library Dependencies
+Frontend:
+● React 18.x — component-based UI framework
+● Vite 5.x — build tooling and development server
+● Tailwind CSS 3.x — utility-first CSS framework
+● Recharts 2.x — React charting library
+● Chart.js 4.x — supplemental data visualization
+● Axios 1.x — HTTP client for API communication
+● React Router 6.x — client-side routing
+
+
+Backend:
+● FastAPI 0.110+ — REST API framework
+● uvicorn 0.28+ — ASGI server
+● pandas 2.x — data ingestion, cleaning, deduplication, standardization, and export
+● numpy 1.x — numerical operations
+● scikit-learn 1.4+ — Isolation Forest, K-Means, DBSCAN
+● presidio-analyzer / presidio-anonymizer 2.x — PII detection and anonymization
+● spaCy 3.x — NLP preprocessing pipeline
+● transformers 4.x (Hugging Face) — natural language query interpretation
+● ollama 0.2+ — Python SDK for local model inference
+● firebase-admin 6.x — server-side Firebase Auth and Firestore access
+● reportlab 4.x — PDF audit report generation
+● httpx 0.27+ — async HTTP client for NPI Registry calls
+
+
+2.1.5. Database
+MedReach AI uses Firebase Firestore as its primary database — a cloud-hosted NoSQL document database. Firestore is selected for its multi-tenant security rules (data is scoped at the database level preventing cross-company access), real-time sync capability, and native integration with Firebase Authentication. Firebase Storage is used for all raw CSV uploads and generated export files. See Section 6.4 for the complete document schema and Section 6.2 for the multi-tenant security model.
+
+
+2.1.6. 3rd Party Data and APIs
+API / Data Source
+	Description and Usage
+	CMS NPI Registry REST API
+	Free public API at npiregistry.cms.hhs.gov/api. Real-time physician record validation. Queried by NPI number to confirm active licensure, specialty, and practice location. Rate-limited at 20 req/sec; system batches requests accordingly.
+	Firebase Authentication
+	Google Firebase Auth SDK. Handles user registration, login, password reset, JWT token issuance, and multi-factor authentication for all API requests.
+	CMS Open Payments Database
+	Publicly available annual CSV published by CMS. Contains physician-pharma financial relationship records for Sunshine Act tracking. Cached locally and refreshed annually.
+	FDA Warning Letter Database
+	Public structured dataset from FDA.gov. Contains examples of off-label promotional language cited in enforcement actions. Used as validation data for the compliance intelligence layer.
+	Ollama Local API
+	HTTP API exposed by the locally hosted Ollama server. FastAPI submits prompts to Llama 3 8B and Mistral 7B through this endpoint. No HCP data is transmitted to any external service.
+	
+
+2.2. Technology Selection Rationale
+The following section documents why each technology in the MedReach AI stack was selected. The goal is to make architectural reasoning explicit rather than simply listing implementation choices.
+
+
+Technology
+	Selection Rationale
+	React 18 (Frontend)
+	Chosen for team familiarity, mature ecosystem, and strong support for real-time UI updates during long-running data processing jobs. Alternative considered: Vue 3, but team experience with React reduces onboarding overhead. Server-side rendering is not required because the application is desktop-first and gated behind authentication.
+	FastAPI (Backend)
+	Chosen because the data processing pipeline is Python-heavy (pandas, scikit-learn, Presidio, Ollama SDK), making Python the natural backend language. FastAPI provides async support for concurrent NPI API calls and Ollama inference without threading complexity. Alternatives considered: Flask (rejected — no async), Django (rejected — heavier than needed for API-only backend).
+	Firebase Firestore (Database)
+	Chosen for three specific reasons. First, native multi-tenant security rules enforce data isolation at the database level, not just in application code. Second, real-time sync eliminates polling for background job status updates. Third, tight integration with Firebase Auth simplifies JWT validation. Alternatives considered: PostgreSQL (rejected — would require building tenant isolation, auth integration, and real-time sync manually); MongoDB (rejected — no equivalent security rules layer).
+	Firebase Authentication
+	Chosen because it is included with Firestore, provides multi-factor auth, JWT issuance, and role claims out of the box. Custom claims are used to encode tenant ID and role, allowing security rules to enforce access without per-request database lookups. Alternative considered: Auth0 (rejected — additional cost, additional integration complexity, redundant with Firebase).
+	Ollama + Llama 3 / Mistral (AI)
+	Self-hosted open source models are a deliberate architectural choice, not a cost-saving workaround. Healthcare and pharmaceutical customers are extremely reluctant to send HCP or provider data to external LLM APIs due to compliance, data ownership, and vendor lock-in concerns. Running all AI inference locally is a commercial differentiator versus competitors built on OpenAI or Anthropic APIs. Alternatives considered: OpenAI API (rejected — data leaves platform), Claude API (rejected — same concern), fine-tuned proprietary model (rejected — training data and cost overhead not justified when pre-trained open models meet quality bar).
+	Microsoft Presidio (PII Detection)
+	Chosen because it is production-grade (used by Microsoft Azure), Apache 2.0 licensed, and detects 50+ PII entity types out of the box. Alternatives considered: rolling custom regex-based detection (rejected — brittle, requires ongoing maintenance); AWS Comprehend PII (rejected — requires sending data to AWS).
+	scikit-learn (ML)
+	Chosen for Isolation Forest outlier detection and K-Means / DBSCAN clustering. Industry standard for tabular ML in Python. Well-documented, stable, and fast enough for datasets in the 10K–1M row range. Alternatives considered: XGBoost (rejected — overkill for clustering and unsupervised anomaly detection); custom clustering (rejected — no benefit over battle-tested library implementations).
+	Vite (Frontend build tooling)
+	Chosen for dramatically faster HMR (hot module reload) than Webpack, which speeds up UI development iteration. Native ES modules and lazy compilation reduce dev server startup from 30+ seconds (Webpack) to under 2 seconds.
+	Recharts + Chart.js (Visualization)
+	Recharts for React-native charting integration; Chart.js for chart types Recharts does not support well (heat maps, radar). Both are free, well-maintained, and produce accessible SVG output. Alternative considered: D3.js directly (rejected — steeper learning curve, longer development time for standard chart types).
+	Tailwind CSS
+	Chosen for utility-first approach, small production bundle after purge, and consistent design token enforcement across the team. Alternatives considered: styled-components (rejected — runtime CSS-in-JS adds bundle weight); CSS Modules (rejected — team preference for utility-first).
+	ReportLab (PDF Generation)
+	Chosen because PDF audit reports require precise layout control (letterhead, tables, page numbering) that HTML-to-PDF converters handle inconsistently. Programmatic PDF generation via ReportLab produces reproducible, pixel-consistent output regardless of server environment.
+	________________
+
+
+3. Specific Requirements
+3.1. Milestones (Phased Delivery Model)
+Following the Week 3 architecture review, the MedReach AI feature roadmap has been reorganized into three functional phases that better communicate the product vision. Each phase corresponds to a capstone milestone and maps to the historical MVP / Alpha / Beta timeline structure.
+Phase A (Data Management) is the MVP and is required for the platform to function. Phase B (Data Intelligence) is the Alpha, layering AI-powered analysis on top of clean data. Phase C (Visualization and Export) is the Beta, exposing the analyzed data to end users and downstream systems. All features are written in user story format.
+
+
+3.1.1. Phase A — Data Management (MVP)
+Timeline: Month 2 of Capstone (Software Architecture). Focus: user authentication, dataset upload, data cleansing, duplicate detection, and record management. Without Phase A, no downstream analysis or visualization is possible.
+
+
+● A1: The user will be able to register a new company account and log in securely using email and password authentication with optional multi-factor authentication.
+● A2: The company administrator will be able to invite team members to their tenant and assign each member an Admin, Editor, or Viewer role.
+● A3: The user will be able to upload an HCP contact list in CSV or XLSX format via a drag-and-drop upload zone with automatic column type detection.
+● A4: The user will be able to review and confirm or correct the system's automatic column type detection before the cleaning pipeline begins.
+● A5: The user will be able to view all PII detected in their dataset by Microsoft Presidio and choose to anonymize, remove, or override each flag.
+● A6: The user will be able to review duplicate HCP records identified by the system and choose to merge, keep, or remove them.
+● A7: The user will be able to view NPI Registry validation results identifying which records are active, inactive, invalid, or enriched with registry data.
+● A8: The user will be able to review statistical outliers flagged in their dataset with a plain-language explanation of why each record was flagged.
+● A9: The user will be able to view an audit log of every cleaning action performed on their dataset, with actor identity and timestamp.
+
+
+3.1.2. Phase B — Data Intelligence (Alpha)
+Timeline: Month 3 of Capstone (Project and Portfolio VI). Focus: AI-powered analysis, natural language querying, interactive exploration, and business insights on top of the cleaned dataset.
+
+
+● B1: The user will be able to view AI-generated physician segments with plain-language labels and descriptions produced by the system.
+● B2: The user will be able to ask questions about their dataset in natural language (e.g., "Show me all cardiologists in Florida with more than 500 prescriptions") and receive a filtered result set.
+● B3: The user will be able to explore any segment interactively by drilling down into the record list, filtering, and adjusting segment boundaries.
+● B4: The user will be able to receive AI-generated summaries and business insights about their dataset (e.g., top specialties, geographic concentrations, engagement patterns).
+● B5: The user will be able to review compliance flags on any AI-generated content or export, including Sunshine Act relationships and state-level restrictions.
+● B6: The user will be able to save frequent queries as reusable "views" for their team.
+● B7: The user will be able to generate specialty-specific outreach copy for a selected segment as a downstream use of the analyzed data.
+
+
+3.1.3. Phase C — Visualization & Export (Beta)
+Timeline: Month 4 of Capstone (Software Integration). Focus: dashboards, charts, heat maps, reports, CSV exports, PDF summaries, and integration with external business platforms.
+
+
+● C1: The user will be able to view an interactive analytics dashboard with charts showing segment breakdowns, data quality scores, and geographic distribution.
+● C2: The user will be able to view a data quality heat map displaying record health across the uploaded database by field completeness and validation status.
+● C3: The user will be able to download a PDF audit report documenting every cleaning action, flag, and resolution from their session.
+● C4: The user will be able to export the cleaned and validated dataset as a CRM-compatible CSV file for downstream systems such as Veeva, Salesforce, or Mailchimp.
+● C5: The user will be able to export a structured campaign asset package containing AI-generated content organized by segment.
+● C6: The user will be able to view a summary report of engagement performance per segment when engagement metrics are logged back into the platform.
+
+
+3.1.4. Version 2.0 (Post-Capstone)
+Features intended for post-graduation development. Not part of the initial product planning and will not be assessed in Capstone.
+
+
+● Direct two-way API integration with Veeva CRM and Salesforce Health Cloud for automated data sync
+● Real-time HCP database monitoring with automatic scheduled re-validation against the NPI Registry
+● Subscription billing and seat licensing via Stripe
+● White-label client portal for marketing agencies to operate MedReach AI under their own brand
+● Additional platform modules: marketing automation, CRM integration, sales enablement, business intelligence
+________________
+
+
+4. User Experience
+4.1. Use Cases (Sunny & Rainy Day)
+Each use case is documented with a primary "sunny day" flow describing the expected successful path, followed by "rainy day" scenarios documenting how the system handles failures, edge cases, and recovery. This structure reflects enterprise expectations that a design document address not only what happens when things work but how the system behaves when they do not.
+
+
+Use Case 1: New User Registration and Data Upload
+Preconditions:
+User has a company email address and an HCP contact list in CSV or XLSX format.
+Main Flow (Sunny Day):
+User navigates to MedReach AI and clicks Create Account. User enters email, password, company name, and industry type. Firebase Authentication creates the user credential; system creates a new company document in Firestore. User is assigned the Admin role and redirected to the Dashboard. User navigates to Upload Data, drags a CSV file onto the upload zone. System uploads to Firebase Storage, parses first rows for preview, and presents a column mapping interface. User confirms column assignments and clicks Begin Cleaning. Cleaning pipeline starts.
+Rainy Day Scenarios:
+● File exceeds 50MB size limit → upload rejected before storage; user is prompted to split file or reduce size.
+● File format unsupported (e.g., .txt, .docx) → upload rejected; user is shown supported formats.
+● File is corrupt or unparseable → upload accepted but parsing fails; user is shown the specific parse error (e.g., "row 47: unclosed quote") and offered a downloadable error log.
+● Email domain already registered as an existing tenant → system suggests joining existing account rather than creating duplicate; user can request access from existing admin.
+● Network drops during upload → resumable upload continues on reconnection; if not, user sees clear "upload failed" message with retry option.
+● Firebase Auth is unavailable → user sees maintenance banner; login and registration are blocked until service is restored; existing sessions remain valid via JWT.
+● Firestore write fails after Storage upload succeeds → orphaned file is cleaned up by scheduled cleanup job; user is prompted to retry.
+
+
+Use Case 2: Data Cleaning Review
+Preconditions:
+HCP file uploaded, column mapping confirmed, cleaning pipeline has run.
+Main Flow (Sunny Day):
+User opens Data Review screen with four tabs: PII Flags, Duplicates, Outliers, Validation Errors. User resolves each tab by anonymizing, merging, or overriding flags. Data quality score updates in real time. When all tabs are clear, user clicks Proceed to Segmentation.
+Rainy Day Scenarios:
+● NPI Registry API is unavailable during validation → records marked as "unvalidated pending"; user can proceed with cleaning and re-run validation later; failed records are queued for automatic retry.
+● Presidio detects PII in a required field the user cannot remove (e.g., name column) → user is offered anonymization (hash) rather than deletion; decision is logged in audit trail.
+● Duplicate records span multiple uploads by different team members → system surfaces cross-upload duplicates and requires admin resolution.
+● User accidentally marks all outliers for removal in bulk → confirmation dialog requires explicit acknowledgment; action is reversible from the audit log within 24 hours.
+● Pipeline crashes mid-processing → partial results are saved; user is shown "processing incomplete" with option to resume; error is logged for engineering review.
+● User attempts export before resolving all High-severity flags → export is blocked; user is directed to the specific unresolved flags.
+
+
+Use Case 3: Segmentation, Natural Language Query, and AI Analysis
+Preconditions:
+Data review is complete. Cleaned dataset is ready. At least 50 records in the approved dataset.
+Main Flow (Sunny Day):
+User clicks Run Segmentation. System vectorizes records and clusters via scikit-learn K-Means. Llama 3 generates plain-language segment labels. User asks a natural language question in the query interface (e.g., "How many oncologists are in the Northeast?"). Llama 3 translates the question to a pandas filter and returns the result. User views AI-generated summaries and compliance flags on any output.
+Rainy Day Scenarios:
+● Dataset too small (under 50 records) → automated segmentation skipped; system offers manual grouping instead.
+● Ollama service unavailable → user sees "AI temporarily unavailable" banner; non-AI features (data review, export) remain functional; queued AI jobs auto-resume on recovery.
+● Natural language query is ambiguous ("show me the best doctors") → AI asks clarifying question rather than guessing.
+● Query returns 0 results → user sees empty state with suggested query modifications, not a blank screen.
+● Query is malformed by AI translation → system displays generated filter for user review before executing; user can edit or reject.
+● AI-generated content triggers compliance flags → content is quarantined until reviewed; user cannot export until resolved or overridden with justification.
+
+
+Use Case 4: Export & Downstream Integration
+Preconditions:
+Data review and (if applicable) compliance review complete.
+Main Flow (Sunny Day):
+User navigates to Export screen, selects Clean CSV / Campaign Asset Package / PDF Audit Report. System generates files; download links are presented and expire in 24 hours. Export event is logged with actor and timestamp.
+Rainy Day Scenarios:
+● Export exceeds 100MB → user is offered zipped download or chunked file split.
+● PDF generation fails mid-render → user sees "report generation failed, retry"; error is logged.
+● User's Viewer role attempts export → action is blocked at the RBAC layer; user sees permission-denied message with instruction to request access from admin.
+● Downstream CRM import fails after export → not MedReach's failure, but export includes format documentation and troubleshooting guide.
+● Firebase Storage quota exceeded (tenant limit) → oldest exports are auto-deleted after 24-hour window; user is warned when approaching quota.
+
+
+Use Case 5: Administrative Actions & Team Management
+Preconditions:
+User has Admin role within the tenant.
+Main Flow (Sunny Day):
+Admin invites team member by email, assigns role (Admin / Editor / Viewer). Invitation email is sent via Firebase. Recipient accepts and is provisioned into the tenant.
+Rainy Day Scenarios:
+● Invited email is already registered under a different tenant → system blocks invite; recipient must leave existing tenant first.
+● Admin attempts to delete their own admin account → blocked unless another admin exists in the tenant.
+● Admin attempts bulk delete of records → confirmation dialog + admin password re-entry required for destructive operations.
+● Admin loses access (locked out) → account recovery via verified backup email + support review; no direct data access without ownership proof.
+
+
+4.2. User Characteristics
+MedReach AI is designed for four specific user types within pharmaceutical and medical device companies. Each has distinct needs and pain points.
+
+
+User Segment
+	Age / Gender
+	Role Description
+	Marketing Manager / Director (Primary User)
+	30–48, Mixed gender
+	Day-to-day operator. Uploads HCP data, runs cleaning, reviews flags, queries the dataset in natural language, and exports results. Non-technical — needs the full workflow completable without writing code. Success is measured by time saved compared to manual spreadsheet work.
+	Sales Operations Lead (Secondary User)
+	30–50, Mixed gender
+	Uses the analyzed dataset to align field sales rep territories with segmentation output. Primary concern is data accuracy and CRM format compatibility. Cares most about NPI validation and geographic segment data.
+	Data Analyst / IT Administrator (Compliance User)
+	28–45, Mixed gender
+	Reviews cleaning results, manages RBAC assignments, validates compliance flags before export, and monitors platform usage. Cares about audit logs, non-functional requirements, and vendor security posture.
+	Marketing Agency Partner (External User)
+	25–45, Mixed gender
+	Contracted agencies receiving HCP data exports from pharma clients. Need data that arrives standardized and validated for immediate use in their tools. Typically accesses the platform with Editor or Viewer permissions under the client account.
+	
+
+4.3. User Interface
+The application is desktop-first, built on React with Tailwind CSS. A persistent left-side navigation panel is visible to all authenticated users. High-fidelity wireframes will be developed in the upcoming UX deliverable, covering both happy paths and error/recovery states as required by the architecture review.
+
+
+Login and Registration Screen:
+A clean centered card on a dark navy background. Email and password fields, Login, forgot password link, Create Account option. Registration collects email, password, company name, industry type. Inline field validation. Firebase handles all credentials.
+Dashboard:
+Post-login home screen with three summary metric cards — most recent upload row count, current data quality score, and open compliance flag count. A chart shows quality trends across recent uploads. Recent Activity feed lists the last ten team actions.
+Upload Data Screen:
+Drag-and-drop zone with format note. After upload: scrollable preview with AI-suggested column labels the user can override. Required columns must be mapped before Begin Cleaning is enabled.
+Data Review Screen:
+Tab-based layout: PII Flags, Duplicates, Outliers, Validation Errors. Each tab shows count badge and quality score progress bar.
+Natural Language Query Interface:
+Prominent search-style input at the top of the workspace. Users type questions in plain English. Results appear as a filtered table with the underlying generated query displayed for transparency and edit.
+Segmentation Screen:
+Grid of segment cards with plain-language names, record counts, top specialty badges, and geographic focus. Clicking a card opens a detail panel.
+Analytics Dashboard:
+Interactive charts — segment breakdown, geographic heat map, data quality trend, engagement history. All charts are drillable back to the underlying records.
+Export Screen:
+Three export option cards: Clean CSV, Campaign Asset Package, PDF Audit Report. Each shows contents, format, and estimated size. Export history table with 24-hour re-download window.
+________________
+
+
+5. Development Environment
+Developer Tools:
+● VS Code (latest stable) — primary IDE
+● Node.js 20 LTS — JavaScript runtime
+● Python 3.11+ — backend runtime
+● Git 2.x / GitHub — version control
+● Postman — API endpoint testing
+● Chrome DevTools — frontend debugging
+● Firebase CLI 13.x — Firebase management and emulator suite
+● Firebase Emulator Suite — local Firestore and Auth
+● Ollama 0.3+ — local AI runtime
+
+
+Content-Generation Tools:
+● Figma — UI wireframe and high-fidelity mockup design
+● Mermaid.js — flow diagram generation
+● ReportLab 4.x — programmatic PDF generation
+● pandas — synthetic test dataset generation
+
+
+Data Tools:
+● Firebase Firestore — primary cloud NoSQL database
+● Firebase Storage — file storage
+● Firebase Emulator Suite — local dev replica
+● Microsoft Presidio 2.x — PII detection
+● scikit-learn 1.4+ — outlier detection, clustering, segmentation
+● CMS NPI Registry (public REST API)
+● CMS Open Payments Database (public CSV)
+● FDA Warning Letter Database (public)
+
+
+3rd-Party Dependencies and APIs:
+Dependency
+	Purpose
+	License
+	Min Version
+	Meta Llama 3 8B
+	Segment labeling, natural language query, campaign copy
+	Meta Llama 3 Community License
+	3.0
+	Mistral 7B
+	Structured JSON output for compliance flagging
+	Apache 2.0
+	0.3
+	Microsoft Presidio
+	PII detection and anonymization
+	Apache 2.0
+	2.2
+	Hugging Face Transformers
+	NLP model support for classification
+	Apache 2.0
+	4.40
+	spaCy
+	NLP preprocessing pipeline
+	MIT
+	3.7
+	scikit-learn
+	Outlier detection and clustering
+	BSD-3
+	1.4
+	Firebase Authentication
+	User authentication and JWT
+	Google Firebase ToS
+	SDK 10.x
+	Firebase Firestore
+	Cloud NoSQL database
+	Google Firebase ToS
+	SDK 10.x
+	Firebase Storage
+	File storage
+	Google Firebase ToS
+	SDK 10.x
+	CMS NPI Registry API
+	Physician record validation
+	Public Domain (US Government)
+	REST v2.1
+	ReportLab
+	PDF generation
+	BSD / Commercial
+	4.0
+	pandas
+	Data processing and CSV export
+	BSD-3
+	2.0
+	________________
+
+
+6. System Architecture
+6.1. High-Level Architecture Diagram
+The following diagram illustrates the MedReach AI system architecture at a component level. It shows the four primary layers — Client, API Gateway, Service, and Data — and the relationships between application components, AI services, databases, and external APIs.
+  
+
+Data flows from the React frontend through the FastAPI gateway (which enforces authentication, rate limiting, and tenant routing) into one of four service modules. All AI inference happens within the platform boundary — no HCP data is transmitted to external LLM APIs. The Data Layer enforces multi-tenant isolation via Firestore security rules.
+
+
+6.2. Multi-Tenant Security Model & RBAC
+Multi-tenant isolation is one of MedReach AI's most critical architectural decisions. The platform serves multiple pharmaceutical and medical device companies through a single instance. Under no circumstance may one tenant see or query another tenant's data. Isolation is enforced at three layers: the Firestore security rules layer (database-level), the FastAPI middleware layer (application-level), and the AI service layer (inference context isolation).
+  
+
+
+
+Isolation Enforcement Layers:
+● Layer 1: Database layer: Firestore security rules validate the requesting user's tenant ID against every read and write operation. Cross-tenant queries are impossible at the database level, even if application code contains a bug.
+● Layer 2: Application layer: FastAPI middleware extracts the tenant ID from the JWT on every request and scopes all database operations to that tenant. Attempts to specify a different tenant ID in the request body are rejected.
+● Layer 3: AI layer: Each Ollama inference request runs in an isolated context. Model state is not shared between tenants. Prompts do not include cross-tenant data. This prevents information leakage through model behavior.
+
+
+Role-Based Access Control (RBAC):
+Every user within a tenant is assigned exactly one role: Admin, Editor, or Viewer. Roles are encoded as Firebase Auth custom claims on the user's JWT, which allows Firestore security rules to enforce permissions without additional database lookups.
+
+
+Role Permission Categories:
+● Category 1 — Data Management: upload files, resolve flags, delete records, invite/remove users. Requires Admin.
+● Category 2 — Data Analysis: run cleaning pipeline, run segmentation, execute natural language queries, view AI-generated insights. Requires Editor or Admin.
+● Category 3 — Data Export: generate CSV/PDF exports, download campaign packages. Requires Editor or Admin. Destructive operations (bulk delete) require Admin.
+● Category 4 — Read-Only Access: query dataset, view segments, view dashboards, view audit log. Available to Viewer, Editor, and Admin.
+
+
+6.3. Data Flow Pipeline
+The following diagram illustrates the end-to-end data flow through MedReach AI, from initial CSV upload through phased processing to export. Each stage has a documented performance target.
+  
+
+
+
+6.4. Firestore Document Structure
+MedReach AI uses Firebase Firestore (NoSQL) rather than a relational database. Data architecture is represented through JSON endpoint structures. All data is scoped under a company document path to enforce multi-tenant isolation at the security rules level (see Section 6.2).
+
+
+companies/{companyId}
+{
+  "companyId":    "string    // auto-generated Firestore document ID",
+  "companyName":  "string",
+  "industryType": "string    // pharmaceutical | medical_device",
+  "plan":         "string    // free | standard | enterprise",
+  "createdAt":    "timestamp",
+  "settings": {
+    "brandVoice":    "string  // optional AI generation tone guidance",
+    "notifications": "boolean"
+  }
+}
+
+
+companies/{companyId}/users/{userId}
+{
+  "userId":      "string    // Firebase Auth UID",
+  "email":       "string",
+  "displayName": "string",
+  "role":        "string    // admin | editor | viewer",
+  "createdAt":   "timestamp",
+  "lastLogin":   "timestamp"
+}
+
+
+companies/{companyId}/uploads/{uploadId}
+{
+  "uploadId":      "string",
+  "uploadedBy":    "string   // Firebase Auth UID",
+  "fileName":      "string",
+  "storagePath":   "string",
+  "rowCount":      "number",
+  "columnMapping": "map",
+  "status":        "string   // uploading | processing | review | complete | failed",
+  "qualityScore":  "number",
+  "createdAt":     "timestamp",
+  "completedAt":   "timestamp"
+}
+
+
+companies/{companyId}/uploads/{uploadId}/hcp_records/{recordId}
+{
+  "npi":           "string   // 10-digit NPI number",
+  "firstName":     "string",
+  "lastName":      "string",
+  "specialty":     "string",
+  "practiceState": "string",
+  "email":         "string",
+  "phone":         "string",
+  "npiStatus":     "string   // active | inactive | invalid | unvalidated",
+  "flags":         "array    // [{ type, reason, severity, field }]",
+  "segmentId":     "string",
+  "status":        "string"
+}
+
+
+companies/{companyId}/audit_log/{eventId}
+{
+  "eventId":   "string",
+  "actor":     "string   // Firebase Auth UID",
+  "action":    "string   // upload | clean | query | export | user_invite | ...",
+  "target":    "string   // affected resource",
+  "timestamp": "timestamp",
+  "metadata":  "map"
+}
+________________
+
+
+7. Non-Functional Requirements
+This section documents system qualities beyond feature functionality — performance, scalability, reliability, and maintainability. These characteristics are essential for enterprise software and were absent from the original design document.
+
+
+7.1. Performance Expectations (Per Stage)
+The following performance targets are documented per pipeline stage rather than as a single overall response time. Each stage has a measurable objective and a documented rationale.
+
+
+Pipeline Stage
+	Target Time
+	Dataset Assumption
+	Rationale
+	File upload & column detection
+	≤ 5 seconds
+	10K rows, 50MB max
+	User expects near-instant feedback after drag/drop; parsing is CPU-light.
+	PII detection (Presidio)
+	≤ 15 seconds
+	10K rows
+	Presidio is regex + NER; O(n) per row; benchmarked at ~600 rows/sec.
+	Duplicate detection
+	≤ 10 seconds
+	10K rows
+	Hash-based matching on NPI + email + name; O(n).
+	NPI Registry validation
+	≤ 60 seconds
+	10K rows
+	API rate limit is 20 req/sec; async batching required. Cached hits reduce time significantly.
+	Outlier detection
+	≤ 8 seconds
+	10K rows
+	scikit-learn Isolation Forest; well-benchmarked at this scale.
+	Segmentation (K-Means + labeling)
+	≤ 45 seconds
+	10K rows
+	Clustering is fast; label generation via Llama 3 is the bottleneck (~3s per segment).
+	Natural language query
+	≤ 8 seconds
+	Any query on cleaned data
+	Llama 3 translates query to pandas filter; filter execution is <100ms.
+	AI analysis / summary
+	≤ 30 seconds
+	Per summary
+	Llama 3 generation on structured input; longest single AI inference in the pipeline.
+	Dashboard render
+	≤ 2 seconds
+	Any completed dataset
+	Data pre-aggregated at cleaning time; Recharts render is client-side.
+	CSV export
+	≤ 15 seconds
+	10K rows
+	pandas write + Firebase Storage upload.
+	PDF audit report generation
+	≤ 30 seconds
+	Any completed dataset
+	ReportLab layout is CPU-bound but predictable.
+	
+
+7.2. Scalability & Stress Scenarios
+The following scenarios document expected system behavior under enterprise workloads that exceed the single-user reference case. These help clarify how the architecture would need to scale beyond capstone scope.
+
+
+Scenario 1 — Concurrent Uploads:
+Multiple tenants uploading 100K+ row files simultaneously. Each upload runs its cleaning pipeline as a background job. FastAPI is stateless and horizontally scalable; adding worker processes increases concurrent capacity. Firestore handles concurrent writes via document-level transactions.
+
+
+Scenario 2 — Concurrent AI Inference:
+Multiple tenants running natural language queries and AI analysis simultaneously. Ollama inference is sequential per model instance. Solution: horizontal scaling of Ollama replicas behind a load balancer; requests distributed round-robin. Capstone scope: single Ollama instance; enterprise scope: 3–5 replicas per production region.
+
+
+Scenario 3 — Large Dataset Export During Active Ingestion:
+Tenant exports 1M-row CSV while a second team member uploads a new file. Export is a read-only operation on completed data; upload writes to a new upload document. No contention. Firebase Storage handles both operations concurrently.
+
+
+Scenario 4 — NPI Registry API Rate Limit Exhaustion:
+Multiple tenants validating large datasets in parallel could exceed the 20 req/sec NPI API limit. Mitigation: shared platform-wide rate limiter with fair queuing; per-tenant validation caching so repeated NPIs across tenants only hit the API once.
+
+
+Scenario 5 — Cold Start / First Access:
+Ollama model load time on cold start is 30-60 seconds. Mitigation: keep-alive on Ollama container prevents cold starts during business hours; first query at 3am may see slower response.
+
+
+7.3. Reliability, Availability & Backup
+Availability Target:
+● 99.5% uptime (approximately 3.6 hours downtime per month) for capstone scope; commercial target 99.9%.
+● Planned maintenance windows: Sundays 2am–4am ET; users are notified 72 hours in advance.
+● Firebase services provide their own SLAs (99.99% Firestore, 99.95% Auth) — MedReach uptime is bounded by these.
+
+
+Backup Strategy:
+● Firestore automatic daily backups retained 30 days (Google Cloud managed).
+● Firebase Storage exports auto-purge after 24 hours; source files retained 30 days for reprocessing.
+● Audit log retained indefinitely for compliance.
+● Tenant self-service data export available at any time via existing CSV export feature.
+
+
+Failure Mode Handling:
+● Ollama unavailable → non-AI features remain functional; AI features queue jobs and resume on recovery.
+● NPI Registry API unavailable → validation marked pending; automatic retry on recovery.
+● Firestore write failure → operation retried with exponential backoff; user notified after 3 failures.
+● Storage upload failure → user prompted to retry; partial upload data cleaned up.
+
+
+7.4. Maintainability
+● Code style enforced via ESLint (frontend) and Black + Flake8 (backend). CI blocks non-conforming PRs.
+● All external service integrations (Firebase, Ollama, NPI Registry) are abstracted behind interface layers to allow swapping without touching business logic.
+● All environment variables (API endpoints, credentials, feature flags) are externalized to .env — no config baked into code.
+● Every service module has an integration test that validates the public interface, allowing internal refactoring without breaking downstream callers.
+● Deployment is automated via GitHub Actions — no manual production deploys.
+________________
+
+
+8. Production Plans
+8.1. Code Review Plan
+Requisites for Review:
+● All functionality described in the feature ticket is complete and working in the development environment
+● Feature has been tested on Chrome and Firefox at minimum
+● No console errors or unhandled exceptions in the tested build
+● All functions and components are commented with description of purpose and parameters
+● Code meets style standards: ESLint for frontend, Black and Flake8 for backend
+● Both team members test all code BEFORE Build Reviews
+● All completed work present on the development branch
+
+
+The day before Build Reviews: 1–2 hours priority review. Both team members test all code from the work week. 15–30 minute complete/incomplete discussion.
+
+
+8.2. Integration Plan
+Source Control:
+Git feature-branch workflow (Gitflow) with three permanent branches. All work happens on feature branches; PRs require peer review before merge.
+
+
+Branch
+	Purpose and Merge Rules
+	main
+	Production-ready code only. Never committed to directly. Updated only via PR from staging after Build Review sign-off.
+	development
+	Primary working branch. All feature branches merge here after peer review.
+	staging
+	Pre-production integration branch. Development features merge here before end-of-month promotion to main.
+	
+
+Feature Branch Rules:
+● New branch per ticket: feature/[ticket-id]-[short-description]
+● Feature branches merged into development via PR after at least one peer review
+● Feature branches deleted after merge
+● Hotfix branches (hotfix/[description]) branch from main and merge to both main and development
+
+
+8.3. Testing Plans
+Weekly Code Reviews:
+● Day before Build Reviews with Mentor: 1–2 hours priority one
+● Both team members test all code from the work week
+● 15–30 minute complete/incomplete discussion
+
+
+Bug Database:
+● Maintained continuously via GitHub Issues
+● Labels: bug, priority-high, priority-medium, priority-low
+● Every bug logged with description, steps to reproduce, expected vs. actual, severity
+
+
+Outside Testing:
+● Month 4 (Software Integration): 5 external testers
+● Cross-testing with other CS and GD teams monthly
+● Testing Report compiled with scenarios, findings, surprises, planned solutions
+________________
+
+
+9. Folder Hierarchy
+Where files are stored in the MedReach AI project. Library folders (node_modules, __pycache__, .venv) excluded.
+
+
+medreach-ai/
+├── frontend/                       ← React + Vite application
+│   ├── public/                     ← Static assets
+│   └── src/
+│       ├── components/             ← Reusable UI components
+│       │   ├── auth/               ← Login, registration
+│       │   ├── dashboard/          ← Metric cards, charts
+│       │   ├── upload/             ← Drop zone, mapper
+│       │   ├── review/             ← PII, duplicates, outliers
+│       │   ├── query/              ← NL query interface
+│       │   ├── segments/           ← Segment cards, detail panel
+│       │   ├── exports/            ← Export cards, history
+│       │   ├── team/               ← Invite form, RBAC editor
+│       │   └── shared/             ← Buttons, modals, nav
+│       ├── pages/                  ← Route page components
+│       ├── hooks/                  ← Custom React hooks
+│       ├── context/                ← React Context providers
+│       ├── services/               ← API call functions
+│       └── utils/                  ← Helpers, constants
+│
+├── backend/                        ← FastAPI Python server
+│   ├── app/
+│   │   ├── api/routes/             ← FastAPI route handlers
+│   │   │   ├── uploads.py
+│   │   │   ├── cleaning.py
+│   │   │   ├── query.py            ← Natural language query
+│   │   │   ├── segmentation.py
+│   │   │   ├── analysis.py         ← AI analysis & summaries
+│   │   │   └── exports.py
+│   │   ├── core/                   ← Auth middleware, tenant routing
+│   │   ├── services/
+│   │   │   ├── cleaning/           ← pandas, Presidio, NPI
+│   │   │   ├── segmentation/       ← scikit-learn, Llama 3
+│   │   │   ├── query/              ← NL → pandas translation
+│   │   │   ├── analysis/           ← Summaries, compliance
+│   │   │   └── inference/          ← Ollama client wrapper
+│   │   ├── models/                 ← Pydantic schemas
+│   │   └── utils/                  ← Shared helpers
+│   ├── tests/                      ← pytest tests
+│   ├── data/                       ← Local reference CSVs
+│   └── main.py
+│
+├── .github/workflows/              ← CI/CD
+├── .gitignore
+└── README.md
+________________
+
+
+AI Data Sets
+MedReach AI uses multiple AI components. For each, the plain-language explanation is followed by the feature input/output table. MedReach uses pre-existing open source models rather than training custom models. Datasets described are for validation and rules-tuning.
+
+
+Model 1: PII Detection — Microsoft Presidio
+● The model looks at text values in each record field (name, email, phone, address, free-text)
+● It learns patterns such as SSN formats, credit card structures, and medical record conventions using pre-trained NER and regex-based entity recognition
+● It outputs a detected entity type and character position span per field scanned
+
+
+Feature Vector
+	Result (data type)
+	Data Set (link)
+	Data Cleaning Needed
+	Any Notes
+	Raw text string per field (string)
+	Detected PII entity type (string) + span (int, int)
+	Pre-trained Presidio models; supplemented with synthetic HCP records from NPI registry structure
+	No cleaning — operates on raw text
+	Used in production by Microsoft Azure; 50+ PII types supported
+	
+
+Model 2: Outlier Detection — scikit-learn Isolation Forest
+● The model looks at numerical and categorical feature vectors derived from each HCP record
+● It learns patterns of typical NPI claims volume ranges per specialty and expected geographic distributions
+● It outputs an anomaly score per record; low scores are flagged
+
+
+Feature Vector
+	Result (data type)
+	Data Set (link)
+	Data Cleaning Needed
+	Any Notes
+	Specialty code (int), state (int), claims volume (float), email valid (bool), NPI active (bool)
+	Anomaly score (float) + outlier flag (bool)
+	Synthetic HCP datasets from CMS NPI Registry structure at cms.gov/medicare/provider-enrollment-and-certification
+	Encode categorical fields; normalize numeric; convert booleans
+	Unsupervised — no labels; contamination set at 0.05
+	
+
+Model 3: Physician Segmentation — scikit-learn K-Means / DBSCAN
+● The model looks at multi-dimensional vectors representing specialty, region, practice type, and claims activity
+● It learns natural groupings such as cardiologists in urban Southeast markets
+● It outputs a cluster ID per record based on centroid proximity
+
+
+Feature Vector
+	Result (data type)
+	Data Set (link)
+	Data Cleaning Needed
+	Any Notes
+	Specialty code (int), state (int), practice type (int), claims volume (float), urban/rural classification (int)
+	Cluster ID (int) + Llama 3 label (string)
+	CMS NPI Registry (7M+ records) at download.cms.gov/nppes
+	Label-encode categoricals; normalize numerics; exclude records with 2+ missing features
+	K-Means default; DBSCAN for irregular clusters; K via elbow method
+	
+
+Model 4: Natural Language Query + Campaign Copy — Meta Llama 3 8B (Ollama)
+● The model looks at a structured prompt containing the user's query, dataset schema, and (for campaign generation) segment label, campaign goal, and channel
+● It learns patterns from pre-training on medical and marketing text corpora; no fine-tuning is performed — the prompt engineering layer controls output quality
+● For NL query: outputs a pandas filter expression validated before execution. For campaign copy: outputs structured JSON with subject line, body, and CTA
+
+
+Feature Vector
+	Result (data type)
+	Data Set (link)
+	Data Cleaning Needed
+	Any Notes
+	User query text (string) + dataset schema (map). For campaign: segment label, description, goal, channel, brand voice, compliance constraints
+	Pandas filter (string) OR subject line + body + CTA (string, string, string)
+	Pre-trained Meta Llama 3 8B at meta.ai/llama — no custom training required
+	Prompt inputs validated and sanitized by FastAPI before submission
+	Runs locally via Ollama; prompt engineering layer controls output shape
+	
+
+Model 5: Off-Label Compliance Classification — Hugging Face DistilBERT
+● The model looks at sentence-level text segments from AI-generated content
+● It learns off-label language patterns by training on labeled examples from FDA Warning Letter enforcement records
+● It outputs a violation probability and binary classification at 0.75 confidence threshold
+
+
+Feature Vector
+	Result (data type)
+	Data Set (link)
+	Data Cleaning Needed
+	Any Notes
+	Tokenized sentence (token IDs int, attention mask int)
+	Violation (bool) + confidence (float) + type (string)
+	FDA Warning Letter Database at fda.gov/inspections-compliance-enforcement-and-criminal-investigations/compliance-actions-and-activities/warning-letters
+	Sentence-tokenize; label off-label 1, compliant 0; balance via oversampling
+	Thousands of enforcement letters available covering multiple drug categories
