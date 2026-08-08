@@ -1,14 +1,37 @@
-import { useState, useRef, useEffect, type ReactNode } from 'react'
+import { useState, useRef, useEffect, createContext, useContext, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
+
+type Role = 'super-admin' | 'admin' | 'editor' | 'viewer'
+
+const ROLE_META: Record<Role, { label: string; color: string; bg: string; description: string }> = {
+  'super-admin': { label: 'Super Admin', color: '#fff',     bg: '#7B2D8B', description: 'Full platform access across all organizations' },
+  'admin':       { label: 'Admin',       color: '#1B3A6B', bg: '#BEE3F8', description: 'Full access within your organization' },
+  'editor':      { label: 'Editor',      color: '#744210', bg: '#FEEBC8', description: 'Upload, clean, and review data — no export or team mgmt' },
+  'viewer':      { label: 'Viewer',      color: '#1B5E3B', bg: '#C6F6D5', description: 'Read-only access to reports and dashboards' },
+}
+
+// Which nav items each role can see
+const ROLE_NAV: Record<Role, string[]> = {
+  'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','export','team','audit-log','settings','org-management'],
+  'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','export','team','audit-log','settings'],
+  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics'],
+  'viewer':      ['dashboard','data-review','data-heatmap','query','analytics'],
+}
+
+const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
+  role: 'admin',
+  setRole: () => {},
+})
+const useRole = () => useContext(RoleContext)
 
 type Screen =
   | 'login' | 'register' | 'forgot-password' | 'reset-password' | 'mfa'
   | 'dashboard' | 'upload' | 'column-mapping'
   | 'data-review' | 'query' | 'segments' | 'campaign-generator'
   | 'compliance-review' | 'analytics' | 'data-heatmap'
-  | 'export' | 'team' | 'audit-log' | 'settings'
+  | 'export' | 'team' | 'audit-log' | 'settings' | 'org-management'
 
 type ToastType = 'success' | 'warning' | 'error' | 'info'
 
@@ -382,42 +405,63 @@ function Modal({ title, children, onClose, width = 480 }: { title: string; child
 
 // ─── SIDEBAR ─────────────────────────────────────────────────────────────────
 
-const NAV_ITEMS = [
-  { id: 'dashboard', label: 'Dashboard', icon: Icon.dashboard },
-  { id: 'upload', label: 'Upload Data', icon: Icon.upload },
-  { id: 'data-review', label: 'Data Review', icon: Icon.shield, badge: 12 },
-  { id: 'data-heatmap', label: 'Data Heatmap', icon: Icon.chart },
-  { id: 'query', label: 'Query', icon: Icon.query },
-  { id: 'segments', label: 'Segments', icon: Icon.users },
-  { id: 'campaign-generator', label: 'Campaigns', icon: Icon.send },
-  { id: 'analytics', label: 'Analytics', icon: Icon.chart },
-  { id: 'export', label: 'Export', icon: Icon.download },
-  { id: 'team', label: 'Team', icon: Icon.userPlus },
-  { id: 'audit-log', label: 'Audit Log', icon: Icon.audit },
-  { id: 'settings', label: 'Settings', icon: Icon.gear },
-] as const
+const ALL_NAV_ITEMS = [
+  { id: 'dashboard',          label: 'Dashboard',      icon: Icon.dashboard },
+  { id: 'upload',             label: 'Upload Data',    icon: Icon.upload },
+  { id: 'data-review',        label: 'Data Review',    icon: Icon.shield, badge: 12 },
+  { id: 'data-heatmap',       label: 'Data Heatmap',   icon: Icon.chart },
+  { id: 'query',              label: 'Query',          icon: Icon.query },
+  { id: 'segments',           label: 'Segments',       icon: Icon.users },
+  { id: 'campaign-generator', label: 'Campaigns',      icon: Icon.send },
+  { id: 'analytics',          label: 'Analytics',      icon: Icon.chart },
+  { id: 'export',             label: 'Export',         icon: Icon.download },
+  { id: 'team',               label: 'Team',           icon: Icon.userPlus },
+  { id: 'audit-log',          label: 'Audit Log',      icon: Icon.audit },
+  { id: 'settings',           label: 'Settings',       icon: Icon.gear },
+  // Super-admin only
+  { id: 'org-management',     label: 'Organizations',  icon: Icon.shield },
+]
+
+const DEMO_USERS: Record<Role, { name: string; initials: string; org: string }> = {
+  'super-admin': { name: 'Collin (Owner)',  initials: 'CO', org: 'MedReach AI' },
+  'admin':       { name: 'Jane Doe',        initials: 'JD', org: 'Acme Pharma' },
+  'editor':      { name: 'Mark Chen',       initials: 'MC', org: 'Acme Pharma' },
+  'viewer':      { name: 'Sarah Kim',       initials: 'SK', org: 'Acme Pharma' },
+}
 
 function Sidebar({ current, onNavigate, collapsed, onToggle }: {
   current: Screen; onNavigate: (s: Screen) => void; collapsed: boolean; onToggle: () => void
 }) {
+  const { role } = useRole()
+  const allowed = ROLE_NAV[role]
+  const navItems = ALL_NAV_ITEMS.filter(i => allowed.includes(i.id))
+  const user = DEMO_USERS[role]
+  const meta = ROLE_META[role]
+  const isSuperAdmin = role === 'super-admin'
+
   return (
     <div
       className="sidebar-scroll flex flex-col h-screen shrink-0 transition-all duration-200"
-      style={{ width: collapsed ? 60 : 220, background: C.navy, color: 'white', position: 'sticky', top: 0 }}
+      style={{ width: collapsed ? 60 : 220, background: isSuperAdmin ? '#3B0764' : C.navy, color: 'white', position: 'sticky', top: 0 }}
     >
       {/* Logo */}
       <div className="flex items-center gap-3 px-4 py-5 border-b border-white/10">
-        <div className="w-7 h-7 rounded-[6px] flex items-center justify-center shrink-0" style={{ background: C.teal }}>
+        <div className="w-7 h-7 rounded-[6px] flex items-center justify-center shrink-0" style={{ background: isSuperAdmin ? '#9333EA' : C.teal }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
           </svg>
         </div>
-        {!collapsed && <span className="text-[13px] font-bold tracking-wide truncate">MedReach AI</span>}
+        {!collapsed && (
+          <div>
+            <span className="text-[13px] font-bold tracking-wide">MedReach AI</span>
+            {isSuperAdmin && <p className="text-[9px] font-bold tracking-widest" style={{ color: '#C084FC' }}>PLATFORM ADMIN</p>}
+          </div>
+        )}
       </div>
 
       {/* Nav items */}
       <nav className="flex-1 py-3 px-2 flex flex-col gap-0.5">
-        {NAV_ITEMS.map(item => {
+        {navItems.map(item => {
           const active = current === item.id
           return (
             <button
@@ -447,16 +491,21 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
         })}
       </nav>
 
-      {/* User + collapse */}
+      {/* User + role chip + collapse */}
       <div className="border-t border-white/10 p-3">
         {!collapsed && (
           <div className="flex items-center gap-2 mb-2 px-1">
-            <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold" style={{ background: C.teal }}>JD</div>
+            <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
+              style={{ background: isSuperAdmin ? '#9333EA' : C.teal }}>{user.initials}</div>
             <div className="flex-1 min-w-0">
-              <p className="text-[11px] font-semibold text-white truncate">Jane Doe</p>
-              <Badge tier={1} color="info" className="scale-90 origin-left">Admin</Badge>
+              <p className="text-[11px] font-semibold text-white truncate">{user.name}</p>
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                style={{ background: meta.bg, color: meta.color }}>{meta.label}</span>
             </div>
           </div>
+        )}
+        {!collapsed && (
+          <p className="text-[9px] px-1 mb-2 truncate" style={{ color: 'rgba(255,255,255,0.4)' }}>{user.org}</p>
         )}
         <button
           onClick={onToggle}
@@ -514,12 +563,13 @@ function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: 
 
 // ─── AUTH SCREENS ─────────────────────────────────────────────────────────────
 
-function LoginScreen({ onLogin, onNavigate }: { onLogin: () => void; onNavigate: (s: Screen) => void }) {
+function LoginScreen({ onLogin, onNavigate }: { onLogin: (role: Role) => void; onNavigate: (s: Screen) => void }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [emailError, setEmailError] = useState('')
+  const [selectedRole, setSelectedRole] = useState<Role>('admin')
 
   const submit = () => {
     setError('')
@@ -533,20 +583,44 @@ function LoginScreen({ onLogin, onNavigate }: { onLogin: () => void; onNavigate:
       return
     }
     setLoading(true)
-    setTimeout(() => { setLoading(false); onLogin() }, 1200)
+    setTimeout(() => { setLoading(false); onLogin(selectedRole) }, 1200)
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center" style={{ background: C.navy }}>
-      <div className="bg-white rounded-[12px] shadow-2xl p-10 w-[420px]">
-        <div className="text-center mb-8">
-          <div className="w-12 h-12 rounded-[10px] flex items-center justify-center mx-auto mb-4" style={{ background: C.teal }}>
+    <div className="min-h-screen flex items-center justify-center" style={{ background: selectedRole === 'super-admin' ? '#3B0764' : C.navy }}>
+      <div className="bg-white rounded-[12px] shadow-2xl p-10 w-[460px]">
+        <div className="text-center mb-6">
+          <div className="w-12 h-12 rounded-[10px] flex items-center justify-center mx-auto mb-4"
+            style={{ background: selectedRole === 'super-admin' ? '#9333EA' : C.teal }}>
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
             </svg>
           </div>
           <h1 className="text-[28px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>MedReach AI</h1>
           <p className="text-[13px] mt-1" style={{ color: C.midText }}>Sign in to your account</p>
+        </div>
+
+        {/* ── ROLE PICKER (demo) ── */}
+        <div className="mb-5 p-3 rounded-[8px]" style={{ background: '#F7F9FB', border: '1px solid #EDF2F7' }}>
+          <p className="text-[10px] font-bold mb-2" style={{ color: C.midText }}>DEMO: Select role to preview</p>
+          <div className="grid grid-cols-2 gap-2">
+            {(Object.entries(ROLE_META) as [Role, typeof ROLE_META[Role]][]).map(([r, m]) => (
+              <button
+                key={r}
+                onClick={() => setSelectedRole(r)}
+                className="flex flex-col items-start p-2.5 rounded-[6px] border-2 text-left transition-all"
+                style={{
+                  borderColor: selectedRole === r ? (r === 'super-admin' ? '#9333EA' : C.corpBlue) : '#EDF2F7',
+                  background: selectedRole === r ? (r === 'super-admin' ? '#F5F3FF' : '#EBF4FA') : 'white',
+                }}
+              >
+                <div className="flex items-center gap-1.5 mb-0.5">
+                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: m.bg, color: m.color }}>{m.label}</span>
+                </div>
+                <p className="text-[9px]" style={{ color: C.midText }}>{m.description}</p>
+              </button>
+            ))}
+          </div>
         </div>
 
         {error && <Banner type="error" onClose={() => setError('')}>{error}</Banner>}
@@ -556,7 +630,7 @@ function LoginScreen({ onLogin, onNavigate }: { onLogin: () => void; onNavigate:
           <Input label="Password" type="password" placeholder="Enter your password" value={password} onChange={setPassword} required id="password" />
 
           <Btn variant="primary" onClick={submit} disabled={loading} icon={loading ? Icon.spinner : undefined} className="w-full justify-center">
-            {loading ? 'Signing in...' : 'Sign In'}
+            {loading ? 'Signing in...' : `Sign In as ${ROLE_META[selectedRole].label}`}
           </Btn>
 
           <div className="flex items-center justify-between text-[12px]">
@@ -3516,6 +3590,102 @@ function SettingsScreen({ showToast }: { showToast: (type: ToastType, message: s
 
 // ─── SCREEN TITLE MAP ─────────────────────────────────────────────────────────
 
+// ─── ORG MANAGEMENT (Super Admin only) ────────────────────────────────────────
+
+const MOCK_ORGS = [
+  { id: 'acme',    name: 'Acme Pharma',        plan: 'Enterprise', users: 14, records: 42800, status: 'active',   joined: 'Jan 2026' },
+  { id: 'novagen', name: 'NovaGen Bio',         plan: 'Pro',        users: 5,  records: 11200, status: 'active',   joined: 'Mar 2026' },
+  { id: 'rx360',   name: 'Rx360 Health',        plan: 'Pro',        users: 8,  records: 9400,  status: 'active',   joined: 'Apr 2026' },
+  { id: 'meditec', name: 'MediTec Solutions',   plan: 'Starter',    users: 2,  records: 2100,  status: 'trial',    joined: 'Jul 2026' },
+  { id: 'alpharx', name: 'AlphaRx Corp',        plan: 'Enterprise', users: 21, records: 88000, status: 'active',   joined: 'Nov 2025' },
+  { id: 'suspended', name: 'Suspended Co.',     plan: 'Starter',    users: 1,  records: 0,     status: 'suspended',joined: 'Jun 2026' },
+]
+
+function OrgManagementScreen() {
+  const [search, setSearch] = useState('')
+  const filtered = MOCK_ORGS.filter(o => o.name.toLowerCase().includes(search.toLowerCase()))
+
+  const statusColor = (s: string) => s === 'active' ? C.success : s === 'trial' ? C.warning : C.danger
+  const planColor   = (p: string) => p === 'Enterprise' ? '#7B2D8B' : p === 'Pro' ? C.corpBlue : C.midText
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Organization Management"
+        subtitle="Super Admin view — manage all client organizations on the platform"
+        actions={<Btn variant="primary" size="sm" icon={Icon.userPlus}>Provision New Org</Btn>}
+      />
+
+      {/* Platform summary */}
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        {[
+          { label: 'Total Orgs',      value: MOCK_ORGS.length,                               color: C.navy    },
+          { label: 'Active',          value: MOCK_ORGS.filter(o=>o.status==='active').length, color: C.success },
+          { label: 'Total Users',     value: MOCK_ORGS.reduce((a,o)=>a+o.users,0),            color: C.corpBlue},
+          { label: 'Total Records',   value: MOCK_ORGS.reduce((a,o)=>a+o.records,0).toLocaleString(), color: C.teal },
+        ].map(s => (
+          <Card key={s.label}>
+            <p className="text-[11px]" style={{ color: C.midText }}>{s.label}</p>
+            <p className="text-[28px] font-bold mono" style={{ color: s.color }}>{s.value}</p>
+          </Card>
+        ))}
+      </div>
+
+      <Card>
+        <div className="mb-4 flex items-center gap-3">
+          <input
+            className="border border-[#CBD5E0] rounded-[6px] text-[12px] px-3 py-1.5 flex-1"
+            placeholder="Search organizations..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+        </div>
+        <table className="data-table w-full">
+          <thead>
+            <tr>
+              <th>Organization</th>
+              <th>Plan</th>
+              <th>Users</th>
+              <th>Records</th>
+              <th>Status</th>
+              <th>Joined</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(org => (
+              <tr key={org.id}>
+                <td><span className="font-semibold" style={{ color: C.navy }}>{org.name}</span></td>
+                <td><span className="text-[11px] font-bold" style={{ color: planColor(org.plan) }}>{org.plan}</span></td>
+                <td className="mono">{org.users}</td>
+                <td className="mono">{org.records.toLocaleString()}</td>
+                <td>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                    style={{ background: statusColor(org.status) + '22', color: statusColor(org.status) }}>
+                    {org.status}
+                  </span>
+                </td>
+                <td style={{ color: C.midText }}>{org.joined}</td>
+                <td>
+                  <div className="flex gap-2">
+                    <Btn variant="secondary" size="sm">Impersonate</Btn>
+                    {org.status !== 'suspended'
+                      ? <Btn variant="secondary" size="sm">Suspend</Btn>
+                      : <Btn variant="secondary" size="sm">Reinstate</Btn>
+                    }
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  )
+}
+
+// ─── SCREEN TITLES ────────────────────────────────────────────────────────────
+
 const SCREEN_TITLES: Record<Screen, string> = {
   login: 'Login', register: 'Register', 'forgot-password': 'Forgot Password',
   'reset-password': 'Reset Password', mfa: 'MFA Setup',
@@ -3524,6 +3694,7 @@ const SCREEN_TITLES: Record<Screen, string> = {
   'campaign-generator': 'Campaign Generator', 'compliance-review': 'Compliance Review',
   analytics: 'Analytics Dashboard', 'data-heatmap': 'Data Quality Heatmap',
   export: 'Export', team: 'Team Management', 'audit-log': 'Audit Log', settings: 'Settings',
+  'org-management': 'Organization Management',
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
@@ -3533,6 +3704,7 @@ const AUTH_SCREENS: Screen[] = ['login', 'register', 'forgot-password', 'reset-p
 export default function App() {
   const routerNavigate = useNavigate()
   const location = useLocation()
+  const [role, setRole] = useState<Role>('admin')
 
   // Derive current Screen from URL path (e.g. /dashboard → 'dashboard')
   const pathToScreen = (path: string): Screen => {
@@ -3545,6 +3717,14 @@ export default function App() {
   useEffect(() => {
     if (location.pathname === '/') routerNavigate('/login', { replace: true })
   }, [location.pathname, routerNavigate])
+
+  // If role changes and current screen is no longer allowed, redirect to dashboard
+  useEffect(() => {
+    const allowed = ROLE_NAV[role]
+    if (!AUTH_SCREENS.includes(screen) && !allowed.includes(screen)) {
+      routerNavigate('/dashboard', { replace: true })
+    }
+  }, [role, screen, routerNavigate])
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -3561,7 +3741,7 @@ export default function App() {
 
   const renderScreen = () => {
     switch (screen) {
-      case 'login': return <LoginScreen onLogin={() => routerNavigate('/dashboard')} onNavigate={navigate} />
+      case 'login': return <LoginScreen onLogin={(r) => { setRole(r); routerNavigate('/dashboard') }} onNavigate={navigate} />
       case 'register': return <RegisterScreen onNavigate={navigate} />
       case 'forgot-password': return <ForgotPasswordScreen onNavigate={navigate} />
       case 'dashboard': return <DashboardScreen onNavigate={navigate} />
@@ -3578,29 +3758,49 @@ export default function App() {
       case 'team': return <TeamScreen showToast={showToast} />
       case 'audit-log': return <AuditLogScreen />
       case 'settings': return <SettingsScreen showToast={showToast} />
+      case 'org-management': return <OrgManagementScreen />
       default: return <DashboardScreen onNavigate={navigate} />
     }
   }
 
   if (isAuth) {
     return (
-      <>
+      <RoleContext.Provider value={{ role, setRole }}>
         {renderScreen()}
         <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
-      </>
+      </RoleContext.Provider>
     )
   }
 
   return (
-    <div className="flex h-screen overflow-hidden" style={{ background: C.pageBg }}>
-      <Sidebar current={screen} onNavigate={navigate} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <TopBar title={SCREEN_TITLES[screen] || ''} />
-        <div className="flex-1 overflow-y-auto">
-          {renderScreen()}
+    <RoleContext.Provider value={{ role, setRole }}>
+      <div className="flex h-screen overflow-hidden" style={{ background: C.pageBg }}>
+        <Sidebar current={screen} onNavigate={navigate} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          <TopBar title={SCREEN_TITLES[screen] || ''} />
+          {/* Role switcher bar — visible while logged in for demo purposes */}
+          <div className="flex items-center gap-2 px-6 py-1.5 border-b shrink-0" style={{ background: '#F7F9FB', borderColor: '#EDF2F7' }}>
+            <span className="text-[10px] font-bold" style={{ color: C.midText }}>Viewing as:</span>
+            {(Object.entries(ROLE_META) as [Role, typeof ROLE_META[Role]][]).map(([r, m]) => (
+              <button
+                key={r}
+                onClick={() => setRole(r)}
+                className="text-[9px] font-bold px-2 py-0.5 rounded-full border transition-all"
+                style={{
+                  background: role === r ? m.bg : 'transparent',
+                  color: role === r ? m.color : C.midText,
+                  borderColor: role === r ? 'transparent' : '#CBD5E0',
+                }}
+              >{m.label}</button>
+            ))}
+            <span className="ml-auto text-[9px]" style={{ color: C.midText }}>Switch roles to preview access levels</span>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {renderScreen()}
+          </div>
         </div>
+        <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
       </div>
-      <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
-    </div>
+    </RoleContext.Provider>
   )
 }
