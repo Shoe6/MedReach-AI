@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, type ReactNode } from 'react'
+import { useNavigate, useLocation } from 'react-router-dom'
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 
@@ -385,6 +386,7 @@ const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: Icon.dashboard },
   { id: 'upload', label: 'Upload Data', icon: Icon.upload },
   { id: 'data-review', label: 'Data Review', icon: Icon.shield, badge: 12 },
+  { id: 'data-heatmap', label: 'Data Heatmap', icon: Icon.chart },
   { id: 'query', label: 'Query', icon: Icon.query },
   { id: 'segments', label: 'Segments', icon: Icon.users },
   { id: 'campaign-generator', label: 'Campaigns', icon: Icon.send },
@@ -882,35 +884,16 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   }
 
   // ── demo triggers — click zone picks one of several scenarios ─────────────
-  const DEMO_FILES = [
-    { name: 'Q2_HCP_Oncology.csv',         sizeMB: 12  },   // normal upload
-    { name: 'BadFormat_HCP_List.pdf',       sizeMB: 3   },   // wrong type
-    { name: 'Massive_NPI_Export_2026.csv',  sizeMB: 67  },   // too large
-    { name: 'Corrupted_HCP_March.csv',      sizeMB: 8   },   // parse error (triggered below)
-  ]
-  const [demoIdx, setDemoIdx] = useState(0)
-
-  const handleZoneClick = () => {
+  const triggerNormal  = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; runUpload('Q2_HCP_Oncology.csv', 12) }
+  const triggerBadType  = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; setFileName('BadFormat_HCP_List.pdf'); setUploadState('error-type') }
+  const triggerTooLarge = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; setFileName('Massive_NPI_Export_2026.csv'); setFileSize(67); setUploadState('error-size') }
+  const triggerParse    = () => {
     if (uploadState === 'uploading' || uploadState === 'processing') return
-    const demo = DEMO_FILES[demoIdx % DEMO_FILES.length]
-    setDemoIdx(i => i + 1)
-    // special-case: the "corrupted" file triggers parse error after upload
-    if (demo.name.startsWith('Corrupted')) {
-      runUpload(demo.name, demo.sizeMB)
-      // override the transition to column-mapping with a parse error instead
-      setTimeout(() => {
-        clearInterval(intervalRef.current!)
-        setUploadState('error-parse')
-      }, demo.sizeMB * 300 + 200)
-      return
-    }
-    // special-case: trigger a network drop mid-upload ~40% through
-    if (demo.name.startsWith('Massive') && demo.sizeMB <= MAX_FILE_MB) {
-      runUpload(demo.name, demo.sizeMB)
-      return
-    }
-    validateAndUpload(demo.name, demo.sizeMB)
+    runUpload('Corrupted_HCP_March.csv', 8)
+    setTimeout(() => { clearInterval(intervalRef.current!); setUploadState('error-parse') }, 8 * 300 + 200)
   }
+
+  const handleZoneClick = () => triggerNormal()
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
@@ -922,8 +905,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   }
 
   // ── demo: trigger network error manually ──────────────────────────────────
-  const triggerNetworkError = (e: React.MouseEvent) => {
-    e.stopPropagation()
+  const triggerNetworkError = () => {
     clearInterval(intervalRef.current!)
     setUploadState('error-network')
   }
@@ -952,10 +934,15 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         }
       />
 
-      {/* ── DEMO HINT ──────────────────────────────────────────────────────── */}
-      <Banner type="info">
-        <strong>Wireframe demo:</strong> Click the drop zone to cycle through upload scenarios — normal upload, wrong file type, oversized file, and malformed CSV parse error.
-      </Banner>
+      {/* ── DEMO SCENARIO BUTTONS ─────────────────────────────────────────── */}
+      <div className="mb-5 p-4 rounded-[8px] border flex flex-wrap items-center gap-3" style={{ background: '#F0F4FF', borderColor: C.corpBlue }}>
+        <span className="text-[11px] font-bold" style={{ color: C.navy }}>Test scenarios:</span>
+        <button onClick={triggerNormal}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.success,  color: 'white', borderColor: C.success  }}>✓ Normal upload</button>
+        <button onClick={triggerBadType}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.danger,   color: 'white', borderColor: C.danger   }}>✕ Wrong file type (.pdf)</button>
+        <button onClick={triggerTooLarge} className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.danger,   color: 'white', borderColor: C.danger   }}>✕ File too large (67 MB)</button>
+        <button onClick={triggerParse}    className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.warning,  color: 'white', borderColor: C.warning  }}>⚠ Parse error (corrupt CSV)</button>
+        <button onClick={triggerNetworkError} className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: '#6B7280', color: 'white', borderColor: '#6B7280'  }}>⚡ Network drop</button>
+      </div>
 
       {/* ── DROP ZONE ──────────────────────────────────────────────────────── */}
       <Card className="mb-6">
@@ -2768,18 +2755,25 @@ const FIELD_HEALTH: (typeof HEATMAP_FIELDS[number] & { completePct: number })[] 
 
 function DataHeatmapScreen() {
   const [hover, setHover] = useState<{ r: number; c: number } | null>(null)
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [filterField, setFilterField] = useState<string>('All fields')
   const [filterStatus, setFilterStatus] = useState<CellStatus | 'all'>('all')
   const [viewMode, setViewMode] = useState<'matrix' | 'field'>('matrix')
+
+  const onCellEnter = (r: number, c: number) => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current)
+    hoverTimer.current = setTimeout(() => setHover({ r, c }), 120)
+  }
+  const onCellLeave = () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current)
+    hoverTimer.current = setTimeout(() => setHover(null), 80)
+  }
 
   const cellColor = (s: CellStatus) =>
     s === 'complete' ? C.success : s === 'partial' ? C.warning : s === 'invalid' ? C.danger : '#CBD5E0'
 
   const cellLabel = (s: CellStatus) =>
     s === 'complete' ? 'Complete' : s === 'partial' ? 'Partial / truncated' : s === 'invalid' ? 'Validation failure' : 'Missing / null'
-
-  const bgOpacity = (ri: number, ci: number) =>
-    hover ? (hover.r === ri && hover.c === ci ? 1 : 0.55) : 0.8
 
   // filter which columns to show
   const visibleFields = filterField === 'All fields'
@@ -2870,26 +2864,37 @@ function DataHeatmapScreen() {
         </div>
       </Card>
 
-      {/* ── HOVER TOOLTIP PANEL ───────────────────────────────────────────── */}
-      {hover !== null && hoverField && hoverRec && hoverStatus && (
-        <div className="mb-4 p-4 rounded-[8px] border flex items-start gap-6 transition-all"
-          style={{ background: '#FAFBFC', borderColor: cellColor(hoverStatus), borderLeftWidth: 4 }}>
-          <div>
+      {/* ── HOVER TOOLTIP PANEL — sticky so it stays visible while scrolling ── */}
+      <div className="mb-4 rounded-[8px] border flex items-start gap-6"
+        style={{
+          height: 72,
+          padding: '0 16px',
+          alignItems: 'center',
+          position: 'sticky',
+          top: 0,
+          zIndex: 20,
+          background: hover && hoverField && hoverRec && hoverStatus ? '#FAFBFC' : '#F7F9FB',
+          borderColor: hover && hoverStatus ? cellColor(hoverStatus) : '#EDF2F7',
+          borderLeftWidth: hover && hoverStatus ? 4 : 1,
+          transition: 'border-color 0.15s, background 0.15s',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+        }}>
+        {hover && hoverField && hoverRec && hoverStatus ? (<>
+          <div style={{ minWidth: 140 }}>
             <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Record</p>
             <p className="text-[13px] font-bold mono" style={{ color: C.navy }}>{hoverRec.id} — {hoverRec.lastName}</p>
           </div>
-          <div>
+          <div style={{ minWidth: 90 }}>
             <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Field</p>
             <p className="text-[13px] font-bold" style={{ color: C.navy }}>{hoverField.name}</p>
           </div>
-          <div>
+          <div style={{ minWidth: 120 }}>
             <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Status</p>
-            <Badge tier={2}
-              color={hoverStatus === 'complete' ? 'approve' : hoverStatus === 'partial' ? 'warning' : 'block'}>
+            <Badge tier={2} color={hoverStatus === 'complete' ? 'approve' : hoverStatus === 'partial' ? 'warning' : 'block'}>
               {cellLabel(hoverStatus)}
             </Badge>
           </div>
-          <div>
+          <div style={{ minWidth: 160 }}>
             <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Field-level null %</p>
             <div className="flex items-center gap-2">
               <div className="progress-track" style={{ width: 80 }}>
@@ -2900,17 +2905,19 @@ function DataHeatmapScreen() {
               </span>
             </div>
           </div>
-          <div>
+          <div style={{ minWidth: 140 }}>
             <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Validation failures</p>
             <span className="mono text-[13px] font-bold" style={{ color: hoverField.invalidPct > 0 ? C.danger : C.success }}>
               {hoverField.invalidPct}% of records
             </span>
           </div>
           {hoverField.required && (
-            <Badge tier={1} color="warning" className="self-center">Required field</Badge>
+            <Badge tier={1} color="warning">Required field</Badge>
           )}
-        </div>
-      )}
+        </>) : (
+          <span className="text-[12px]" style={{ color: C.midText }}>Hover over any cell to see field details</span>
+        )}
+      </div>
 
       {/* ── VIEW: MATRIX ─────────────────────────────────────────────────── */}
       {viewMode === 'matrix' && (
@@ -2974,18 +2981,16 @@ function DataHeatmapScreen() {
                         return (
                           <td key={fi} className="px-1 py-0.5 text-center">
                             <div
-                              className="rounded-[3px] cursor-pointer transition-all inline-block"
+                              className="rounded-[3px] cursor-pointer inline-block"
                               style={{
                                 width: 36,
                                 height: 20,
                                 background: cellColor(s),
-                                opacity: bgOpacity(actualRi, fi),
-                                transform: isHovered ? 'scale(1.25)' : 'scale(1)',
-                                boxShadow: isHovered ? `0 2px 8px ${cellColor(s)}80` : 'none',
-                                transition: 'all 0.12s ease',
+                                outline: isHovered ? `2px solid ${C.navy}` : 'none',
+                                outlineOffset: 1,
                               }}
-                              onMouseEnter={() => setHover({ r: actualRi, c: fi })}
-                              onMouseLeave={() => setHover(null)}
+                              onMouseEnter={() => onCellEnter(actualRi, fi)}
+                              onMouseLeave={onCellLeave}
                             />
                           </td>
                         )
@@ -3526,7 +3531,21 @@ const SCREEN_TITLES: Record<Screen, string> = {
 const AUTH_SCREENS: Screen[] = ['login', 'register', 'forgot-password', 'reset-password', 'mfa']
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>('login')
+  const routerNavigate = useNavigate()
+  const location = useLocation()
+
+  // Derive current Screen from URL path (e.g. /dashboard → 'dashboard')
+  const pathToScreen = (path: string): Screen => {
+    const seg = path.replace(/^\//, '') || 'login'
+    return seg as Screen
+  }
+  const screen = pathToScreen(location.pathname)
+
+  // Redirect bare root to /login
+  useEffect(() => {
+    if (location.pathname === '/') routerNavigate('/login', { replace: true })
+  }, [location.pathname, routerNavigate])
+
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastId = useRef(0)
@@ -3537,12 +3556,12 @@ export default function App() {
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000)
   }
 
-  const navigate = (s: Screen) => setScreen(s)
+  const navigate = (s: Screen) => routerNavigate('/' + s)
   const isAuth = AUTH_SCREENS.includes(screen)
 
   const renderScreen = () => {
     switch (screen) {
-      case 'login': return <LoginScreen onLogin={() => setScreen('dashboard')} onNavigate={navigate} />
+      case 'login': return <LoginScreen onLogin={() => routerNavigate('/dashboard')} onNavigate={navigate} />
       case 'register': return <RegisterScreen onNavigate={navigate} />
       case 'forgot-password': return <ForgotPasswordScreen onNavigate={navigate} />
       case 'dashboard': return <DashboardScreen onNavigate={navigate} />
