@@ -967,13 +967,65 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     setTimeout(() => { clearInterval(intervalRef.current!); setUploadState('error-parse') }, 8 * 300 + 200)
   }
 
-  const handleZoneClick = () => triggerNormal()
+  // Hidden file input — opened when user clicks the drop zone
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  const handleZoneClick = () => {
+    if (uploadState === 'uploading' || uploadState === 'processing') return
+    fileInputRef.current?.click()
+  }
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const sizeMB = file.size / (1024 * 1024)
+    validateAndUpload(file.name, sizeMB)
+    // reset so the same file can be picked again
+    e.currentTarget.value = ''
+  }
+
+  // Immediate drag-over validation — checks type and size while the file
+  // is still hovering so the error banner appears before the user drops.
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    if (uploadState === 'uploading' || uploadState === 'processing') return
+    const dt = e.dataTransfer
+    // DataTransferItem gives us filename+size during dragover in most browsers
+    let name = ''
+    let sizeMB = 0
+    try {
+      if (dt.items && dt.items.length > 0) {
+        const item = dt.items[0]
+        const f = item.kind === 'file' ? (item as unknown as { getAsFile(): File | null }).getAsFile?.() : null
+        if (f) { name = f.name; sizeMB = f.size / (1024 * 1024) }
+      }
+      if (!name && dt.files && dt.files.length > 0) {
+        name = dt.files[0].name
+        sizeMB = dt.files[0].size / (1024 * 1024)
+      }
+    } catch { /* browser may restrict file access during dragover */ }
+
+    if (name) {
+      const lname = name.toLowerCase()
+      if (!lname.endsWith('.csv') && !lname.endsWith('.xlsx')) {
+        setFileName(name)
+        setUploadState('error-type')
+        return
+      }
+      if (sizeMB > MAX_FILE_MB) {
+        setFileName(name)
+        setFileSize(sizeMB)
+        setUploadState('error-size')
+        return
+      }
+    }
+    setUploadState('dragging')
+  }
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
-    setUploadState('idle')
     const file = e.dataTransfer.files[0]
-    if (!file) return
+    if (!file) { setUploadState('idle'); return }
     const sizeMB = file.size / (1024 * 1024)
     validateAndUpload(file.name, sizeMB)
   }
@@ -1032,11 +1084,19 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               : 'transparent',
             padding: '48px 32px',
           }}
-          onDragOver={e => { e.preventDefault(); setUploadState('dragging') }}
-          onDragLeave={() => setUploadState('idle') }
+          onDragOver={handleDragOver}
+          onDragLeave={() => { if (uploadState === 'dragging') setUploadState('idle') }}
           onDrop={handleDrop}
           onClick={handleZoneClick}
         >
+          {/* Hidden file input — triggered by click on the zone */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
 
           {/* ── STATE: idle / dragging ───────────────────────────────────── */}
           {(uploadState === 'idle' || uploadState === 'dragging') && (
