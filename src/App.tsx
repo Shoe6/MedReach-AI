@@ -1399,6 +1399,9 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
 
 const COLUMN_TYPES = ['NPI', 'First Name', 'Last Name', 'Specialty', 'State', 'Email', 'Phone', 'ZIP Code', 'DEA Number', 'Address', 'City', 'Country', 'Notes', 'Ignore']
 
+// These three fields MUST be mapped before scrubbing is allowed
+const REQUIRED_FIELDS = ['NPI', 'First Name', 'Last Name']
+
 // Each column has an AI-suggested type plus a confidence score (0–1)
 const INITIAL_MAPPINGS: { raw: string; suggested: string; confidence: number; required: boolean }[] = [
   { raw: 'provider_id',   suggested: 'NPI',        confidence: 0.97, required: true  },
@@ -1425,10 +1428,10 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
   const [showConfidence, setShowConfidence] = useState(true)
   const [confirmOpen, setConfirmOpen] = useState(false)
 
-  const required = ['NPI', 'First Name', 'Last Name']
+  const required = REQUIRED_FIELDS
 
   // A required column is satisfied if its label appears exactly once in mappings
-  const missingRequired = required.filter(r => mappings.filter(m => m === r).length === 0)
+  const missingRequired = REQUIRED_FIELDS.filter(r => mappings.filter(m => m === r).length === 0)
   const duplicateMappings = COLUMN_TYPES.filter(t =>
     t !== 'Ignore' && mappings.filter(m => m === t).length > 1
   )
@@ -1618,36 +1621,87 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
         </table>
       </Card>
 
-      {/* Data preview */}
-      <Card className="mb-6 overflow-x-auto">
-        <h3 className="text-[13px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>
-          Data Preview — First {PREVIEW_DATA.length} rows of 10,412
-        </h3>
-        <table className="data-table w-full border-collapse" style={{ minWidth: 900 }}>
-          <thead>
-            <tr>
-              {mappings.map((m, i) => (
-                <th key={i} style={{ background: m === 'Ignore' ? '#718096' : undefined }}>
-                  {m === 'Ignore' ? <span style={{ opacity: 0.7 }}>— ignored —</span> : m}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {PREVIEW_DATA.map((row, ri) => (
-              <tr key={ri} style={{ background: ri % 2 === 0 ? 'white' : C.lightTint }}>
-                {row.map((cell, ci) => (
-                  <td key={ci}
-                    className="mono"
-                    style={{ color: mappings[ci] === 'Ignore' ? '#A0AEC0' : C.darkText,
-                             fontStyle: mappings[ci] === 'Ignore' ? 'italic' : 'normal' }}>
-                    {cell || <span style={{ color: C.border }}>—</span>}
-                  </td>
+      {/* Data preview — scrollable, with inline column type dropdowns in header */}
+      <Card className="mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-[13px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>
+            Data Preview — First {PREVIEW_DATA.length} rows of 10,412
+          </h3>
+          <span className="text-[11px]" style={{ color: C.midText }}>← scroll horizontally to review all columns →</span>
+        </div>
+        <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 340, border: '1px solid #EDF2F7', borderRadius: 6 }}>
+          <table className="border-collapse" style={{ minWidth: 1000, width: '100%' }}>
+            <thead style={{ position: 'sticky', top: 0, zIndex: 5 }}>
+              {/* Row 1: column type dropdown (editable) */}
+              <tr style={{ background: C.navy }}>
+                {mappings.map((m, i) => (
+                  <th key={i} className="px-2 py-1.5" style={{ minWidth: 120 }}>
+                    <select
+                      value={m}
+                      onChange={e => setMapping(i, e.target.value)}
+                      title={`Change mapping for ${INITIAL_MAPPINGS[i].raw}`}
+                      className="w-full rounded-[4px] text-[10px] px-1 py-0.5 font-semibold"
+                      style={{
+                        background: m === 'Ignore' ? '#4A5568' : missingRequired.includes(m) ? '#7F1D1D' :
+                          REQUIRED_FIELDS.includes(m) ? C.teal : '#2D4A7A',
+                        color: 'white',
+                        border: 'none',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {COLUMN_TYPES.map(t => <option key={t} style={{ background: '#1B3A6B', color: 'white' }}>{t}</option>)}
+                    </select>
+                  </th>
                 ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+              {/* Row 2: raw column names */}
+              <tr style={{ background: '#2D4A7A' }}>
+                {INITIAL_MAPPINGS.map((col, i) => (
+                  <th key={i} className="px-2 py-1 text-left" style={{ minWidth: 120 }}>
+                    <span className="mono text-[9px]" style={{ color: 'rgba(255,255,255,0.6)' }}>{col.raw}</span>
+                    {col.required && <span className="ml-1 text-[8px] font-bold" style={{ color: C.warning }}>*</span>}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {PREVIEW_DATA.map((row, ri) => (
+                <tr key={ri} style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC', borderBottom: '1px solid #EDF2F7' }}>
+                  {row.map((cell, ci) => (
+                    <td key={ci} className="px-2 py-2 text-[11px] mono"
+                      style={{
+                        color: mappings[ci] === 'Ignore' ? '#A0AEC0' : C.darkText,
+                        fontStyle: mappings[ci] === 'Ignore' ? 'italic' : 'normal',
+                        background: mappings[ci] === 'Ignore' ? '#F7FAFC' : undefined,
+                        maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                      {cell || <span style={{ color: '#CBD5E0' }}>—</span>}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {/* Gating status strip below the preview */}
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          {REQUIRED_FIELDS.map(rf => {
+            const mapped = mappings.includes(rf)
+            return (
+              <div key={rf} className="flex items-center gap-1.5 text-[11px]">
+                <span style={{ color: mapped ? C.success : C.danger }}>{mapped ? '✓' : '✕'}</span>
+                <span style={{ color: mapped ? C.success : C.danger, fontWeight: 600 }}>{rf}</span>
+                <span style={{ color: C.midText }}>required</span>
+              </div>
+            )
+          })}
+          {missingRequired.length === 0 && duplicateMappings.length === 0 && (
+            <span className="ml-auto text-[11px] font-bold" style={{ color: C.success }}>✓ All required fields mapped — ready to scrub</span>
+          )}
+          {(missingRequired.length > 0 || duplicateMappings.length > 0) && (
+            <span className="ml-auto text-[11px] font-bold" style={{ color: C.danger }}>Begin Scrubbing is disabled until all required fields are mapped</span>
+          )}
+        </div>
       </Card>
 
       {/* Action bar */}
@@ -1658,7 +1712,7 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
           onClick={() => setConfirmOpen(true)}
           icon={canProceed ? Icon.checkCircle : undefined}
         >
-          Begin Cleaning
+          Begin Scrubbing
         </Btn>
         <Btn variant="ghost" onClick={() => onNavigate('upload')}>← Back to Upload</Btn>
         {!canProceed && (
@@ -1677,7 +1731,7 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
 
       {/* Confirm modal */}
       {confirmOpen && (
-        <Modal title="Confirm column mapping" onClose={() => setConfirmOpen(false)} width={520}>
+        <Modal title="Confirm mapping &amp; begin scrubbing" onClose={() => setConfirmOpen(false)} width={520}>
           <p className="text-[13px] mb-4" style={{ color: C.darkText }}>
             You are about to begin the data cleaning pipeline on <strong>10,412 records</strong> using the column assignments below.
             {overridden.size > 0 && (
