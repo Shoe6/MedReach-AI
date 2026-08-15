@@ -26,6 +26,13 @@ const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
 })
 const useRole = () => useContext(RoleContext)
 
+// Shared upload file metadata (written by UploadScreen, read by ColumnMappingScreen + ExportScreen)
+interface UploadMeta { fileName: string; fileSize: number; rowCount: number; fileType: string; uploadedAt: string }
+const UploadContext = createContext<{ meta: UploadMeta | null; setMeta: (m: UploadMeta | null) => void }>({
+  meta: null, setMeta: () => {},
+})
+const useUploadMeta = () => useContext(UploadContext)
+
 type Screen =
   | 'login' | 'register' | 'forgot-password' | 'reset-password' | 'mfa'
   | 'dashboard' | 'upload' | 'column-mapping'
@@ -896,6 +903,7 @@ const MOCK_PARSE_ERRORS: ParseError[] = [
 ]
 
 function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { setMeta } = useUploadMeta()
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [fileName,    setFileName]    = useState('')
   const [fileSize,    setFileSize]    = useState(0)   // bytes
@@ -907,13 +915,14 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const totalPct = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0
 
   // ── core upload simulator ──────────────────────────────────────────────────
-  const runUpload = (name: string, sizeMB: number) => {
+  const runUpload = (name: string, sizeMB: number, rowCount = 10412, fileType = 'CSV') => {
     const total = Math.max(1, Math.ceil(sizeMB / CHUNK_SIZE_MB))
     setFileName(name)
     setFileSize(sizeMB)
     setChunksDone(0)
     setChunksTotal(total)
     setUploadState('uploading')
+    setMeta({ fileName: name, fileSize: sizeMB, rowCount, fileType, uploadedAt: new Date().toLocaleString() })
 
     let done = 0
     intervalRef.current = setInterval(() => {
@@ -979,8 +988,14 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     const file = e.target.files?.[0]
     if (!file) return
     const sizeMB = file.size / (1024 * 1024)
-    validateAndUpload(file.name, sizeMB)
-    // reset so the same file can be picked again
+    const ext = file.name.split('.').pop()?.toUpperCase() || 'CSV'
+    if (!file.name.endsWith('.csv') && !file.name.endsWith('.xlsx')) {
+      setFileName(file.name); setUploadState('error-type'); e.currentTarget.value = ''; return
+    }
+    if (sizeMB > MAX_FILE_MB) {
+      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); e.currentTarget.value = ''; return
+    }
+    runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
     e.currentTarget.value = ''
   }
 
@@ -1027,7 +1042,14 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     const file = e.dataTransfer.files[0]
     if (!file) { setUploadState('idle'); return }
     const sizeMB = file.size / (1024 * 1024)
-    validateAndUpload(file.name, sizeMB)
+    const ext = file.name.split('.').pop()?.toUpperCase() || 'CSV'
+    if (!file.name.toLowerCase().endsWith('.csv') && !file.name.toLowerCase().endsWith('.xlsx')) {
+      setFileName(file.name); setUploadState('error-type'); return
+    }
+    if (sizeMB > MAX_FILE_MB) {
+      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); return
+    }
+    runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
   }
 
   // ── demo: trigger network error manually ──────────────────────────────────
@@ -1423,6 +1445,7 @@ const PREVIEW_DATA = [
 ]
 
 function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { meta } = useUploadMeta()
   const [mappings, setMappings] = useState<string[]>(INITIAL_MAPPINGS.map(m => m.suggested))
   const [overridden, setOverridden] = useState<Set<number>>(new Set())
   const [showConfidence, setShowConfidence] = useState(true)
@@ -1685,6 +1708,16 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
         </div>
         {/* Gating status strip below the preview */}
         <div className="mt-3 flex flex-wrap items-center gap-3">
+          {meta && (
+            <div className="flex items-center gap-2 mr-3 px-3 py-1 rounded-[6px] text-[11px]" style={{ background: C.lightTint, color: C.navy }}>
+              <span style={{ color: C.teal }}>{Icon.fileCheck}</span>
+              <span className="font-semibold mono">{meta.fileName}</span>
+              <span style={{ color: C.midText }}>·</span>
+              <span style={{ color: C.midText }}>~{meta.rowCount.toLocaleString()} rows</span>
+              <span style={{ color: C.midText }}>·</span>
+              <span className="font-bold" style={{ color: C.corpBlue }}>{meta.fileType}</span>
+            </div>
+          )}
           {REQUIRED_FIELDS.map(rf => {
             const mapped = mappings.includes(rf)
             return (
@@ -3313,17 +3346,110 @@ const EXPORT_HISTORY = [
   { name: 'HCP_Clean_Jan2026.csv', date: 'Jan 4, 2026 11:08', by: 'Jane Doe', size: '3.1 MB', expired: true },
 ]
 
+interface ExportHistoryRow { name: string; date: string; by: string; size: string; expired: boolean; live?: boolean }
+
 function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { role } = useRole()
+  const { meta } = useUploadMeta()
   const [generating, setGenerating] = useState<string | null>(null)
   const [done, setDone] = useState<Set<string>>(new Set())
   const [progress, setProgress] = useState(0)
+  const [history, setHistory] = useState<ExportHistoryRow[]>(EXPORT_HISTORY)
+  const [logStatus, setLogStatus] = useState<'idle' | 'logging' | 'ok' | 'err'>('idle')
+
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+  }
+
+  const logToFirestore = async (format: string, filename: string, size: string, records: number) => {
+    setLogStatus('logging')
+    try {
+      await fetch('http://localhost:8000/api/export/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ format, fileName: filename, size, role, records, timestamp: new Date().toISOString() }),
+      })
+      setLogStatus('ok')
+    } catch {
+      setLogStatus('err') // non-fatal — download still worked
+    }
+  }
 
   const startExport = (id: string) => {
     setGenerating(id)
     setProgress(0)
     const iv = setInterval(() => {
       setProgress(p => {
-        if (p >= 100) { clearInterval(iv); setGenerating(null); setDone(new Set([...done, id])); return 100 }
+        if (p >= 100) {
+          clearInterval(iv)
+          setGenerating(null)
+          setDone(prev => new Set([...prev, id]))
+
+          // ── generate & download blob ───────────────────────────────────
+          const opt = EXPORT_OPTIONS.find(o => o.id === id)!
+          const now = new Date()
+          const dateStr = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+          const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+          const records = meta?.rowCount ?? 10412
+          const roleMeta = ROLE_META[role]
+
+          let blob: Blob
+          let filename: string
+
+          if (id === 'csv') {
+            const csvRows = [
+              'NPI,First Name,Last Name,Specialty,State,Email,Phone,ZIP,DEA Number',
+              '1234567890,James,Morrison,Cardiology,FL,j.morrison@floridahealth.com,(813) 555-0147,33602,BX1234567',
+              '9876543210,Sarah,Chen,Oncology,NY,schen@nyoncology.org,(212) 555-0388,10001,AX9876543',
+              '5544332211,Robert,Patel,Neurology,CA,rpatel@stanford.edu,(650) 555-0219,94305,',
+              `# ... ${records.toLocaleString()} total records · Exported ${dateStr} ${timeStr} · Role: ${roleMeta.label}`,
+            ]
+            blob = new Blob([csvRows.join('\n')], { type: 'text/csv' })
+            filename = `HCP_Clean_${meta?.fileName?.replace(/\..+$/, '') ?? 'Export'}_${now.toISOString().slice(0,10)}.csv`
+          } else {
+            const report = [
+              'MedReach AI — PDF Audit Report',
+              '='.repeat(40),
+              `Generated: ${dateStr} ${timeStr}`,
+              `Exported by: ${roleMeta.label} (role: ${role})`,
+              `Source file: ${meta?.fileName ?? 'Q2_HCP_Oncology.csv'}`,
+              `Total records: ${records.toLocaleString()}`,
+              '',
+              'Data Quality Summary',
+              '-'.repeat(30),
+              'Quality score: 84%',
+              'PII flags resolved: 6',
+              'Duplicates merged: 3',
+              'NPI validation pass rate: 97.2%',
+              '',
+              'All actions logged in Firestore audit trail.',
+            ]
+            blob = new Blob([report.join('\n')], { type: 'text/plain' })
+            filename = `Audit_Report_${now.toISOString().slice(0,10)}.pdf`
+          }
+
+          triggerDownload(blob, filename)
+          logToFirestore(id, filename, opt.size, records)
+
+          // Prepend to live history
+          setHistory(h => [{
+            name: filename,
+            date: `${dateStr} ${timeStr}`,
+            by: roleMeta.label,
+            size: opt.size,
+            expired: false,
+            live: true,
+          }, ...h])
+
+          return 100
+        }
         return p + 15
       })
     }, 200)
@@ -3331,7 +3457,27 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
 
   return (
     <div className="p-8">
-      <SectionHeader title="Export" subtitle="Download cleaned data, campaign assets, and audit reports" />
+      <SectionHeader title="Export" subtitle="Download cleaned data, campaign assets, and audit reports"
+        actions={logStatus === 'ok' ? <Badge tier={1} color="success">Logged to Firestore ✓</Badge>
+          : logStatus === 'err' ? <Badge tier={1} color="warning">Firestore offline — download saved locally</Badge>
+          : logStatus === 'logging' ? <Badge tier={1} color="info">Logging…</Badge>
+          : undefined}
+      />
+
+      {/* File context banner */}
+      {meta && (
+        <div className="mb-5 px-4 py-2.5 rounded-[8px] border flex items-center gap-4 text-[12px]" style={{ background: C.lightTint, borderColor: C.corpBlue }}>
+          <span style={{ color: C.teal }}>{Icon.fileCheck}</span>
+          <span className="font-semibold" style={{ color: C.navy }}>Ready to export:</span>
+          <span className="mono font-bold" style={{ color: C.corpBlue }}>{meta.fileName}</span>
+          <span style={{ color: C.midText }}>·</span>
+          <span style={{ color: C.midText }}>{meta.rowCount.toLocaleString()} records</span>
+          <span style={{ color: C.midText }}>·</span>
+          <span style={{ color: C.midText }}>{meta.fileSize.toFixed(1)} MB source</span>
+          <span style={{ color: C.midText }}>·</span>
+          <span style={{ color: C.midText }}>Uploaded {meta.uploadedAt}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-6 mb-8">
         {EXPORT_OPTIONS.map(opt => (
@@ -3345,7 +3491,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             </div>
             <div className="flex items-center justify-between mb-3">
               <span className="text-[11px]" style={{ color: C.midText }}>Est. size: {opt.size}</span>
-              {done.has(opt.id) && <Badge tier={1} color="success">Downloaded</Badge>}
+              {done.has(opt.id) && <Badge tier={1} color="success">Downloaded ✓</Badge>}
             </div>
 
             {generating === opt.id && (
@@ -3384,9 +3530,12 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             <tr><th>File Name</th><th>Date</th><th>Exported By</th><th>Size</th><th>Action</th></tr>
           </thead>
           <tbody>
-            {EXPORT_HISTORY.map(h => (
-              <tr key={h.name} style={{ opacity: h.expired ? 0.55 : 1 }}>
-                <td className="font-medium" style={{ color: h.expired ? C.midText : C.corpBlue }}>{h.name}</td>
+            {history.map((h, i) => (
+              <tr key={h.name + i} style={{ opacity: h.expired ? 0.55 : 1, background: h.live ? '#F0FFF4' : undefined }}>
+                <td className="font-medium" style={{ color: h.expired ? C.midText : C.corpBlue }}>
+                  {h.live && <span className="inline-block mr-1.5 text-[9px] px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.success, color: 'white' }}>NEW</span>}
+                  {h.name}
+                </td>
                 <td>{h.date}</td>
                 <td>{h.by}</td>
                 <td>{h.size}</td>
@@ -3819,6 +3968,7 @@ export default function App() {
   const routerNavigate = useNavigate()
   const location = useLocation()
   const [role, setRole] = useState<Role>('admin')
+  const [uploadMeta, setUploadMeta] = useState<UploadMeta | null>(null)
 
   // Derive current Screen from URL path (e.g. /dashboard → 'dashboard')
   const pathToScreen = (path: string): Screen => {
@@ -3879,14 +4029,17 @@ export default function App() {
 
   if (isAuth) {
     return (
-      <RoleContext.Provider value={{ role, setRole }}>
-        {renderScreen()}
-        <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
-      </RoleContext.Provider>
+      <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
+        <RoleContext.Provider value={{ role, setRole }}>
+          {renderScreen()}
+          <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
+        </RoleContext.Provider>
+      </UploadContext.Provider>
     )
   }
 
   return (
+    <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
     <RoleContext.Provider value={{ role, setRole }}>
       <div className="flex h-screen overflow-hidden" style={{ background: C.pageBg }}>
         <Sidebar current={screen} onNavigate={navigate} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
@@ -3916,5 +4069,6 @@ export default function App() {
         <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
       </div>
     </RoleContext.Provider>
+    </UploadContext.Provider>
   )
 }

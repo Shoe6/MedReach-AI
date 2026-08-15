@@ -1,0 +1,31 @@
+[debug] [2026-08-08T16:02:28.478Z] ----------------------------------------------------------------------
+[debug] [2026-08-08T16:02:28.487Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\colli\AppData\Roaming\npm\node_modules\firebase-tools\lib\bin\firebase.js emulators:start --only firestore auth
+[debug] [2026-08-08T16:02:28.487Z] CLI Version:   15.19.1
+[debug] [2026-08-08T16:02:28.487Z] Platform:      win32
+[debug] [2026-08-08T16:02:28.487Z] Node Version:  v24.12.0
+[debug] [2026-08-08T16:02:28.487Z] Time:          Sat Aug 08 2026 12:02:28 GMT-0400 (Eastern Daylight Time)
+[debug] [2026-08-08T16:02:28.487Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-08-08T16:02:29.777Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-08-08T16:02:29.777Z] > authorizing via signed-in user (collinminer00@gmail.com)
+[debug] [2026-08-08T16:02:29.856Z] openjdk version "21.0.12" 2026-07-21 LTS
+OpenJDK Runtime Environment Microsoft-14653896 (build 21.0.12+8-LTS)
+
+[debug] [2026-08-08T16:02:29.859Z] OpenJDK 64-Bit Server VM Microsoft-14653896 (build 21.0.12+8-LTS, mixed mode, sharing)
+
+[debug] [2026-08-08T16:02:29.864Z] Parsed Java major version: 21
+[info] i  emulators: Starting emulators: auth, firestore {"metadata":{"emulator":{"name":"hub"},"message":"Starting emulators: auth, firestore"}}
+[info] i  emulators: Detected demo project ID "demo-no-project", emulated services will use a demo configuration and attempts to access non-emulated services for this project will fail. {"metadata":{"emulator":{"name":"hub"},"message":"Detected demo project ID \"demo-no-project\", emulated services will use a demo configuration and attempts to access non-emulated services for this project will fail."}}
+[debug] [2026-08-08T16:02:29.873Z] [logging] Logging Emulator only supports listening on one address (127.0.0.1). Not listening on ::1
+[debug] [2026-08-08T16:02:29.873Z] [auth] Authentication Emulator only supports listening on one address (127.0.0.1). Not listening on ::1
+[debug] [2026-08-08T16:02:29.873Z] [firestore] Firestore Emulator only supports listening on one address (127.0.0.1). Not listening on ::1
+[debug] [2026-08-08T16:02:29.873Z] [firestore.websocket] websocket server for firestore only supports listening on one address (127.0.0.1). Not listening on ::1
+[debug] [2026-08-08T16:02:29.873Z] assigned listening specs for emulators {"user":{"hub":[{"address":"127.0.0.1","family":"IPv4","port":4400},{"address":"::1","family":"IPv6","port":4400}],"ui":[{"address":"127.0.0.1","family":"IPv4","port":4000},{"address":"::1","family":"IPv6","port":4000}],"logging":[{"address":"127.0.0.1","family":"IPv4","port":4500}],"auth":[{"address":"127.0.0.1","family":"IPv4","port":9099}],"firestore":[{"address":"127.0.0.1","family":"IPv4","port":8080}],"firestore.websocket":[{"address":"127.0.0.1","family":"IPv4","port":9150}]},"metadata":{"message":"assigned listening specs for emulators"}}
+[debug] [2026-08-08T16:02:29.877Z] Write emulator hub locator at C:\Users\colli\AppData\Local\Temp\hub-demo-no-project.json
+[warn] !  firestore: Cloud Firestore Emulator does not support multiple databases yet. {"metadata":{"emulator":{"name":"firestore"},"message":"Cloud Firestore Emulator does not support multiple databases yet."}}
+[warn] !  firestore: Did not find a Cloud Firestore rules file specified in a firebase.json config file. {"metadata":{"emulator":{"name":"firestore"},"message":"Did not find a Cloud Firestore rules file specified in a firebase.json config file."}}
+[warn] !  firestore: The emulator will default to allowing all reads and writes. Learn more about this option: https://firebase.google.com/docs/emulator-suite/install_and_configure#security_rules_configuration. {"metadata":{"emulator":{"name":"firestore"},"message":"The emulator will default to allowing all reads and writes. Learn more about this option: https://firebase.google.com/docs/emulator-suite/install_and_configure#security_rules_configuration."}}
+[info] i  firestore: downloading cloud-firestore-emulator-v1.21.0.jar... {"metadata":{"emulator":{"name":"firestore"},"message":"downloading cloud-firestore-emulator-v1.21.0.jar..."}}
+[debug] [2026-08-08T16:02:29.887Z] >>> [apiv2][query] GET https://storage.googleapis.com/firebase-preview-drop/emulator/cloud-firestore-emulator-v1.21.0.jar 
+[debug] [2026-08-08T16:02:30.099Z] <<< [apiv2][status] GET https://storage.googleapis.com/firebase-preview-drop/emulator/cloud-firestore-emulator-v1.21.0.jar 200
+[debug] [2026-08-08T16:02:30.099Z] <<< [apiv2][body] GET https://storage.googleapis.com/firebase-preview-drop/emulator/cloud-firestore-emulator-v1.21.0.jar [stream]
