@@ -9,20 +9,7 @@
 
 ---
 
-## 📋 Table of Contents
-
-- [Introduction](#-introduction)
-- [Alpha Features](#-alpha-features)
-- [Technologies](#-technologies)
-- [Installation](#-installation)
-- [Development Setup](#-development-setup)
-- [License](#-license)
-- [Contributors](#-contributors)
-- [Project Status](#-project-status)
-
----
-
-## 🏥 Introduction
+## Introduction
 
 **MedReach AI** is a web-based, multi-tenant SaaS platform that specializes in healthcare data intelligence for pharmaceutical and medical device companies. The platform's first module focuses on cleaning, standardizing, analyzing, and intelligently querying Healthcare Professional (HCP) datasets.
 
@@ -32,155 +19,112 @@ Mid-size pharmaceutical and medical device companies rely on HCP databases to dr
 
 **MedReach AI closes that gap by:**
 
-- 🔍 **Automatically detecting PII, duplicates, and outliers** using Microsoft Presidio and scikit-learn before data reaches your campaigns
-- 🤖 **Running all AI inference locally** via Ollama + Llama 3 — no HCP data ever leaves your server
-- ⚖️ **Enforcing regulatory compliance** by blocking exports until off-label claims and Sunshine Act issues are resolved
-- 📊 **Letting non-technical users query their dataset in plain English** and see results as interactive filtered tables
-- 🔐 **Isolating every company's data** through multi-tenant Firestore security rules + Firebase Auth RBAC
+- Automatically detecting PII, duplicates, and outliers using Microsoft Presidio and scikit-learn before data reaches your campaigns
+- Running all AI inference locally via Ollama + Llama 3 — no HCP data ever leaves your server
+- Enforcing regulatory compliance by blocking exports until off-label claims and Sunshine Act issues are resolved
+- Letting non-technical users query their dataset in plain English and see results as interactive filtered tables
+- Isolating every company's data through multi-tenant Firestore security rules + Firebase Auth RBAC
 
 ---
 
-## 🚀 Alpha Features
+## Alpha Features
 
-> **AI Capstone requirement:** MedReach AI is built around a significant AI core. All AI inference runs **locally via Ollama** — no HCP data is sent to external APIs. The following features are the target for this capstone phase.
+> **AI Capstone requirement:** MedReach AI is built around a significant AI core. All AI inference runs locally via Ollama — no HCP data is sent to external APIs.
 
-| Feature | Description | AI Model |
-|---|---|---|
-| **Smart Column Mapping** | Upload any CSV/XLSX and the AI auto-maps columns to HCP standard fields (NPI, Name, Specialty, etc.) with a confidence score per column | Llama 3 8B |
-| **Natural Language Query** | Ask plain-English questions ("Show me all cardiologists in Florida with 500+ prescriptions") and receive a filtered result set with the generated pandas filter shown for transparency | Llama 3 8B |
-| **AI Segmentation** | Automatically clusters HCP records into meaningful audience segments using K-Means / DBSCAN; Llama 3 generates plain-language segment labels and descriptions | K-Means + Llama 3 |
-| **Campaign Copy Generator** | Select a segment, define a goal and channel (Email / Detail Piece / SMS), and AI drafts subject line, body copy, and CTA | Llama 3 8B |
-| **Compliance Review** | AI scans generated content for off-label claims, Sunshine Act relationships, and state-level marketing restrictions; export is blocked until High-severity flags are resolved | DistilBERT + Mistral 7B |
-| **PII Detection & Anonymization** | Microsoft Presidio scans every uploaded record for SSNs, DOBs, financial identifiers, and home addresses; user chooses to anonymize, remove, or override with logged justification | Microsoft Presidio |
-| **Outlier Detection** | scikit-learn Isolation Forest flags HCP records with statistically implausible claims volumes, geographic patterns, or license dates — with plain-language explanations | Isolation Forest |
-| **NPI Validation** | Every uploaded NPI is verified against the live CMS NPPES Registry; inactive, invalid, and mismatched records are surfaced in the Data Review tab | CMS NPI Registry API |
-| **Data Quality Scoring** | Automated 0–100% data quality score updates in real time as flags are resolved; export is gated until the score meets threshold | — |
-| **Full Audit Trail** | Every action (upload, flag resolution, query, export, role change) is logged to Firestore with actor identity and timestamp | — |
+- Smart Column Mapping
+- Natural Language Query
+- AI Segmentation
+- Campaign Copy Generator
+- Compliance Review
+- PII Detection & Anonymization
+- Outlier Detection
+- NPI Validation
+- Data Quality Scoring
+- Full Audit Trail
 
 ---
 
-## 🛠️ Technologies
+## Technologies
 
 ### Frontend
-| Technology | Version | Purpose |
-|---|---|---|
-| **React** | 19.x | UI component framework |
-| **TypeScript** | 5.7+ | Type-safe development |
-| **Vite** | 6.x | Build tool & dev server |
-| **Tailwind CSS** | 4.x | Utility-first styling |
+
+- React
+- TypeScript
+- Vite
+- Tailwind CSS
 
 ### Backend
-| Technology | Version | Purpose |
-|---|---|---|
-| **FastAPI** | 0.141+ | Python REST API server |
-| **uvicorn** | latest | ASGI server |
-| **pandas** | 2.x | Data ingestion, cleaning, export |
-| **scikit-learn** | 1.4+ | Isolation Forest outlier detection, K-Means / DBSCAN segmentation |
-| **Microsoft Presidio** | 2.x | PII detection and anonymization |
-| **spaCy** | 3.x | NLP preprocessing pipeline |
-| **Hugging Face Transformers** | 4.x | DistilBERT compliance classification |
+
+- FastAPI
+- uvicorn
+- pandas
+- scikit-learn
+- Microsoft Presidio
+- spaCy
+- Hugging Face Transformers
 
 ### AI Runtime
-| Technology | Purpose |
-|---|---|
-| **Ollama** | Self-hosted local LLM runtime — no HCP data leaves the server |
-| **Meta Llama 3 8B** | Column mapping, NL query translation, segmentation labeling, campaign copy |
-| **Mistral 7B** | Structured JSON output for compliance flagging |
+
+- Ollama
+- Meta Llama 3 8B
+- Mistral 7B
 
 ### Infrastructure & Data
-| Technology | Purpose |
-|---|---|
-| **Firebase Firestore** | Multi-tenant NoSQL database with security-rules-level data isolation |
-| **Firebase Authentication** | JWT auth with custom claims for tenant ID and RBAC roles (Admin / Editor / Viewer) |
-| **Firebase Storage** | Raw CSV uploads and generated export files |
-| **Firebase Emulator Suite** | Local development replica of Auth and Firestore |
-| **CMS NPPES NPI Registry API** | Real-time physician record validation |
-| **CMS Open Payments Database** | Sunshine Act relationship tracking |
-| **FDA Warning Letter Database** | Off-label compliance training data |
-| **ReportLab** | Programmatic PDF audit report generation |
+
+- Firebase Firestore
+- Firebase Authentication
+- Firebase Storage
+- Firebase Emulator Suite
+- CMS NPPES NPI Registry API
+- CMS Open Payments Database
+- FDA Warning Letter Database
+- ReportLab
 
 ---
 
-## 💻 Installation
-
-Follow these steps to run MedReach AI on your local machine.
+## Installation
 
 ### Prerequisites
 
-| Tool | Version | Download |
-|---|---|---|
-| Node.js | ≥ 18 LTS | [nodejs.org](https://nodejs.org) |
-| Python | ≥ 3.11 | [python.org](https://python.org) |
-| Git | Latest | [git-scm.com](https://git-scm.com) |
-| Ollama | ≥ 0.3 | [ollama.com](https://ollama.com) |
-| Firebase CLI | ≥ 13.x | `npm install -g firebase-tools` |
+- Node.js 18+
+- Python 3.11+
+- Git
+- Ollama
+- Firebase CLI
 
-### Step 1 — Clone the repository
+### Setup
 
 ```bash
-git clone https://github.com/Shoe6/MedReac-AI.git
-cd MedReac-AI
-git checkout develop
-```
-
-### Step 2 — Install frontend dependencies
-
-```bash
-npm install
-```
-
-### Step 3 — Install backend dependencies
-
-```bash
+git clone https://github.com/Shoe6/MedReach-AI.git
+cd MedReach-AI
 pip install -r requirements.txt
-```
-
-### Step 4 — Start the Firebase Emulator
-
-```bash
+npm install
 firebase emulators:start
-```
-
-This starts local Firestore and Auth at `http://localhost:4000`.
-
-### Step 5 — Pull the AI models via Ollama
-
-```bash
-ollama pull llama3
-ollama pull mistral
-```
-
-### Step 6 — Start the backend
-
-```bash
 uvicorn main:app --reload --port 8000
-```
-
-### Step 7 — Start the frontend
-
-```bash
 npm run dev
 ```
 
-Open your browser at `http://localhost:5173`.
-
-> ⚠️ **Alpha note:** AI features (segmentation, NL query, campaign generation) require Ollama to be running. All other features (upload, data review, export) work without it and will show a graceful degraded-mode banner.
+Open the app at http://localhost:5173.
 
 ---
 
-## 🔧 Development Setup
+## Development Setup
 
 This section is for developers contributing to the MedReach AI codebase.
 
 ### Branch Strategy
 
-| Branch | Purpose |
-|---|---|
-| `main` | Production-ready stable releases only — never commit directly |
-| `staging` | Pre-production QA and integration testing |
-| `develop` | Primary integration branch — all feature branches merge here |
-| `collin/dev` | Collin's personal development sandbox |
-| `scott/dev` | Scott's personal development sandbox |
+- main: production-ready stable releases
+- backend-dev: active development work
+- feature branches: short-lived work for discrete tickets
+
+---
+
+## Project Status
+
+**Status:** Alpha
+
+This repository contains the full-stack MedReach AI application, with frontend and backend code that is designed to support multi-tenant document and file workflows under a shared Firebase project.
 | `feature/*` | Individual feature work (e.g. `feature/KAN-19-npi-validation`) |
 | `hotfix/*` | Urgent production fixes — branches from `main`, merges to both `main` and `develop` |
 | `release/*` | Release preparation (e.g. `release/v0.1.0`) |
@@ -594,3 +538,4 @@ git checkout develop
 git checkout -b feature/your-feature-name
 ```
 >>>>>>> origin/main
+>>>>>>> main
