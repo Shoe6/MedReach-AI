@@ -41,6 +41,16 @@ const ValidationContext = createContext<{
 }>({ resolvedVal: new Map(), setResolvedVal: () => {} })
 const useValidation = () => useContext(ValidationContext)
 
+// Shared outlier resolution state — read by Analytics + Export
+type OutAction = 'removed' | 'kept' | 'warned'
+const OutlierContext = createContext<{
+  resolvedOut: Map<number, OutAction>
+  setResolvedOut: (m: Map<number, OutAction>) => void
+  warnNotes: Record<number, string>
+  setWarnNotes: (n: Record<number, string>) => void
+}>({ resolvedOut: new Map(), setResolvedOut: () => {}, warnNotes: {}, setWarnNotes: () => {} })
+const useOutliers = () => useContext(OutlierContext)
+
 type Screen =
   | 'login' | 'register' | 'forgot-password' | 'reset-password' | 'mfa'
   | 'dashboard' | 'upload' | 'column-mapping'
@@ -1852,10 +1862,10 @@ const DUPLICATES: DupCluster[] = [
 ]
 
 const OUTLIERS = [
-  { record: 'Dr. Chen #1192',    specialty: 'Oncology',    reason: 'NPI claims volume 10x above oncology specialty average',       severity: 'High',   anomalyScore: 0.94, nullPct: 3  },
-  { record: 'Dr. Williams #4490',specialty: 'Cardiology',  reason: 'Prescribing pattern spans 14 states — geographically implausible', severity: 'Medium', anomalyScore: 0.78, nullPct: 7  },
-  { record: 'Dr. Kim #7723',     specialty: 'Dermatology', reason: 'License expiry date 22 years in the future',                   severity: 'Low',    anomalyScore: 0.61, nullPct: 11 },
-  { record: 'Dr. Okonkwo #5512', specialty: 'Neurology',   reason: 'Email domain does not match registered practice location',    severity: 'Medium', anomalyScore: 0.71, nullPct: 0  },
+  { id: 0, record: 'Dr. Chen #1192',    specialty: 'Oncology',    reason: 'NPI claims volume 10x above oncology specialty average',              severity: 'High',   anomalyScore: 0.94, nullPct: 3  },
+  { id: 1, record: 'Dr. Williams #4490',specialty: 'Cardiology',  reason: 'Prescribing pattern spans 14 states — geographically implausible',   severity: 'Medium', anomalyScore: 0.78, nullPct: 7  },
+  { id: 2, record: 'Dr. Kim #7723',     specialty: 'Dermatology', reason: 'License expiry date 22 years in the future',                          severity: 'Low',    anomalyScore: 0.61, nullPct: 11 },
+  { id: 3, record: 'Dr. Okonkwo #5512', specialty: 'Neurology',   reason: 'Email domain does not match registered practice location',           severity: 'Medium', anomalyScore: 0.71, nullPct: 0  },
 ]
 
 const VALIDATION_ERRORS = [
@@ -1953,13 +1963,16 @@ function DataReviewScreen() {
   const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override'>>(new Map())
   // NPI validation resolution — lifted into ValidationContext so ExportScreen can gate export
   const { resolvedVal, setResolvedVal } = useValidation()
+  // Outlier resolution — lifted into OutlierContext so Analytics + Export can read tagged records
+  const { resolvedOut, setResolvedOut, warnNotes, setWarnNotes } = useOutliers()
+  // Set of outlier ids with the tag-note drawer open
+  const [tagOpen, setTagOpen] = useState<Set<number>>(new Set())
   // Override justification text (keyed by VALIDATION_ERRORS id)
   const [valJustifications, setValJustifications] = useState<Record<number, string>>({})
   // Set of validation error ids with override drawer open
   const [overrideOpen, setOverrideOpen] = useState<Set<number>>(new Set())
   // Set of validation error ids currently re-validating (spinner)
   const [revalidating, setRevalidating] = useState<Set<number>>(new Set())
-  const [resolvedOut, setResolvedOut] = useState<Set<number>>(new Set())
   // Duplicate cluster resolution
   const [resolvedDup, setResolvedDup] = useState<Map<string, 'merged' | 'distinct' | 'removed'>>(new Map())
   const [masterSel,   setMasterSel]   = useState<Map<string, 1 | 2>>(new Map())
@@ -2393,35 +2406,75 @@ function DataReviewScreen() {
       {tab === 'outliers' && (
         <Card>
           <NullSummaryBar tab="outliers" />
+
+          {/* Tagged-records summary strip */}
+          {(() => {
+            const tagged = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
+            if (tagged.length === 0) return null
+            return (
+              <div className="mb-4 p-3 rounded-[6px] border-l-4 flex items-start gap-3"
+                style={{ background: '#FEF3C7', borderLeftColor: C.warning }}>
+                <span style={{ color: C.warning, marginTop: 1 }}>{Icon.alertTriangle}</span>
+                <div className="flex-1">
+                  <p className="text-[12px] font-semibold" style={{ color: '#92400E' }}>
+                    {tagged.length} record{tagged.length > 1 ? 's' : ''} tagged as Data Quality Warning — retained in dataset, flagged on all analytical exports
+                  </p>
+                  <div className="flex flex-wrap gap-2 mt-1">
+                    {tagged.map(o => (
+                      <span key={o.id} className="text-[10px] font-semibold px-2 py-0.5 rounded-[4px]"
+                        style={{ background: '#FDE68A', color: '#92400E' }}>
+                        {o.record}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )
+          })()}
+
           <table className="data-table w-full border-collapse">
             <thead>
               <tr>
-                <SortTh label="Record"       sortKey="record"       current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Record"        sortKey="record"       current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
                 <th>Specialty</th>
                 <th>Outlier Reason</th>
                 <SortTh label="Anomaly Score" sortKey="anomalyScore" current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
-                <SortTh label="Severity"     sortKey="severity"     current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
-                <SortTh label="Null %"       sortKey="nullPct"      current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Severity"      sortKey="severity"     current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Null %"        sortKey="nullPct"      current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
                 <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {sortedOut.map((o, i) => {
-                const resolved = resolvedOut.has(i)
+              {sortedOut.map((o) => {
+                const action    = resolvedOut.get(o.id)
+                const resolved  = action !== undefined
+                const isTagOpen = tagOpen.has(o.id)
                 return (
-                  <>
-                    <tr key={i} style={{ opacity: resolved ? 0.45 : 1 }}>
-                      <td className="font-medium">{o.record}</td>
+                  <Fragment key={o.id}>
+                    <tr style={{
+                      opacity:    resolved && action !== 'warned' ? 0.45 : 1,
+                      background: action === 'warned' ? '#FFFBEB'
+                                : o.severity === 'High' && !resolved ? '#FFF9F9'
+                                : undefined,
+                      borderLeft: action === 'warned' ? `3px solid ${C.warning}`
+                                : o.severity === 'High' && !resolved ? `3px solid ${C.danger}`
+                                : '3px solid transparent',
+                    }}>
+                      <td className="font-medium">
+                        {action === 'warned' && (
+                          <span className="inline-block mr-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded"
+                            style={{ background: '#FDE68A', color: '#92400E' }}>⚠ DQ WARNING</span>
+                        )}
+                        {o.record}
+                      </td>
                       <td><Badge tier={1} color="neutral">{o.specialty}</Badge></td>
                       <td>
                         <div>
                           <p className="text-[11px]">{o.reason}</p>
-                          {!resolved && (
-                            <button className="text-[10px] mt-0.5 hover:underline" style={{ color: C.corpBlue }}
-                              onClick={() => setExpandedOutlier(expandedOutlier === i ? null : i)}>
-                              {expandedOutlier === i ? '▲ Hide reasoning' : '▼ Why flagged?'}
-                            </button>
-                          )}
+                          <button className="text-[10px] mt-0.5 hover:underline" style={{ color: C.corpBlue }}
+                            onClick={() => setExpandedOutlier(expandedOutlier === o.id ? null : o.id)}>
+                            {expandedOutlier === o.id ? '▲ Hide reasoning' : '▼ Why flagged?'}
+                          </button>
                         </div>
                       </td>
                       <td>
@@ -2445,18 +2498,46 @@ function DataReviewScreen() {
                       <td><NullPctBadge pct={o.nullPct} /></td>
                       <td>
                         {resolved ? (
-                          <Badge tier={1} color="success">Resolved</Badge>
+                          <div className="flex flex-col gap-0.5">
+                            {action === 'removed' && <Badge tier={1} color="danger">Removed</Badge>}
+                            {action === 'kept'    && <Badge tier={1} color="success">Kept</Badge>}
+                            {action === 'warned'  && (
+                              <>
+                                <Badge tier={1} color="warning">Data Quality Warning</Badge>
+                                {warnNotes[o.id] && (
+                                  <span className="text-[10px] italic" style={{ color: C.midText }}>
+                                    "{warnNotes[o.id].slice(0, 40)}{warnNotes[o.id].length > 40 ? '…' : ''}"
+                                  </span>
+                                )}
+                              </>
+                            )}
+                            <button className="text-[10px] hover:underline mt-0.5" style={{ color: C.corpBlue }}
+                              onClick={() => { const m = new Map(resolvedOut); m.delete(o.id); setResolvedOut(m) }}>
+                              Undo
+                            </button>
+                          </div>
                         ) : (
-                          <div className="flex gap-1">
-                            <Btn size="sm" variant="danger"    onClick={() => setResolvedOut(new Set([...resolvedOut, i]))}>Remove</Btn>
-                            <Btn size="sm" variant="secondary" onClick={() => setResolvedOut(new Set([...resolvedOut, i]))}>Keep</Btn>
-                            <Btn size="sm" variant="ghost"     onClick={() => setResolvedOut(new Set([...resolvedOut, i]))}>Excl. Campaigns</Btn>
+                          <div className="flex gap-1 flex-wrap">
+                            <Btn size="sm" variant="danger"
+                              onClick={() => { const m = new Map(resolvedOut); m.set(o.id, 'removed'); setResolvedOut(m) }}>
+                              Remove
+                            </Btn>
+                            <Btn size="sm" variant="secondary"
+                              onClick={() => { const m = new Map(resolvedOut); m.set(o.id, 'kept'); setResolvedOut(m) }}>
+                              Keep
+                            </Btn>
+                            <Btn size="sm" variant="ghost"
+                              onClick={() => { const s = new Set(tagOpen); s.has(o.id) ? s.delete(o.id) : s.add(o.id); setTagOpen(s) }}>
+                              {isTagOpen ? '✕ Cancel' : '⚠ Tag Warning'}
+                            </Btn>
                           </div>
                         )}
                       </td>
                     </tr>
-                    {expandedOutlier === i && !resolved && (
-                      <tr key={`exp-${i}`} style={{ background: C.lightTint }}>
+
+                    {/* Statistical reasoning drawer */}
+                    {expandedOutlier === o.id && (
+                      <tr style={{ background: C.lightTint, borderLeft: '3px solid transparent' }}>
                         <td colSpan={7} className="px-4 py-3">
                           <p className="text-[12px] font-semibold mb-1" style={{ color: C.navy }}>Statistical reasoning</p>
                           <p className="text-[12px]" style={{ color: C.darkText }}>
@@ -2465,7 +2546,37 @@ function DataReviewScreen() {
                         </td>
                       </tr>
                     )}
-                  </>
+
+                    {/* Tag: Data Quality Warning drawer */}
+                    {isTagOpen && !resolved && (
+                      <tr style={{ background: '#FFFBEB', borderLeft: `3px solid ${C.warning}` }}>
+                        <td colSpan={7} className="px-4 py-3">
+                          <p className="text-[12px] font-semibold mb-1" style={{ color: '#92400E' }}>
+                            ⚠ Tag as Data Quality Warning — record stays in the database but is highlighted in red on all analytical exports and reports
+                          </p>
+                          <div className="flex gap-3 items-start">
+                            <textarea
+                              className="flex-1 border rounded-[6px] text-[12px] px-2 py-1.5"
+                              style={{ borderColor: C.warning, minHeight: 56, fontFamily: 'Inter, Arial, sans-serif' }}
+                              rows={2}
+                              placeholder="Optional: describe why this record is flagged for downstream consumers…"
+                              value={warnNotes[o.id] || ''}
+                              onChange={e => setWarnNotes({ ...warnNotes, [o.id]: e.target.value })}
+                            />
+                            <div className="flex flex-col gap-1 items-center shrink-0">
+                              <Btn size="sm" variant="primary"
+                                onClick={() => {
+                                  const m = new Map(resolvedOut); m.set(o.id, 'warned'); setResolvedOut(m)
+                                  const s = new Set(tagOpen); s.delete(o.id); setTagOpen(s)
+                                }}>
+                                Confirm Tag
+                              </Btn>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>
@@ -3096,6 +3207,9 @@ function ComplianceReviewScreen() {
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 
 function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { resolvedOut, warnNotes } = useOutliers()
+  const taggedOutliers = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
+
   const states = [
     { abbr: 'FL', density: 90 }, { abbr: 'CA', density: 85 }, { abbr: 'NY', density: 82 },
     { abbr: 'TX', density: 78 }, { abbr: 'PA', density: 65 }, { abbr: 'OH', density: 60 },
@@ -3188,6 +3302,45 @@ function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           </div>
         </Card>
       </div>
+
+      {/* Data Quality Warning panel — only shown when records are tagged */}
+      {taggedOutliers.length > 0 && (
+        <div className="mb-6 bg-white rounded-[8px] border-2 p-4" style={{ borderColor: C.warning }}>
+          <div className="flex items-center gap-2 mb-3">
+            <span style={{ color: C.warning }}>{Icon.alertTriangle}</span>
+            <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: '#92400E' }}>
+              Data Quality Warnings — {taggedOutliers.length} record{taggedOutliers.length > 1 ? 's' : ''} flagged
+            </h3>
+            <Badge tier={2} color="warning">Retained in dataset</Badge>
+            <span className="ml-auto text-[11px]" style={{ color: C.midText }}>These records are highlighted in red on all exports</span>
+          </div>
+          <table className="w-full border-collapse" style={{ fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: '#FEF3C7' }}>
+                {['Record', 'Specialty', 'Anomaly Score', 'Outlier Reason', 'Warning Note'].map(h => (
+                  <th key={h} className="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#92400E' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {taggedOutliers.map((o, i) => (
+                <tr key={o.id} style={{ background: i % 2 === 0 ? '#FFFBEB' : '#FEF9EC', borderBottom: '1px solid #FDE68A' }}>
+                  <td className="px-3 py-2 font-semibold" style={{ color: C.danger }}>
+                    <span className="inline-block mr-1.5 text-[9px] font-bold px-1 py-0.5 rounded" style={{ background: '#FEE2E2', color: C.danger }}>⚠</span>
+                    {o.record}
+                  </td>
+                  <td className="px-3 py-2"><Badge tier={1} color="neutral">{o.specialty}</Badge></td>
+                  <td className="px-3 py-2 mono font-bold" style={{ color: o.anomalyScore >= 0.85 ? C.danger : C.warning }}>{o.anomalyScore.toFixed(2)}</td>
+                  <td className="px-3 py-2 text-[11px]" style={{ color: C.darkText }}>{o.reason}</td>
+                  <td className="px-3 py-2 text-[11px] italic" style={{ color: C.midText }}>
+                    {warnNotes[o.id] || <span style={{ color: C.border }}>No note provided</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Geographic density */}
       <Card>
@@ -3645,6 +3798,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const { role } = useRole()
   const { meta } = useUploadMeta()
   const { resolvedVal: resolvedValCtx } = useValidation()
+  const { resolvedOut: resolvedOutCtx, warnNotes } = useOutliers()
   const [generating, setGenerating] = useState<string | null>(null)
   const [done, setDone] = useState<Set<string>>(new Set())
   const [progress, setProgress] = useState(0)
@@ -3698,16 +3852,21 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           let filename: string
 
           if (id === 'csv') {
+            const taggedRows = OUTLIERS
+              .filter(o => resolvedOutCtx.get(o.id) === 'warned')
+              .map(o => `[DATA QUALITY WARNING],${o.record.replace(',','')},${o.specialty},,,,,,, // Anomaly score ${o.anomalyScore.toFixed(2)} — ${o.reason}${warnNotes[o.id] ? ` | Note: ${warnNotes[o.id]}` : ''}`)
             const csvRows = [
-              'NPI,First Name,Last Name,Specialty,State,Email,Phone,ZIP,DEA Number',
-              '1234567890,James,Morrison,Cardiology,FL,j.morrison@floridahealth.com,(813) 555-0147,33602,BX1234567',
-              '9876543210,Sarah,Chen,Oncology,NY,schen@nyoncology.org,(212) 555-0388,10001,AX9876543',
-              '5544332211,Robert,Patel,Neurology,CA,rpatel@stanford.edu,(650) 555-0219,94305,',
-              `# ... ${records.toLocaleString()} total records · Exported ${dateStr} ${timeStr} · Role: ${roleMeta.label}`,
+              'DQ_FLAG,NPI,First Name,Last Name,Specialty,State,Email,Phone,ZIP,DEA Number',
+              ',1234567890,James,Morrison,Cardiology,FL,j.morrison@floridahealth.com,(813) 555-0147,33602,BX1234567',
+              ',9876543210,Sarah,Chen,Oncology,NY,schen@nyoncology.org,(212) 555-0388,10001,AX9876543',
+              ',5544332211,Robert,Patel,Neurology,CA,rpatel@stanford.edu,(650) 555-0219,94305,',
+              ...taggedRows,
+              `# ... ${records.toLocaleString()} total records · ${taggedRows.length} DQ warnings · Exported ${dateStr} ${timeStr} · Role: ${roleMeta.label}`,
             ]
             blob = new Blob([csvRows.join('\n')], { type: 'text/csv' })
             filename = `HCP_Clean_${meta?.fileName?.replace(/\..+$/, '') ?? 'Export'}_${now.toISOString().slice(0,10)}.csv`
           } else {
+            const taggedForReport = OUTLIERS.filter(o => resolvedOutCtx.get(o.id) === 'warned')
             const report = [
               'MedReach AI — PDF Audit Report',
               '='.repeat(40),
@@ -3722,7 +3881,16 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               'PII flags resolved: 6',
               'Duplicates merged: 3',
               'NPI validation pass rate: 97.2%',
+              `Data Quality Warnings: ${taggedForReport.length}`,
               '',
+              ...(taggedForReport.length > 0 ? [
+                'Data Quality Warning Records (highlighted red on export):',
+                '-'.repeat(30),
+                ...taggedForReport.map(o =>
+                  `  [WARNING] ${o.record} | ${o.specialty} | Score: ${o.anomalyScore.toFixed(2)} | ${o.reason}${warnNotes[o.id] ? `\n           Note: ${warnNotes[o.id]}` : ''}`
+                ),
+                '',
+              ] : []),
               'All actions logged in Firestore audit trail.',
             ]
             blob = new Blob([report.join('\n')], { type: 'text/plain' })
@@ -3775,6 +3943,34 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           </button>
         </Banner>
       )}
+
+      {/* Outlier Data Quality Warning summary */}
+      {(() => {
+        const tagged = OUTLIERS.filter(o => resolvedOutCtx.get(o.id) === 'warned')
+        if (tagged.length === 0) return null
+        return (
+          <div className="mb-5 p-4 rounded-[8px] border-2 border-[#E67E22]" style={{ background: '#FFFBEB' }}>
+            <div className="flex items-center gap-2 mb-2">
+              <span style={{ color: C.warning }}>{Icon.alertTriangle}</span>
+              <p className="text-[13px] font-bold" style={{ color: '#92400E' }}>
+                {tagged.length} Data Quality Warning{tagged.length > 1 ? 's' : ''} included in export
+              </p>
+            </div>
+            <p className="text-[12px] mb-2" style={{ color: '#92400E' }}>
+              The following records are retained in the dataset but are marked with a <code className="mono text-[11px] px-1 py-0.5 rounded" style={{ background: '#FDE68A' }}>[DATA QUALITY WARNING]</code> column in the CSV and highlighted in the PDF audit report:
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {tagged.map(o => (
+                <span key={o.id} className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-[4px]"
+                  style={{ background: '#FEE2E2', color: C.danger }}>
+                  <span>⚠</span> {o.record}
+                  {warnNotes[o.id] && <span className="font-normal italic" style={{ color: '#92400E' }}>— {warnNotes[o.id].slice(0, 30)}{warnNotes[o.id].length > 30 ? '…' : ''}</span>}
+                </span>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* File context banner */}
       {meta && (
@@ -4282,6 +4478,8 @@ export default function App() {
   const [role, setRole] = useState<Role>('admin')
   const [uploadMeta, setUploadMeta] = useState<UploadMeta | null>(null)
   const [resolvedValApp, setResolvedValApp] = useState<Map<number, ValAction>>(new Map())
+  const [resolvedOutApp, setResolvedOutApp] = useState<Map<number, OutAction>>(new Map())
+  const [warnNotesApp,   setWarnNotesApp]   = useState<Record<number, string>>({})
 
   // Derive current Screen from URL path (e.g. /dashboard → 'dashboard')
   const pathToScreen = (path: string): Screen => {
@@ -4342,6 +4540,7 @@ export default function App() {
 
   if (isAuth) {
     return (
+      <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
       <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
       <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
         <RoleContext.Provider value={{ role, setRole }}>
@@ -4350,10 +4549,12 @@ export default function App() {
         </RoleContext.Provider>
       </UploadContext.Provider>
       </ValidationContext.Provider>
+      </OutlierContext.Provider>
     )
   }
 
   return (
+    <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
     <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
     <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
     <RoleContext.Provider value={{ role, setRole }}>
@@ -4387,5 +4588,6 @@ export default function App() {
     </RoleContext.Provider>
     </UploadContext.Provider>
     </ValidationContext.Provider>
+    </OutlierContext.Provider>
   )
 }
