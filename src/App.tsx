@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, createContext, useContext, type ReactNode } from 'react'
+import { useState, useRef, useEffect, createContext, useContext, Fragment, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
@@ -32,6 +32,14 @@ const UploadContext = createContext<{ meta: UploadMeta | null; setMeta: (m: Uplo
   meta: null, setMeta: () => {},
 })
 const useUploadMeta = () => useContext(UploadContext)
+
+// Shared NPI validation resolution state — read by ExportScreen to gate CSV export
+type ValAction = 'removed' | 'override'
+const ValidationContext = createContext<{
+  resolvedVal: Map<number, ValAction>
+  setResolvedVal: (m: Map<number, ValAction>) => void
+}>({ resolvedVal: new Map(), setResolvedVal: () => {} })
+const useValidation = () => useContext(ValidationContext)
 
 type Screen =
   | 'login' | 'register' | 'forgot-password' | 'reset-password' | 'mfa'
@@ -1851,10 +1859,10 @@ const OUTLIERS = [
 ]
 
 const VALIDATION_ERRORS = [
-  { record: 'Thomas Nguyen #5501', npi: '0000000001', specialty: 'Internal Medicine', state: 'CA', issue: 'NPI not found in NPPES registry',                              issueType: 'Not Found',  nullPct: 6  },
-  { record: 'Carol Davis #3320',   npi: '9988776655', specialty: 'Cardiology',        state: 'NY', issue: 'NPI is inactive since 2019',                                    issueType: 'Inactive',   nullPct: 2  },
-  { record: 'Steven Park #8811',   npi: '1122334455', specialty: 'Surgery',           state: 'TX', issue: 'NPI specialty mismatch — registered as GP, uploaded as Surgeon', issueType: 'Mismatch',   nullPct: 9  },
-  { record: 'Maria Santos #6630',  npi: '4455667788', specialty: 'Oncology',          state: 'FL', issue: 'NPI check digit invalid',                                       issueType: 'Invalid',    nullPct: 4  },
+  { id: 0, record: 'Thomas Nguyen #5501', npi: '0000000001', specialty: 'Internal Medicine', state: 'CA', issue: 'NPI not found in NPPES registry',                              issueType: 'Not Found',  severity: 'High',   nullPct: 6  },
+  { id: 1, record: 'Carol Davis #3320',   npi: '9988776655', specialty: 'Cardiology',        state: 'NY', issue: 'NPI is inactive since 2019',                                    issueType: 'Inactive',   severity: 'Medium', nullPct: 2  },
+  { id: 2, record: 'Steven Park #8811',   npi: '1122334455', specialty: 'Surgery',           state: 'TX', issue: 'NPI specialty mismatch — registered as GP, uploaded as Surgeon', issueType: 'Mismatch',   severity: 'Medium', nullPct: 9  },
+  { id: 3, record: 'Maria Santos #6630',  npi: '4455667788', specialty: 'Oncology',          state: 'FL', issue: 'NPI check digit invalid',                                       issueType: 'Invalid',    severity: 'High',   nullPct: 4  },
 ]
 
 // ── Field-level null completeness summary (shown above each table) ────────────
@@ -1943,7 +1951,14 @@ function DataReviewScreen() {
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
   // Map of PII id -> action ('anonymized'|'removed'|'override')
   const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override'>>(new Map())
-  const [resolvedVal, setResolvedVal] = useState<Set<number>>(new Set())
+  // NPI validation resolution — lifted into ValidationContext so ExportScreen can gate export
+  const { resolvedVal, setResolvedVal } = useValidation()
+  // Override justification text (keyed by VALIDATION_ERRORS id)
+  const [valJustifications, setValJustifications] = useState<Record<number, string>>({})
+  // Set of validation error ids with override drawer open
+  const [overrideOpen, setOverrideOpen] = useState<Set<number>>(new Set())
+  // Set of validation error ids currently re-validating (spinner)
+  const [revalidating, setRevalidating] = useState<Set<number>>(new Set())
   const [resolvedOut, setResolvedOut] = useState<Set<number>>(new Set())
   // Duplicate cluster resolution
   const [resolvedDup, setResolvedDup] = useState<Map<string, 'merged' | 'distinct' | 'removed'>>(new Map())
@@ -1963,7 +1978,7 @@ function DataReviewScreen() {
   // ── sort state ───────────────────────────────────────────────────────────
   const [piiSort,  setPiiSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'severity', dir: 'desc' })
   const [outSort,  setOutSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'anomalyScore', dir: 'desc' })
-  const [valSort,  setValSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'issueType', dir: 'asc' })
+  const [valSort,  setValSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'severity', dir: 'desc' })
   const [dupSort,  setDupSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'similarity', dir: 'desc' })
 
   const cycleSort = (
@@ -2002,6 +2017,7 @@ function DataReviewScreen() {
   const sortedVal = [...VALIDATION_ERRORS].sort((a, b) => {
     if (!valSort.key) return 0
     const dir = valSort.dir === 'asc' ? 1 : -1
+    if (valSort.key === 'severity')  return (severityRank(a.severity) - severityRank(b.severity)) * dir
     if (valSort.key === 'issueType') return a.issueType.localeCompare(b.issueType) * dir
     if (valSort.key === 'nullPct')   return (a.nullPct - b.nullPct) * dir
     if (valSort.key === 'npi')       return a.npi.localeCompare(b.npi) * dir
@@ -2460,8 +2476,25 @@ function DataReviewScreen() {
       {/* ── NPI VALIDATION TAB ───────────────────────────────────────────────── */}
       {tab === 'validation' && (
         <Card>
+          {/* High-severity export interlock banner */}
+          {(() => {
+            const openHigh = VALIDATION_ERRORS.filter(v => v.severity === 'High' && !resolvedVal.has(v.id))
+            if (openHigh.length > 0) return (
+              <Banner type="error">
+                <strong>Export blocked:</strong> {openHigh.length} High-severity NPI error{openHigh.length > 1 ? 's' : ''} ({openHigh.map(v => v.issueType).join(', ')}) must be resolved before dataset export is permitted. Remove the record or submit an Override with justification.
+              </Banner>
+            )
+            if (resolvedVal.size === VALIDATION_ERRORS.length) return (
+              <Banner type="success">All NPI validation errors resolved — dataset export is unlocked.</Banner>
+            )
+            return (
+              <Banner type="warning">All High-severity errors resolved. {VALIDATION_ERRORS.length - resolvedVal.size} lower-severity issue{VALIDATION_ERRORS.length - resolvedVal.size !== 1 ? 's' : ''} remaining.</Banner>
+            )
+          })()}
+
           <Banner type="warning">NPI Registry is temporarily unavailable. 847 records marked pending. Will auto-retry in 5 minutes.</Banner>
           <NullSummaryBar tab="validation" />
+
           <table className="data-table w-full border-collapse">
             <thead>
               <tr>
@@ -2470,40 +2503,130 @@ function DataReviewScreen() {
                 <th>Specialty</th>
                 <th>State</th>
                 <SortTh label="Issue Type" sortKey="issueType" current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <SortTh label="Severity"   sortKey="severity"  current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
                 <th>Issue Detail</th>
                 <SortTh label="Null %"     sortKey="nullPct"   current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
                 <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {sortedVal.map((v, i) => {
-                const resolved = resolvedVal.has(i)
+              {sortedVal.map((v) => {
+                const resolved = resolvedVal.has(v.id)
+                const action   = resolvedVal.get(v.id)
+                const isHigh   = v.severity === 'High'
+                const isOvOpen = overrideOpen.has(v.id)
+                const isReval  = revalidating.has(v.id)
                 return (
-                  <tr key={i} style={{ opacity: resolved ? 0.45 : 1 }}>
-                    <td className="font-medium">{v.record}</td>
-                    <td className="mono">{v.npi}</td>
-                    <td>{v.specialty}</td>
-                    <td>{v.state}</td>
-                    <td>
-                      <Badge tier={2}
-                        color={v.issueType === 'Not Found' || v.issueType === 'Invalid' ? 'block' : v.issueType === 'Inactive' ? 'warning' : 'info'}>
-                        {v.issueType}
-                      </Badge>
-                    </td>
-                    <td style={{ color: C.danger, fontSize: 11 }}>{v.issue}</td>
-                    <td><NullPctBadge pct={v.nullPct} /></td>
-                    <td>
-                      {resolved ? (
-                        <Badge tier={1} color="success">Resolved</Badge>
-                      ) : (
-                        <div className="flex gap-1">
-                          <Btn size="sm" variant="danger"    onClick={() => setResolvedVal(new Set([...resolvedVal, i]))}>Remove</Btn>
-                          <Btn size="sm" variant="ghost"     onClick={() => setResolvedVal(new Set([...resolvedVal, i]))}>Override</Btn>
-                          <Btn size="sm" variant="secondary" onClick={() => setResolvedVal(new Set([...resolvedVal, i]))}>Re-validate</Btn>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
+                  <Fragment key={v.id}>
+                    <tr style={{
+                      opacity: resolved ? 0.45 : 1,
+                      background: isHigh && !resolved ? '#FFF5F5' : undefined,
+                      borderLeft: isHigh && !resolved ? `3px solid ${C.danger}` : '3px solid transparent',
+                    }}>
+                      <td className="font-medium">
+                        {isHigh && !resolved && (
+                          <span className="inline-block mr-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded"
+                            style={{ background: '#FEE2E2', color: C.danger }}>HIGH RISK</span>
+                        )}
+                        {v.record}
+                      </td>
+                      <td className="mono">{v.npi}</td>
+                      <td>{v.specialty}</td>
+                      <td>{v.state}</td>
+                      <td>
+                        <Badge tier={2}
+                          color={v.issueType === 'Not Found' || v.issueType === 'Invalid' ? 'block' : v.issueType === 'Inactive' ? 'warning' : 'info'}>
+                          {v.issueType}
+                        </Badge>
+                      </td>
+                      <td>
+                        <Badge tier={2} color={v.severity === 'High' ? 'block' : v.severity === 'Medium' ? 'warning' : 'info'}>
+                          {v.severity}
+                        </Badge>
+                      </td>
+                      <td style={{ color: C.danger, fontSize: 11 }}>{v.issue}</td>
+                      <td><NullPctBadge pct={v.nullPct} /></td>
+                      <td>
+                        {resolved ? (
+                          <div className="flex flex-col gap-0.5">
+                            {action === 'removed'
+                              ? <Badge tier={1} color="danger">Removed</Badge>
+                              : <Badge tier={1} color="info">Overridden</Badge>
+                            }
+                            {action === 'override' && valJustifications[v.id] && (
+                              <span className="text-[10px] italic" style={{ color: C.midText }}>
+                                "{valJustifications[v.id].slice(0, 38)}{valJustifications[v.id].length > 38 ? '…' : ''}"
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex gap-1 flex-wrap">
+                            <Btn size="sm" variant="danger"
+                              disabled={isReval}
+                              onClick={() => { const m = new Map(resolvedVal); m.set(v.id, 'removed'); setResolvedVal(m) }}>
+                              Remove
+                            </Btn>
+                            <Btn size="sm" variant="ghost"
+                              disabled={isReval}
+                              onClick={() => {
+                                const s = new Set(overrideOpen)
+                                s.has(v.id) ? s.delete(v.id) : s.add(v.id)
+                                setOverrideOpen(s)
+                              }}>
+                              {isOvOpen ? '✕ Cancel' : 'Override Flag'}
+                            </Btn>
+                            <Btn size="sm" variant="secondary"
+                              disabled={isReval}
+                              icon={isReval ? Icon.spinner : undefined}
+                              onClick={() => {
+                                setRevalidating(prev => { const s = new Set(prev); s.add(v.id); return s })
+                                setTimeout(() => setRevalidating(prev => { const s = new Set(prev); s.delete(v.id); return s }), 1200)
+                              }}>
+                              {isReval ? 'Checking…' : 'Re-validate'}
+                            </Btn>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+
+                    {/* Override justification drawer */}
+                    {isOvOpen && !resolved && (
+                      <tr style={{ background: '#FFFBEB', borderLeft: `3px solid ${C.warning}` }}>
+                        <td colSpan={9} className="px-4 py-3">
+                          <p className="text-[12px] font-semibold mb-2" style={{ color: C.warning }}>
+                            {isHigh
+                              ? '⚠ High-severity override — justification is mandatory and will be permanently logged to the audit trail'
+                              : 'Justification required — will be logged to the audit trail'}
+                          </p>
+                          <div className="flex gap-3 items-start">
+                            <textarea
+                              className="flex-1 border rounded-[6px] text-[12px] px-2 py-1.5"
+                              style={{ borderColor: C.warning, minHeight: 60, fontFamily: 'Inter, Arial, sans-serif' }}
+                              rows={2}
+                              placeholder="Describe why this NPI validation error should be overridden (min 15 characters)…"
+                              value={valJustifications[v.id] || ''}
+                              onChange={e => setValJustifications(prev => ({ ...prev, [v.id]: e.target.value }))}
+                            />
+                            <div className="flex flex-col gap-1 items-center shrink-0">
+                              <Btn
+                                size="sm"
+                                variant={(valJustifications[v.id]?.length ?? 0) >= 15 ? 'primary' : 'disabled'}
+                                disabled={(valJustifications[v.id]?.length ?? 0) < 15}
+                                onClick={() => {
+                                  const m = new Map(resolvedVal); m.set(v.id, 'override'); setResolvedVal(m)
+                                  const s = new Set(overrideOpen); s.delete(v.id); setOverrideOpen(s)
+                                }}>
+                                Submit Override
+                              </Btn>
+                              <span className="text-[10px]" style={{ color: (valJustifications[v.id]?.length ?? 0) >= 15 ? C.success : C.midText }}>
+                                {valJustifications[v.id]?.length ?? 0}/15 chars
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>
@@ -3521,6 +3644,7 @@ interface ExportHistoryRow { name: string; date: string; by: string; size: strin
 function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const { role } = useRole()
   const { meta } = useUploadMeta()
+  const { resolvedVal: resolvedValCtx } = useValidation()
   const [generating, setGenerating] = useState<string | null>(null)
   const [done, setDone] = useState<Set<string>>(new Set())
   const [progress, setProgress] = useState(0)
@@ -3625,6 +3749,13 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     }, 200)
   }
 
+  const openHighNPI = VALIDATION_ERRORS.filter(v => v.severity === 'High' && !resolvedValCtx.has(v.id)).length
+  const exportOptions = EXPORT_OPTIONS.map(opt =>
+    opt.id === 'csv' && openHighNPI > 0
+      ? { ...opt, available: false, blockReason: `${openHighNPI} High-severity NPI error${openHighNPI > 1 ? 's' : ''} must be resolved in Data Review before export.` }
+      : opt
+  )
+
   return (
     <div className="p-8">
       <SectionHeader title="Export" subtitle="Download cleaned data, campaign assets, and audit reports"
@@ -3633,6 +3764,17 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           : logStatus === 'logging' ? <Badge tier={1} color="info">Logging…</Badge>
           : undefined}
       />
+
+      {/* NPI validation export interlock */}
+      {openHighNPI > 0 && (
+        <Banner type="error">
+          <strong>Export locked — {openHighNPI} High-severity NPI error{openHighNPI > 1 ? 's' : ''} unresolved.</strong>{' '}
+          Clean HCP CSV export is disabled until all High-severity NPI validation failures are explicitly resolved.{' '}
+          <button className="underline font-semibold" style={{ color: 'inherit' }} onClick={() => onNavigate('data-review')}>
+            → Go to Data Review / NPI Validation
+          </button>
+        </Banner>
+      )}
 
       {/* File context banner */}
       {meta && (
@@ -3650,7 +3792,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       )}
 
       <div className="grid grid-cols-3 gap-6 mb-8">
-        {EXPORT_OPTIONS.map(opt => (
+        {exportOptions.map(opt => (
           <Card key={opt.id} className={!opt.available ? 'opacity-80' : 'card-hover'}>
             <div className="flex items-start gap-3 mb-4">
               <span style={{ color: opt.available ? C.teal : C.midText }}>{opt.icon}</span>
@@ -4139,6 +4281,7 @@ export default function App() {
   const location = useLocation()
   const [role, setRole] = useState<Role>('admin')
   const [uploadMeta, setUploadMeta] = useState<UploadMeta | null>(null)
+  const [resolvedValApp, setResolvedValApp] = useState<Map<number, ValAction>>(new Map())
 
   // Derive current Screen from URL path (e.g. /dashboard → 'dashboard')
   const pathToScreen = (path: string): Screen => {
@@ -4199,16 +4342,19 @@ export default function App() {
 
   if (isAuth) {
     return (
+      <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
       <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
         <RoleContext.Provider value={{ role, setRole }}>
           {renderScreen()}
           <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
         </RoleContext.Provider>
       </UploadContext.Provider>
+      </ValidationContext.Provider>
     )
   }
 
   return (
+    <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
     <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
     <RoleContext.Provider value={{ role, setRole }}>
       <div className="flex h-screen overflow-hidden" style={{ background: C.pageBg }}>
@@ -4240,5 +4386,6 @@ export default function App() {
       </div>
     </RoleContext.Provider>
     </UploadContext.Provider>
+    </ValidationContext.Provider>
   )
 }
