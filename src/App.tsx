@@ -367,7 +367,7 @@ function ProgressBar({ value, color = 'info', label }: { value: number; color?: 
         </div>
       )}
       <div className="progress-track">
-        <div className="progress-fill" style={{ width: `${value}%`, background: colors[color] }} />
+        <div className="progress-fill" style={{ width: `${value}%`, background: colors[color], transition: 'width 0.5s cubic-bezier(0.4,0,0.2,1)' }} />
       </div>
     </div>
   )
@@ -2046,7 +2046,44 @@ function DataReviewScreen() {
     return 0
   })
 
-  const quality = Math.round(67 + (resolvedPII.size * 4) + (resolvedVal.size * 5) + (resolvedOut.size * 3) + (resolvedDup.size * 3))
+  // ── Data Health Score (0–100) ───────────────────────────────────────────
+  // Each category contributes a weighted share. Within each category flags are
+  // weighted by severity so resolving High > Medium > Low flags scores more.
+  // Base score of 100 is penalised by unresolved flags, then capped 0–100.
+  const TOTAL_ROWS = 10_412
+
+  const scoreCategory = (
+    flags: { severity: string; id: number }[],
+    resolved: Map<number, unknown>,
+    weight: number               // max points this category can contribute
+  ) => {
+    if (flags.length === 0) return weight
+    const sev = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
+    const totalWeight  = flags.reduce((a, f) => a + sev(f.severity), 0)
+    const earnedWeight = flags
+      .filter(f => resolved.has(f.id))
+      .reduce((a, f) => a + sev(f.severity), 0)
+    return (earnedWeight / totalWeight) * weight
+  }
+
+  // Category weights: NPI (30) > PII (25) > Duplicates (25) > Outliers (20)
+  const npiPoints = scoreCategory(
+    VALIDATION_ERRORS.map(v => ({ severity: v.severity, id: v.id })), resolvedVal, 30)
+  const piiPoints = scoreCategory(
+    PII_FLAGS.map(f => ({ severity: f.severity, id: f.id })), resolvedPII, 25)
+  const dupPoints  = DUPLICATES.length === 0 ? 25
+    : (resolvedDup.size / DUPLICATES.length) * 25
+  const outPoints  = scoreCategory(
+    OUTLIERS.map(o => ({ severity: o.severity, id: o.id })), resolvedOut, 20)
+
+  // Flag-density penalty: reduce base by up to 5 pts if many flags per 1k rows
+  const totalFlags    = PII_FLAGS.length + DUPLICATES.length + OUTLIERS.length + VALIDATION_ERRORS.length
+  const flagDensity   = totalFlags / (TOTAL_ROWS / 1000)          // flags per 1k rows
+  const densityPenalty = Math.min(5, flagDensity * 0.4)
+
+  const quality = Math.min(100, Math.max(0,
+    Math.round(npiPoints + piiPoints + dupPoints + outPoints - densityPenalty)
+  ))
 
   const tabs = [
     { id: 'pii',        label: 'PII / PHI Flags',      count: PII_FLAGS.length - resolvedPII.size },
@@ -2062,28 +2099,119 @@ function DataReviewScreen() {
         subtitle="Resolve all flags to improve your data quality score and unlock export"
         actions={
           <div className="flex items-center gap-3">
-            <span className="text-[13px] font-semibold" style={{ color: quality >= 80 ? C.success : C.warning }}>{Math.min(quality, 100)}% Quality</span>
+            <span className="text-[13px] font-bold px-3 py-1 rounded-full"
+              style={{
+                background: quality >= 85 ? '#E8F5EF' : quality >= 65 ? '#EBF4FA' : quality >= 45 ? '#FEF3C7' : '#FEE2E2',
+                color:      quality >= 85 ? C.success  : quality >= 65 ? C.corpBlue : quality >= 45 ? C.warning : C.danger,
+              }}>
+              {quality}/100
+            </span>
             <Btn variant="secondary" size="sm">Export Report</Btn>
           </div>
         }
       />
 
-      {/* Quality bar — updates as flags are resolved */}
-      <Card className="mb-6">
-        <ProgressBar value={Math.min(quality, 100)} color={quality >= 80 ? 'success' : 'warning'} label="Data Quality Score" />
-        <div className="flex gap-6 mt-3">
-          {[
-            { label: 'PII resolved',        val: resolvedPII.size, total: PII_FLAGS.length },
-            { label: 'Duplicates resolved', val: resolvedDup.size, total: DUPLICATES.length },
-            { label: 'Outliers resolved',   val: resolvedOut.size, total: OUTLIERS.length },
-            { label: 'NPI errors resolved', val: resolvedVal.size, total: VALIDATION_ERRORS.length },
-          ].map(s => (
-            <div key={s.label} className="text-[11px]" style={{ color: C.midText }}>
-              <span className="font-semibold" style={{ color: s.val === s.total ? C.success : C.navy }}>{s.val}/{s.total}</span> {s.label}
+      {/* ── Data Health Score bar ── */}
+      {(() => {
+        const scoreColor = quality >= 85 ? C.success : quality >= 65 ? C.corpBlue : quality >= 45 ? C.warning : C.danger
+        const scoreLabel = quality >= 85 ? 'Excellent' : quality >= 65 ? 'Good' : quality >= 45 ? 'Fair' : 'Poor'
+        const totalResolved = resolvedPII.size + resolvedDup.size + resolvedOut.size + resolvedVal.size
+        const totalFlags    = PII_FLAGS.length + DUPLICATES.length + OUTLIERS.length + VALIDATION_ERRORS.length
+
+        const segments = [
+          { label: 'NPI Validation', pts: npiPoints,  max: 30, resolved: resolvedVal.size, total: VALIDATION_ERRORS.length, color: C.navy },
+          { label: 'PII / PHI',      pts: piiPoints,  max: 25, resolved: resolvedPII.size, total: PII_FLAGS.length,         color: C.corpBlue },
+          { label: 'Duplicates',     pts: dupPoints,  max: 25, resolved: resolvedDup.size, total: DUPLICATES.length,        color: C.teal },
+          { label: 'Outliers',       pts: outPoints,  max: 20, resolved: resolvedOut.size, total: OUTLIERS.length,          color: '#5C85C4' },
+        ]
+
+        return (
+          <Card className="mb-6">
+            {/* Header row */}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <span className="text-[13px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Health Score</span>
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                  style={{ background: quality >= 85 ? '#E8F5EF' : quality >= 65 ? '#EBF4FA' : quality >= 45 ? '#FEF3C7' : '#FEE2E2',
+                           color: scoreColor }}>
+                  {scoreLabel}
+                </span>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-[11px]" style={{ color: C.midText }}>
+                  {totalResolved}/{totalFlags} flags resolved
+                  <span className="mx-1.5" style={{ color: C.border }}>·</span>
+                  {TOTAL_ROWS.toLocaleString()} rows processed
+                </span>
+                <span className="text-[28px] font-bold leading-none" style={{ fontFamily: 'Calibri, Georgia, serif', color: scoreColor }}>
+                  {quality}
+                  <span className="text-[14px] font-semibold">/ 100</span>
+                </span>
+              </div>
             </div>
-          ))}
-        </div>
-      </Card>
+
+            {/* Master bar with zone markers */}
+            <div className="relative mb-1">
+              <div className="progress-track" style={{ height: 14, borderRadius: 8 }}>
+                <div style={{
+                  height: '100%', borderRadius: 8,
+                  width: `${quality}%`,
+                  background: `linear-gradient(90deg, ${C.danger} 0%, ${C.warning} 30%, ${C.corpBlue} 60%, ${C.success} 85%)`,
+                  transition: 'width 0.6s cubic-bezier(0.4,0,0.2,1)',
+                  backgroundSize: '100% 100%',
+                  backgroundAttachment: 'fixed',
+                }} />
+                {/* Zone threshold tick marks */}
+                {[45, 65, 85].map(t => (
+                  <div key={t} style={{
+                    position: 'absolute', top: 0, bottom: 0,
+                    left: `${t}%`, width: 1,
+                    background: 'rgba(255,255,255,0.6)',
+                    pointerEvents: 'none',
+                  }} />
+                ))}
+              </div>
+              {/* Zone labels below bar */}
+              <div className="flex justify-between mt-1" style={{ fontSize: 9, color: C.midText }}>
+                <span style={{ width: '45%', textAlign: 'left' }}>Poor</span>
+                <span style={{ width: '20%', textAlign: 'center' }}>Fair</span>
+                <span style={{ width: '20%', textAlign: 'center' }}>Good</span>
+                <span style={{ width: '15%', textAlign: 'right' }}>Excellent</span>
+              </div>
+            </div>
+
+            {/* Per-category sub-bars */}
+            <div className="grid grid-cols-4 gap-3 mt-4 pt-4 border-t border-[#EDF2F7]">
+              {segments.map(seg => {
+                const pct = Math.round((seg.pts / seg.max) * 100)
+                return (
+                  <div key={seg.label}>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-[10px] font-semibold" style={{ color: C.midText }}>{seg.label}</span>
+                      <span className="text-[10px] font-bold mono" style={{ color: seg.color }}>
+                        {Math.round(seg.pts * 10) / 10}<span style={{ color: C.midText, fontWeight: 400 }}>/{seg.max}</span>
+                      </span>
+                    </div>
+                    <div className="progress-track" style={{ height: 6 }}>
+                      <div style={{
+                        height: '100%', borderRadius: 4,
+                        width: `${pct}%`,
+                        background: seg.color,
+                        transition: 'width 0.5s cubic-bezier(0.4,0,0.2,1)',
+                      }} />
+                    </div>
+                    <p className="text-[10px] mt-1" style={{ color: C.midText }}>
+                      <span className="font-semibold" style={{ color: seg.resolved === seg.total ? C.success : C.navy }}>
+                        {seg.resolved}/{seg.total}
+                      </span> resolved
+                    </p>
+                  </div>
+                )
+              })}
+            </div>
+          </Card>
+        )
+      })()}
 
       {/* Tabs */}
       <div className="border-b-2 border-[#EDF2F7] mb-6 flex gap-1">
