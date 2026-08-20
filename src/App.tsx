@@ -1809,18 +1809,38 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
 // ── Data Review data ─────────────────────────────────────────────────────────
 
 const PII_FLAGS = [
-  { record: 'James Morrison #4821',  field: 'SSN',           type: 'Social Security Number', severity: 'High',   nullPct: 2  },
-  { record: 'Sarah Chen #2204',      field: 'DOB',           type: 'Date of Birth',           severity: 'Medium', nullPct: 8  },
-  { record: 'Robert Patel #8812',    field: 'Personal Email',type: 'Personal Identifier',     severity: 'Low',    nullPct: 14 },
-  { record: 'Linda Torres #3391',    field: 'Home Address',  type: 'Physical Address',        severity: 'High',   nullPct: 5  },
-  { record: 'Michael Brennan #7741', field: 'SSN',           type: 'Social Security Number',  severity: 'High',   nullPct: 2  },
-  { record: 'Yuki Tanaka #0293',     field: 'Credit Card',   type: 'Financial Identifier',    severity: 'High',   nullPct: 0  },
+  { id: 0, record: 'James Morrison #4821',  field: 'SSN',           type: 'Social Security Number', severity: 'High',   nullPct: 2  },
+  { id: 1, record: 'Sarah Chen #2204',      field: 'DOB',           type: 'Date of Birth',           severity: 'Medium', nullPct: 8  },
+  { id: 2, record: 'Robert Patel #8812',    field: 'Personal Email',type: 'Personal Identifier',     severity: 'Low',    nullPct: 14 },
+  { id: 3, record: 'Linda Torres #3391',    field: 'Home Address',  type: 'Physical Address',        severity: 'High',   nullPct: 5  },
+  { id: 4, record: 'Michael Brennan #7741', field: 'SSN',           type: 'Social Security Number',  severity: 'High',   nullPct: 2  },
+  { id: 5, record: 'Yuki Tanaka #0293',     field: 'Credit Card',   type: 'Financial Identifier',    severity: 'High',   nullPct: 0  },
 ]
 
-const DUPLICATES = [
-  { id: 'A', similarity: 97, rec1: { npi: '1234567890', name: 'James Morrison',  spec: 'Cardiology', state: 'FL', source: 'Q1_Upload' }, rec2: { npi: '1234567890', name: 'Jim Morrison',    spec: 'Cardiology', state: 'FL', source: 'Q2_Upload' } },
-  { id: 'B', similarity: 91, rec1: { npi: '5544332211', name: 'Robert Patel',    spec: 'Neurology',  state: 'CA', source: 'Q1_Upload' }, rec2: { npi: '5544332211', name: 'Rob Patel MD',    spec: 'Neurology',  state: 'CA', source: 'Q1_Upload' } },
-  { id: 'C', similarity: 84, rec1: { npi: '9988221100', name: 'Angela Ruiz',     spec: 'Oncology',   state: 'TX', source: 'Q1_Upload' }, rec2: { npi: '9988221100', name: 'Angela M. Ruiz', spec: 'Oncology',   state: 'TX', source: 'Q2_Upload' } },
+interface DupRecord {
+  npi: string; firstName: string; lastName: string; spec: string
+  state: string; email: string; phone: string; address: string; source: string
+}
+interface DupCluster {
+  id: string; similarity: number
+  rec1: DupRecord; rec2: DupRecord
+}
+const DUPLICATES: DupCluster[] = [
+  {
+    id: 'A', similarity: 97,
+    rec1: { npi: '1234567890', firstName: 'James',  lastName: 'Morrison',   spec: 'Cardiology', state: 'FL', email: 'j.morrison@floridahealth.com',  phone: '(305) 882-4411', address: '101 Medical Dr, Miami FL',              source: 'Q1_Upload' },
+    rec2: { npi: '1234567890', firstName: 'Jim',    lastName: 'Morrison',   spec: 'Cardiology', state: 'FL', email: 'jmorrison@baptisthealth.net',   phone: '(305) 882-4411', address: '101 Medical Dr, Miami, FL 33101',       source: 'Q2_Upload' },
+  },
+  {
+    id: 'B', similarity: 91,
+    rec1: { npi: '5544332211', firstName: 'Robert', lastName: 'Patel',      spec: 'Neurology',  state: 'CA', email: 'rpatel@ucsf.edu',               phone: '(415) 476-0001', address: '505 Parnassus Ave, San Francisco CA',   source: 'Q1_Upload' },
+    rec2: { npi: '5544332211', firstName: 'Rob',    lastName: 'Patel MD',   spec: 'Neurology',  state: 'CA', email: 'robert.patel@ucsf.edu',         phone: '(415) 476-0001', address: '505 Parnassus Ave, San Francisco CA 94143', source: 'Q1_Upload' },
+  },
+  {
+    id: 'C', similarity: 84,
+    rec1: { npi: '9988221100', firstName: 'Angela', lastName: 'Ruiz',       spec: 'Oncology',   state: 'TX', email: 'aruiz@mdanderson.org',          phone: '(713) 792-2121', address: '1515 Holcombe Blvd, Houston TX',        source: 'Q1_Upload' },
+    rec2: { npi: '9988221100', firstName: 'Angela', lastName: 'M. Ruiz',    spec: 'Oncology',   state: 'TX', email: 'a.m.ruiz@mdanderson.org',       phone: '(713) 792-9999', address: '1515 Holcombe Blvd, Houston TX 77030',  source: 'Q2_Upload' },
+  },
 ]
 
 const OUTLIERS = [
@@ -1921,9 +1941,24 @@ function DataReviewScreen() {
   const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
-  const [resolvedPII, setResolvedPII] = useState<Set<number>>(new Set())
+  // Map of PII id -> action ('anonymized'|'removed'|'override')
+  const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override'>>(new Map())
   const [resolvedVal, setResolvedVal] = useState<Set<number>>(new Set())
   const [resolvedOut, setResolvedOut] = useState<Set<number>>(new Set())
+  // Duplicate cluster resolution
+  const [resolvedDup, setResolvedDup] = useState<Map<string, 'merged' | 'distinct' | 'removed'>>(new Map())
+  const [masterSel,   setMasterSel]   = useState<Map<string, 1 | 2>>(new Map())
+  const [mergingDup,  setMergingDup]  = useState<Set<string>>(new Set())
+
+  const resolveDup = (id: string, action: 'merged' | 'distinct' | 'removed', master?: 1 | 2) => {
+    setMergingDup(prev => { const s = new Set(prev); s.add(id); return s })
+    // Simulate backend merge/distinct endpoint (~900 ms)
+    setTimeout(() => {
+      setMergingDup(prev => { const s = new Set(prev); s.delete(id); return s })
+      setResolvedDup(prev => { const m = new Map(prev); m.set(id, action); return m })
+      if (master) setMasterSel(prev => { const m = new Map(prev); m.set(id, master); return m })
+    }, 900)
+  }
 
   // ── sort state ───────────────────────────────────────────────────────────
   const [piiSort,  setPiiSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'severity', dir: 'desc' })
@@ -1978,15 +2013,15 @@ function DataReviewScreen() {
     if (!dupSort.key) return 0
     const dir = dupSort.dir === 'asc' ? 1 : -1
     if (dupSort.key === 'similarity') return (a.similarity - b.similarity) * dir
-    if (dupSort.key === 'name')       return a.rec1.name.localeCompare(b.rec1.name) * dir
+    if (dupSort.key === 'name')       return `${a.rec1.lastName} ${a.rec1.firstName}`.localeCompare(`${b.rec1.lastName} ${b.rec1.firstName}`) * dir
     return 0
   })
 
-  const quality = Math.round(67 + (resolvedPII.size * 4) + (resolvedVal.size * 5) + (resolvedOut.size * 3))
+  const quality = Math.round(67 + (resolvedPII.size * 4) + (resolvedVal.size * 5) + (resolvedOut.size * 3) + (resolvedDup.size * 3))
 
   const tabs = [
     { id: 'pii',        label: 'PII / PHI Flags',      count: PII_FLAGS.length - resolvedPII.size },
-    { id: 'duplicates', label: 'Duplicates',            count: DUPLICATES.length },
+    { id: 'duplicates', label: 'Duplicates',            count: DUPLICATES.length - resolvedDup.size },
     { id: 'outliers',   label: 'Statistical Outliers',  count: OUTLIERS.length - resolvedOut.size },
     { id: 'validation', label: 'NPI Validation',        count: VALIDATION_ERRORS.length - resolvedVal.size },
   ] as const
@@ -2010,6 +2045,7 @@ function DataReviewScreen() {
         <div className="flex gap-6 mt-3">
           {[
             { label: 'PII resolved',        val: resolvedPII.size, total: PII_FLAGS.length },
+            { label: 'Duplicates resolved', val: resolvedDup.size, total: DUPLICATES.length },
             { label: 'Outliers resolved',   val: resolvedOut.size, total: OUTLIERS.length },
             { label: 'NPI errors resolved', val: resolvedVal.size, total: VALIDATION_ERRORS.length },
           ].map(s => (
@@ -2054,14 +2090,20 @@ function DataReviewScreen() {
             <div className="flex items-center gap-3 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
               <span className="text-[12px] font-semibold" style={{ color: C.navy }}>{selected.size} records selected</span>
               <Btn size="sm" variant="primary" onClick={() => {
-                const next = new Set(resolvedPII)
-                selected.forEach(i => next.add(i))
-                setResolvedPII(next); setSelected(new Set())
+                setResolvedPII(prev => {
+                  const m = new Map(prev)
+                  selected.forEach(id => m.set(id, 'anonymized'))
+                  return m
+                })
+                setSelected(new Set())
               }}>Anonymize {selected.size} selected</Btn>
               <Btn size="sm" variant="danger" onClick={() => {
-                const next = new Set(resolvedPII)
-                selected.forEach(i => next.add(i))
-                setResolvedPII(next); setSelected(new Set())
+                setResolvedPII(prev => {
+                  const m = new Map(prev)
+                  selected.forEach(id => m.set(id, 'removed'))
+                  return m
+                })
+                setSelected(new Set())
               }}>Remove {selected.size} selected</Btn>
               <button className="text-[11px] hover:underline ml-auto" style={{ color: C.midText }}
                 onClick={() => setSelected(new Set())}>Clear selection</button>
@@ -2073,9 +2115,9 @@ function DataReviewScreen() {
               <tr>
                 <th style={{ width: 32 }}>
                   <input type="checkbox"
-                    checked={selected.size === sortedPII.filter((_,i) => !resolvedPII.has(i)).length && selected.size > 0}
+                    checked={selected.size === sortedPII.filter(f => !resolvedPII.has(f.id)).length && selected.size > 0}
                     onChange={e => setSelected(e.target.checked
-                      ? new Set(sortedPII.map((_,i) => i).filter(i => !resolvedPII.has(i)))
+                      ? new Set(sortedPII.map(f => f.id).filter(id => !resolvedPII.has(id)))
                       : new Set()
                     )} />
                 </th>
@@ -2088,15 +2130,16 @@ function DataReviewScreen() {
               </tr>
             </thead>
             <tbody>
-              {sortedPII.map((f, i) => {
-                const resolved = resolvedPII.has(i)
+              {sortedPII.map((f) => {
+                const resolved = resolvedPII.has(f.id)
+                const action = resolvedPII.get(f.id)
                 return (
-                  <tr key={i} style={{ opacity: resolved ? 0.45 : 1, background: f.severity === 'High' && !resolved ? '#FFF9F9' : undefined }}>
+                  <tr key={f.id} style={{ opacity: resolved ? 0.45 : 1, background: f.severity === 'High' && !resolved ? '#FFF9F9' : undefined }}>
                     <td>
-                      <input type="checkbox" disabled={resolved} checked={selected.has(i)}
+                      <input type="checkbox" disabled={resolved} checked={selected.has(f.id)}
                         onChange={e => {
                           const s = new Set(selected)
-                          e.target.checked ? s.add(i) : s.delete(i)
+                          e.target.checked ? s.add(f.id) : s.delete(f.id)
                           setSelected(s)
                         }} />
                     </td>
@@ -2111,12 +2154,14 @@ function DataReviewScreen() {
                     <td><NullPctBadge pct={f.nullPct} /></td>
                     <td>
                       {resolved ? (
-                        <Badge tier={1} color="success">Resolved</Badge>
+                        action === 'anonymized' ? <Badge tier={1} color="success">Anonymized</Badge>
+                        : action === 'removed' ? <Badge tier={1} color="danger">Removed</Badge>
+                        : <Badge tier={1} color="info">Overridden</Badge>
                       ) : (
                         <div className="flex gap-1">
-                          <Btn size="sm" variant="primary" onClick={() => setResolvedPII(new Set([...resolvedPII, i]))}>Anonymize</Btn>
-                          <Btn size="sm" variant="danger"  onClick={() => setResolvedPII(new Set([...resolvedPII, i]))}>Remove</Btn>
-                          <Btn size="sm" variant="ghost"   onClick={() => setResolvedPII(new Set([...resolvedPII, i]))}>Override</Btn>
+                          <Btn size="sm" variant="primary" onClick={() => setResolvedPII(prev => { const m = new Map(prev); m.set(f.id, 'anonymized'); return m })}>Anonymize</Btn>
+                          <Btn size="sm" variant="danger"  onClick={() => setResolvedPII(prev => { const m = new Map(prev); m.set(f.id, 'removed'); return m })}>Remove</Btn>
+                          <Btn size="sm" variant="ghost"   onClick={() => setResolvedPII(prev => { const m = new Map(prev); m.set(f.id, 'override'); return m })}>Override</Btn>
                         </div>
                       )}
                     </td>
@@ -2131,75 +2176,200 @@ function DataReviewScreen() {
       {/* ── DUPLICATES TAB ───────────────────────────────────────────────────── */}
       {tab === 'duplicates' && (
         <div className="flex flex-col gap-4">
-          {/* Sort control for duplicates */}
+
+          {/* Sort + summary bar */}
           <div className="flex items-center gap-3">
             <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Sort by:</span>
             {[
               { label: 'Similarity', key: 'similarity' },
-              { label: 'Name', key: 'name' },
+              { label: 'Name',       key: 'name' },
             ].map(opt => (
               <button key={opt.key}
                 className="text-[11px] px-2 py-1 rounded-[4px] border transition-all"
                 style={{
                   borderColor: dupSort.key === opt.key ? C.corpBlue : C.border,
-                  background: dupSort.key === opt.key ? C.lightTint : 'white',
-                  color: dupSort.key === opt.key ? C.corpBlue : C.midText,
-                  fontWeight: dupSort.key === opt.key ? 700 : 400,
+                  background:  dupSort.key === opt.key ? C.lightTint : 'white',
+                  color:       dupSort.key === opt.key ? C.corpBlue : C.midText,
+                  fontWeight:  dupSort.key === opt.key ? 700 : 400,
                 }}
                 onClick={() => cycleSort(dupSort, setDupSort, opt.key)}>
                 {opt.label} {dupSort.key === opt.key ? (dupSort.dir === 'asc' ? '↑' : '↓') : '↕'}
               </button>
             ))}
             <span className="text-[11px] ml-auto" style={{ color: C.midText }}>
-              {sortedDup.length} duplicate pair{sortedDup.length !== 1 ? 's' : ''} detected
+              {DUPLICATES.length - resolvedDup.size} of {DUPLICATES.length} cluster{DUPLICATES.length !== 1 ? 's' : ''} pending
             </span>
           </div>
 
-          {sortedDup.map(d => (
-            <Card key={d.id}>
-              <div className="flex items-center gap-2 mb-3">
-                <span style={{ color: C.warning }}>{Icon.copy}</span>
-                <span className="text-[12px] font-semibold" style={{ color: C.darkText }}>Duplicate pair detected</span>
-                <Badge tier={1} color="warning">Cross-upload</Badge>
-                <span className="ml-auto flex items-center gap-1.5 text-[11px]" style={{ color: C.midText }}>
-                  Similarity:
-                  <span className="font-bold mono" style={{ color: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.midText }}>
-                    {d.similarity}%
-                  </span>
-                </span>
-              </div>
-              {/* Similarity bar */}
-              <div className="progress-track mb-4" style={{ height: 5 }}>
-                <div className="progress-fill" style={{
-                  width: `${d.similarity}%`,
-                  background: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue,
-                }} />
-              </div>
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                {[d.rec1, d.rec2].map((r, i) => (
-                  <div key={i} className="p-3 rounded-[6px] border border-[#EDF2F7]" style={{ background: C.lightTint }}>
-                    <p className="text-[11px] font-semibold mb-2" style={{ color: C.navy }}>Record {i + 1} — {r.source}</p>
-                    {[
-                      { label: 'Name',      val: r.name },
-                      { label: 'NPI',       val: r.npi  },
-                      { label: 'Specialty', val: r.spec },
-                      { label: 'State',     val: r.state },
-                    ].map(row => (
-                      <div key={row.label} className="flex gap-2 text-[11px] mb-0.5">
-                        <span style={{ color: C.midText, width: 60, flexShrink: 0 }}>{row.label}</span>
-                        <span className="mono font-medium" style={{ color: C.darkText }}>{row.val}</span>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-              <div className="flex gap-2">
-                <Btn size="sm" variant="primary">Merge → keep best fields</Btn>
-                <Btn size="sm" variant="secondary">Keep Both</Btn>
-                <Btn size="sm" variant="danger">Remove duplicate</Btn>
-              </div>
+          {/* Empty state */}
+          {resolvedDup.size === DUPLICATES.length && (
+            <Card>
+              <EmptyState
+                icon={Icon.checkCircle}
+                title="All duplicate clusters resolved"
+                subtitle="No further deduplication required. Your dataset is clean."
+              />
             </Card>
-          ))}
+          )}
+
+          {sortedDup.map(d => {
+            const isResolved = resolvedDup.has(d.id)
+            const isMerging  = mergingDup.has(d.id)
+            const resolution = resolvedDup.get(d.id)
+            const master     = masterSel.get(d.id)
+            const hasMaster  = masterSel.has(d.id)
+
+            // Compare field-by-field to find diffs
+            const COMPARE_FIELDS: { label: string; key: keyof DupRecord }[] = [
+              { label: 'NPI',        key: 'npi'       },
+              { label: 'First Name', key: 'firstName' },
+              { label: 'Last Name',  key: 'lastName'  },
+              { label: 'Specialty',  key: 'spec'      },
+              { label: 'State',      key: 'state'     },
+              { label: 'Email',      key: 'email'     },
+              { label: 'Phone',      key: 'phone'     },
+              { label: 'Address',    key: 'address'   },
+              { label: 'Source',     key: 'source'    },
+            ]
+
+            return (
+              <Card key={d.id} className={isResolved ? 'opacity-50' : ''}>
+                {/* ── Cluster header ── */}
+                <div className="flex items-center gap-2 mb-3">
+                  <span style={{ color: C.warning }}>{Icon.copy}</span>
+                  <span className="text-[13px] font-bold" style={{ color: C.darkText }}>Duplicate cluster detected</span>
+                  <Badge tier={1} color={d.rec1.source !== d.rec2.source ? 'warning' : 'info'}>
+                    {d.rec1.source !== d.rec2.source ? 'Cross-upload' : 'Same upload'}
+                  </Badge>
+                  <span className="ml-auto flex items-center gap-2">
+                    <span className="text-[11px]" style={{ color: C.midText }}>Similarity</span>
+                    <span className="font-bold mono text-[13px]" style={{ color: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue }}>
+                      {d.similarity}%
+                    </span>
+                    {isResolved && (
+                      <Badge tier={2}
+                        color={resolution === 'merged' ? 'approve' : resolution === 'distinct' ? 'info' : 'block'}>
+                        {resolution === 'merged' ? `✓ Merged → Record ${master}` : resolution === 'distinct' ? 'Distinct entities' : 'Duplicate removed'}
+                      </Badge>
+                    )}
+                  </span>
+                </div>
+
+                {/* ── Similarity bar ── */}
+                <div className="progress-track mb-4" style={{ height: 5 }}>
+                  <div className="progress-fill" style={{
+                    width: `${d.similarity}%`,
+                    background: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue,
+                  }} />
+                </div>
+
+                {/* ── Side-by-side comparison table ── */}
+                <div className="rounded-[6px] border border-[#EDF2F7] overflow-hidden mb-4">
+                  {/* Column headers with master-select */}
+                  <div className="grid" style={{ gridTemplateColumns: '130px 1fr 1fr' }}>
+                    <div className="px-3 py-2 border-b border-r border-[#EDF2F7] text-[10px] font-semibold uppercase tracking-wider" style={{ background: '#F7FAFC', color: C.midText }}>Field</div>
+                    {[1, 2].map(idx => {
+                      const rec  = idx === 1 ? d.rec1 : d.rec2
+                      const isMaster = master === idx
+                      return (
+                        <div key={idx}
+                          className="px-3 py-2 border-b border-[#EDF2F7] flex items-center justify-between"
+                          style={{ borderLeft: '1px solid #EDF2F7', background: isMaster ? '#F0FDF4' : '#F7FAFC' }}>
+                          <div>
+                            <p className="text-[11px] font-bold" style={{ color: isMaster ? C.success : C.navy }}>Record {idx}</p>
+                            <p className="text-[10px]" style={{ color: C.midText }}>{rec.source}</p>
+                          </div>
+                          {!isResolved && (
+                            <button
+                              onClick={() => setMasterSel(prev => {
+                                const m = new Map(prev)
+                                m.set(d.id, idx as 1 | 2)
+                                return m
+                              })}
+                              className="text-[10px] font-bold px-2 py-1 rounded-[4px] border transition-all"
+                              style={{
+                                borderColor: isMaster ? C.success : C.border,
+                                background:  isMaster ? '#E8F5EF' : 'white',
+                                color:       isMaster ? C.success : C.midText,
+                              }}>
+                              {isMaster ? '★ Master' : '☆ Set as Master'}
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {/* Field-by-field rows */}
+                  {COMPARE_FIELDS.map((f, fi) => {
+                    const v1   = d.rec1[f.key]
+                    const v2   = d.rec2[f.key]
+                    const diff = v1 !== v2
+                    return (
+                      <div key={f.key}
+                        className="grid"
+                        style={{
+                          gridTemplateColumns: '130px 1fr 1fr',
+                          background: fi % 2 === 0 ? 'white' : '#FAFBFC',
+                          borderTop: '1px solid #EDF2F7',
+                        }}>
+                        <div className="px-3 py-2 border-r border-[#EDF2F7] text-[11px] font-semibold flex items-center" style={{ color: C.midText }}>
+                          {f.label}
+                          {diff && <span className="ml-1.5 text-[9px] font-bold px-1 py-0.5 rounded" style={{ background: '#FEF3C7', color: '#92400E' }}>DIFF</span>}
+                        </div>
+                        {[1, 2].map(idx => {
+                          const val      = idx === 1 ? v1 : v2
+                          const isMasterCol = master === idx
+                          return (
+                            <div key={idx}
+                              className="px-3 py-2 mono text-[11px] flex items-center"
+                              style={{
+                                borderLeft: '1px solid #EDF2F7',
+                                color:      diff ? (isMasterCol ? C.success : C.danger) : C.darkText,
+                                fontWeight: diff && isMasterCol ? 700 : 400,
+                                background: diff && isMasterCol ? '#F0FDF4' : diff && !isMasterCol ? '#FFF9F9' : 'transparent',
+                              }}>
+                              {val || <span style={{ color: C.border }}>—</span>}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* ── Action bar ── */}
+                {!isResolved && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Btn
+                      variant={hasMaster ? 'primary' : 'disabled'}
+                      disabled={!hasMaster || isMerging}
+                      size="sm"
+                      icon={isMerging ? Icon.spinner : Icon.checkCircle}
+                      onClick={() => resolveDup(d.id, 'merged', master)}
+                    >
+                      {isMerging ? 'Merging…' : `Confirm Merge → keep Record ${master ?? '?'}`}
+                    </Btn>
+                    {!hasMaster && (
+                      <span className="text-[11px]" style={{ color: C.midText }}>Select a master record above to enable merge</span>
+                    )}
+                    <div className="ml-auto flex gap-2">
+                      <Btn size="sm" variant="ghost"
+                        disabled={isMerging}
+                        onClick={() => resolveDup(d.id, 'distinct')}>
+                        Mark as Distinct Entities
+                      </Btn>
+                      <Btn size="sm" variant="danger"
+                        disabled={isMerging}
+                        onClick={() => resolveDup(d.id, 'removed')}>
+                        Remove Duplicate
+                      </Btn>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            )
+          })}
         </div>
       )}
 
