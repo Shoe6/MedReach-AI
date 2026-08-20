@@ -779,6 +779,65 @@ function ForgotPasswordScreen({ onNavigate }: { onNavigate: (s: Screen) => void 
 
 // ─── DASHBOARD ───────────────────────────────────────────────────────────────
 
+// ─── DASHBOARD STATS HOOK ───────────────────────────────────────────────────
+
+interface DashboardStats {
+  total_hcps: number
+  records_this_week: number
+  health_score: number
+  unresolved_flags: { pii: number; duplicates: number; outliers: number; npi_validation: number; total: number }
+  last_upload: string | null
+  source: string
+}
+
+function useDashboardStats() {
+  const [data,    setData]    = useState<DashboardStats | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState<string | null>(null)
+  const [lastFetched, setLastFetched] = useState<Date | null>(null)
+
+  const fetch_ = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('http://localhost:8000/api/dashboard/summary')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json: DashboardStats = await res.json()
+      setData(json)
+      setLastFetched(new Date())
+    } catch (e) {
+      // Use demo-seed fallback so the UI is never blank
+      setData({
+        total_hcps: 10412,
+        records_this_week: 847,
+        health_score: 84,
+        unresolved_flags: { pii: 6, duplicates: 3, outliers: 4, npi_validation: 4, total: 17 },
+        last_upload: null,
+        source: 'demo_seed',
+      })
+      setError('Backend offline — showing cached demo data')
+      setLastFetched(new Date())
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { fetch_() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  return { data, loading, error, refresh: fetch_, lastFetched }
+}
+
+// Skeleton shimmer block used while stats are loading
+function StatSkeleton() {
+  return (
+    <div className="animate-pulse flex flex-col gap-2">
+      <div className="h-3 rounded w-24" style={{ background: '#E2E8F0' }} />
+      <div className="h-9 rounded w-20" style={{ background: '#E2E8F0' }} />
+      <div className="h-2.5 rounded w-32" style={{ background: '#EDF2F7' }} />
+    </div>
+  )
+}
+
 const RECENT_ACTIVITY = [
   { time: '2 min ago', actor: 'Jane Doe', action: 'Resolved PII flag', resource: 'Record #4821' },
   { time: '18 min ago', actor: 'Mark Chen', action: 'Exported Clean HCP CSV', resource: '10,412 records' },
@@ -788,30 +847,135 @@ const RECENT_ACTIVITY = [
 ]
 
 function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { data: stats, loading, error, refresh, lastFetched } = useDashboardStats()
+  // If user has been in Data Review this session, blend in the live score
+  const { resolvedOut } = useOutliers()
+  const { resolvedVal }  = useValidation()
+
+  // Derive live flag open counts (blend Firestore + any in-session resolutions)
+  const liveFlags = stats ? {
+    pii:            Math.max(0, stats.unresolved_flags.pii            - 0), // PII not yet in context
+    duplicates:     Math.max(0, stats.unresolved_flags.duplicates),
+    outliers:       Math.max(0, stats.unresolved_flags.outliers       - resolvedOut.size),
+    npi_validation: Math.max(0, stats.unresolved_flags.npi_validation - resolvedVal.size),
+  } : null
+  const liveFlagTotal = liveFlags ? Object.values(liveFlags).reduce((a, b) => a + b, 0) : 0
+
   return (
     <div className="p-8">
       <SectionHeader
         title="Dashboard"
         subtitle="Overview of your HCP data platform"
-        actions={<Btn variant="primary" onClick={() => onNavigate('upload')} icon={Icon.upload}>Upload Data</Btn>}
+        actions={
+          <div className="flex items-center gap-3">
+            {lastFetched && (
+              <span className="text-[10px]" style={{ color: C.midText }}>
+                Updated {lastFetched.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                {stats?.source === 'demo_seed' && ' · demo data'}
+              </span>
+            )}
+            <Btn variant="ghost" size="sm" onClick={refresh} icon={loading ? Icon.spinner : undefined}>
+              {loading ? 'Refreshing…' : 'Refresh'}
+            </Btn>
+            <Btn variant="primary" onClick={() => onNavigate('upload')} icon={Icon.upload}>Upload Data</Btn>
+          </div>
+        }
       />
 
-      {/* Metric cards */}
+      {/* Backend status banner */}
+      {error && (
+        <Banner type="warning" onClose={() => {}}>{error}</Banner>
+      )}
+
+      {/* ── Metric cards ── */}
       <div className="grid grid-cols-3 gap-6 mb-8">
-        {[
-          { label: 'Total Records', value: '10,412', sub: '+847 this week', color: C.navy, icon: Icon.users },
-          { label: 'Data Quality Score', value: '84%', sub: '↑ 6pts since last upload', color: C.success, icon: Icon.shield },
-          { label: 'Open Flags', value: '23', sub: '12 PII · 4 Duplicates · 7 Outliers', color: C.danger, icon: Icon.alertTriangle },
-        ].map(m => (
-          <Card key={m.label} className="card-hover">
-            <div className="flex items-start justify-between mb-3">
-              <span className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: C.midText }}>{m.label}</span>
-              <span style={{ color: m.color }}>{m.icon}</span>
-            </div>
-            <div className="text-[32px] font-bold leading-none mb-1" style={{ fontFamily: 'Calibri, Georgia, serif', color: m.color }}>{m.value}</div>
-            <p className="text-[11px]" style={{ color: C.midText }}>{m.sub}</p>
-          </Card>
-        ))}
+        {/* Total HCPs */}
+        <Card className="card-hover">
+          <div className="flex items-start justify-between mb-3">
+            <span className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: C.midText }}>Total HCPs</span>
+            <span style={{ color: C.navy }}>{Icon.users}</span>
+          </div>
+          {loading ? <StatSkeleton /> : (
+            <>
+              <div className="text-[32px] font-bold leading-none mb-1"
+                style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>
+                {(stats?.total_hcps ?? 0).toLocaleString()}
+              </div>
+              <p className="text-[11px]" style={{ color: C.midText }}>
+                +{(stats?.records_this_week ?? 0).toLocaleString()} this week
+              </p>
+            </>
+          )}
+        </Card>
+
+        {/* Data Health Score */}
+        <Card className="card-hover">
+          <div className="flex items-start justify-between mb-3">
+            <span className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: C.midText }}>Data Health Score</span>
+            <span style={{ color: C.success }}>{Icon.shield}</span>
+          </div>
+          {loading ? <StatSkeleton /> : (() => {
+            const s = stats?.health_score ?? 0
+            const scoreColor = s >= 85 ? C.success : s >= 65 ? C.corpBlue : s >= 45 ? C.warning : C.danger
+            const scoreLabel = s >= 85 ? '↑ Excellent' : s >= 65 ? '↑ Good' : s >= 45 ? '↓ Fair' : '↓ Poor'
+            return (
+              <>
+                <div className="text-[32px] font-bold leading-none mb-1"
+                  style={{ fontFamily: 'Calibri, Georgia, serif', color: scoreColor }}>
+                  {s}%
+                </div>
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="progress-track flex-1" style={{ height: 6 }}>
+                    <div style={{
+                      height: '100%', borderRadius: 4, width: `${s}%`,
+                      background: `linear-gradient(90deg, ${C.danger} 0%, ${C.warning} 30%, ${C.corpBlue} 60%, ${C.success} 85%)`,
+                      transition: 'width 0.6s cubic-bezier(0.4,0,0.2,1)',
+                    }} />
+                  </div>
+                </div>
+                <p className="text-[11px]" style={{ color: scoreColor }}>{scoreLabel} · company-wide</p>
+              </>
+            )
+          })()}
+        </Card>
+
+        {/* Unresolved Flags */}
+        <Card className="card-hover">
+          <div className="flex items-start justify-between mb-3">
+            <span className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: C.midText }}>Unresolved Flags</span>
+            <span style={{ color: C.danger }}>{Icon.alertTriangle}</span>
+          </div>
+          {loading ? <StatSkeleton /> : (
+            <>
+              <div className="text-[32px] font-bold leading-none mb-1"
+                style={{ fontFamily: 'Calibri, Georgia, serif', color: liveFlagTotal > 0 ? C.danger : C.success }}>
+                {liveFlagTotal}
+              </div>
+              {liveFlags && (
+                <div className="flex flex-col gap-0.5">
+                  {([
+                    { key: 'pii',            label: 'PII'        },
+                    { key: 'npi_validation', label: 'NPI'        },
+                    { key: 'duplicates',     label: 'Duplicates' },
+                    { key: 'outliers',       label: 'Outliers'   },
+                  ] as const).map(({ key, label }) => (
+                    liveFlags[key] > 0 ? (
+                      <div key={key} className="flex items-center gap-1.5">
+                        <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: C.danger }} />
+                        <span className="text-[10px]" style={{ color: C.midText }}>
+                          <span className="font-bold" style={{ color: C.danger }}>{liveFlags[key]}</span> {label}
+                        </span>
+                      </div>
+                    ) : null
+                  ))}
+                  {liveFlagTotal === 0 && (
+                    <p className="text-[11px]" style={{ color: C.success }}>All flags resolved ✓</p>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </Card>
       </div>
 
       <div className="grid grid-cols-3 gap-6 mb-8">
@@ -863,7 +1027,11 @@ function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Current Upload Quality</h3>
           <Btn variant="secondary" size="sm" onClick={() => onNavigate('data-review')}>Resolve Flags</Btn>
         </div>
-        <ProgressBar value={84} color="info" label="Overall Quality Score" />
+        {loading ? (
+          <div className="animate-pulse h-4 rounded w-full" style={{ background: '#E2E8F0' }} />
+        ) : (
+          <ProgressBar value={stats?.health_score ?? 84} color={(stats?.health_score ?? 84) >= 80 ? 'success' : 'warning'} label="Overall Quality Score" />
+        )}
       </Card>
 
       {/* Activity feed */}
