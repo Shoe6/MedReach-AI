@@ -1,0 +1,6 @@
+npi,first_name,last_name,email,phone,practice_state,specialty,has_opted_in
+1234567890,John,Doe,john.doe@hospital.com,(555) 123-4567,CA,Cardiology,true
+9876543210,Jane,Smith,jane.smith@clinic.org,555-234-5678,NY,Internal Medicine,yes
+1111111111,Michael,Johnson,michael.j@medical.net,5559876543,TX,OB/GYN,1
+2222222222,Sarah,Williams,sarah.williams@health.com,(555) 555-5555,FL,Orthopedics,true
+3333333333,David,Brown,david.brown@practice.com,555-666-6666,PA,Neurology,yes

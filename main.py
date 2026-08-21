@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from firebase_admin import storage
 
@@ -12,6 +13,14 @@ from database import db
 from ingestion import ingest_csv_chunks
 
 app = FastAPI(title="MedReach AI Backend", version="1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 async def validate_csv_upload(file: UploadFile) -> None:
@@ -100,6 +109,41 @@ async def upload_company_file(company_id: str, file: UploadFile = File(...)):
         "inferred_schema": ingestion_summary["inferred_schema"],
         "peak_memory_mb": ingestion_summary["peak_memory_mb"],
     }
+
+
+@app.get("/api/companies/{company_id}/dashboard_metrics")
+async def get_company_dashboard_metrics(company_id: str):
+    """Return executive metrics aggregated from the company's upload metadata."""
+    try:
+        uploads = db.collection("companies").document(company_id).collection("uploads").stream()
+        total_hcp = 0
+        total_flags = 0
+        health_scores = []
+
+        for document in uploads:
+            upload = document.to_dict() or {}
+            metadata = upload.get("metadata") or {}
+            total_hcp += int(metadata.get("record_count", upload.get("record_count", 0)) or 0)
+            total_flags += int(metadata.get("flag_count", upload.get("flag_count", 0)) or 0)
+            health_score = float(
+                metadata.get("quality_score", upload.get("quality_score", 0)) or 0
+            )
+            if health_score > 0:
+                health_scores.append(health_score)
+
+        return {
+            "company_id": company_id,
+            "total_healthcare_professionals": total_hcp,
+            "data_health_score": round(sum(health_scores) / len(health_scores), 1)
+            if health_scores
+            else 0.0,
+            "unresolved_validation_flags": total_flags,
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to retrieve dashboard metrics: {exc}",
+        ) from exc
 
 
 @app.get("/api/companies/{company_id}/export_data")

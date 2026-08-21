@@ -1,8 +1,8 @@
 from fastapi import FastAPI, HTTPException, Path
 from database import db
 
-from crud import create_company, create_upload, create_user
-from models import Company, Upload, User
+from crud import create_company, create_upload, create_user, get_dashboard_metrics
+from models import Company, Upload, User, DashboardMetrics
 
 app = FastAPI(title="MedReach AI Backend", version="1.0")
 
@@ -71,3 +71,28 @@ async def post_upload(
     if not doc_ref:
         raise HTTPException(status_code=500, detail="Unable to create upload")
     return upload
+
+
+@app.get("/api/companies/{company_id}/dashboard_metrics", response_model=DashboardMetrics)
+async def get_company_dashboard_metrics(
+    company_id: str = Path(
+        ...,
+        description="Tenant company identifier",
+    ),
+):
+    """
+    Retrieve aggregated dashboard metrics for a company.
+    
+    Returns metrics including:
+    - Total processed healthcare professionals
+    - Company-wide data health score (0-100)
+    - Count of unresolved validation flags
+    """
+    try:
+        metrics = await get_dashboard_metrics(company_id)
+        return metrics
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to retrieve dashboard metrics: {str(e)}",
+        )

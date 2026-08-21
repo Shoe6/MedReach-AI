@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, createContext, useContext, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
+import ExecutiveMetricCards from './ExecutiveMetricCards'
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 
@@ -771,23 +772,7 @@ function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         actions={<Btn variant="primary" onClick={() => onNavigate('upload')} icon={Icon.upload}>Upload Data</Btn>}
       />
 
-      {/* Metric cards */}
-      <div className="grid grid-cols-3 gap-6 mb-8">
-        {[
-          { label: 'Total Records', value: '10,412', sub: '+847 this week', color: C.navy, icon: Icon.users },
-          { label: 'Data Quality Score', value: '84%', sub: '↑ 6pts since last upload', color: C.success, icon: Icon.shield },
-          { label: 'Open Flags', value: '23', sub: '12 PII · 4 Duplicates · 7 Outliers', color: C.danger, icon: Icon.alertTriangle },
-        ].map(m => (
-          <Card key={m.label} className="card-hover">
-            <div className="flex items-start justify-between mb-3">
-              <span className="text-[11px] font-semibold uppercase tracking-widest" style={{ color: C.midText }}>{m.label}</span>
-              <span style={{ color: m.color }}>{m.icon}</span>
-            </div>
-            <div className="text-[32px] font-bold leading-none mb-1" style={{ fontFamily: 'Calibri, Georgia, serif', color: m.color }}>{m.value}</div>
-            <p className="text-[11px]" style={{ color: C.midText }}>{m.sub}</p>
-          </Card>
-        ))}
-      </div>
+      <ExecutiveMetricCards companyId="acme" />
 
       <div className="grid grid-cols-3 gap-6 mb-8">
         {/* Quality trend */}

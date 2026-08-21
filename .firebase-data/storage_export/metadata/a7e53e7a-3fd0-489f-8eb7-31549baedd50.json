@@ -1,0 +1,15 @@
+{
+  "name": "companies/test-ma19-company/uploads/76ff78e4-fb61-4166-b0f0-fcb1cbdc8b94_healthcare.csv",
+  "bucket": "demo-medreach-ai.appspot.com",
+  "metageneration": 1,
+  "generation": 1786981419837,
+  "contentType": "text/csv",
+  "storageClass": "STANDARD",
+  "downloadTokens": [],
+  "etag": "XudDtPqbeM7w3bGcgDaJJ3qBgG0",
+  "timeCreated": "2026-08-17T15:43:39.837Z",
+  "updated": "2026-08-17T15:43:39.837Z",
+  "size": 223,
+  "md5Hash": "05GZeVeqor8WMfubxt/9TA==",
+  "crc32c": "773034219"
+}

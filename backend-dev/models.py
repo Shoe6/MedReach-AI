@@ -60,3 +60,26 @@ class Upload(BaseModel):
 
     class Config:
         frozen = True
+
+
+class DashboardMetrics(BaseModel):
+    """Executive dashboard metrics aggregated for a company."""
+    company_id: str = Field(..., description="Tenant-scoped company identifier")
+    total_healthcare_professionals: int = Field(
+        default=0,
+        description="Total count of processed HCP records across all uploads",
+    )
+    data_health_score: float = Field(
+        default=0.0,
+        description="Company-wide data quality score (0-100 percentage)",
+        ge=0.0,
+        le=100.0,
+    )
+    unresolved_validation_flags: int = Field(
+        default=0,
+        description="Count of unresolved data validation and quality flags",
+    )
+    last_updated: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        frozen = True
