@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, createContext, useContext, type ReactNode } from 'react'
+import { useState, useRef, useEffect, createContext, useContext, Fragment, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
 
@@ -26,6 +26,31 @@ const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
   setRole: () => {},
 })
 const useRole = () => useContext(RoleContext)
+
+// Shared upload file metadata (written by UploadScreen, read by ColumnMappingScreen + ExportScreen)
+interface UploadMeta { fileName: string; fileSize: number; rowCount: number; fileType: string; uploadedAt: string }
+const UploadContext = createContext<{ meta: UploadMeta | null; setMeta: (m: UploadMeta | null) => void }>({
+  meta: null, setMeta: () => {},
+})
+const useUploadMeta = () => useContext(UploadContext)
+
+// Shared NPI validation resolution state — read by ExportScreen to gate CSV export
+type ValAction = 'removed' | 'override'
+const ValidationContext = createContext<{
+  resolvedVal: Map<number, ValAction>
+  setResolvedVal: (m: Map<number, ValAction>) => void
+}>({ resolvedVal: new Map(), setResolvedVal: () => {} })
+const useValidation = () => useContext(ValidationContext)
+
+// Shared outlier resolution state — read by Analytics + Export
+type OutAction = 'removed' | 'kept' | 'warned'
+const OutlierContext = createContext<{
+  resolvedOut: Map<number, OutAction>
+  setResolvedOut: (m: Map<number, OutAction>) => void
+  warnNotes: Record<number, string>
+  setWarnNotes: (n: Record<number, string>) => void
+}>({ resolvedOut: new Map(), setResolvedOut: () => {}, warnNotes: {}, setWarnNotes: () => {} })
+const useOutliers = () => useContext(OutlierContext)
 
 type Screen =
   | 'login' | 'register' | 'forgot-password' | 'reset-password' | 'mfa'
@@ -343,7 +368,7 @@ function ProgressBar({ value, color = 'info', label }: { value: number; color?: 
         </div>
       )}
       <div className="progress-track">
-        <div className="progress-fill" style={{ width: `${value}%`, background: colors[color] }} />
+        <div className="progress-fill" style={{ width: `${value}%`, background: colors[color], transition: 'width 0.5s cubic-bezier(0.4,0,0.2,1)' }} />
       </div>
     </div>
   )
@@ -755,6 +780,65 @@ function ForgotPasswordScreen({ onNavigate }: { onNavigate: (s: Screen) => void 
 
 // ─── DASHBOARD ───────────────────────────────────────────────────────────────
 
+// ─── DASHBOARD STATS HOOK ───────────────────────────────────────────────────
+
+interface DashboardStats {
+  total_hcps: number
+  records_this_week: number
+  health_score: number
+  unresolved_flags: { pii: number; duplicates: number; outliers: number; npi_validation: number; total: number }
+  last_upload: string | null
+  source: string
+}
+
+function useDashboardStats() {
+  const [data,    setData]    = useState<DashboardStats | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState<string | null>(null)
+  const [lastFetched, setLastFetched] = useState<Date | null>(null)
+
+  const fetch_ = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('http://localhost:8000/api/dashboard/summary')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json: DashboardStats = await res.json()
+      setData(json)
+      setLastFetched(new Date())
+    } catch (e) {
+      // Use demo-seed fallback so the UI is never blank
+      setData({
+        total_hcps: 10412,
+        records_this_week: 847,
+        health_score: 84,
+        unresolved_flags: { pii: 6, duplicates: 3, outliers: 4, npi_validation: 4, total: 17 },
+        last_upload: null,
+        source: 'demo_seed',
+      })
+      setError('Backend offline — showing cached demo data')
+      setLastFetched(new Date())
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { fetch_() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  return { data, loading, error, refresh: fetch_, lastFetched }
+}
+
+// Skeleton shimmer block used while stats are loading
+function StatSkeleton() {
+  return (
+    <div className="animate-pulse flex flex-col gap-2">
+      <div className="h-3 rounded w-24" style={{ background: '#E2E8F0' }} />
+      <div className="h-9 rounded w-20" style={{ background: '#E2E8F0' }} />
+      <div className="h-2.5 rounded w-32" style={{ background: '#EDF2F7' }} />
+    </div>
+  )
+}
+
 const RECENT_ACTIVITY = [
   { time: '2 min ago', actor: 'Jane Doe', action: 'Resolved PII flag', resource: 'Record #4821' },
   { time: '18 min ago', actor: 'Mark Chen', action: 'Exported Clean HCP CSV', resource: '10,412 records' },
@@ -764,12 +848,39 @@ const RECENT_ACTIVITY = [
 ]
 
 function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { data: stats, loading, error, refresh, lastFetched } = useDashboardStats()
+  // If user has been in Data Review this session, blend in the live score
+  const { resolvedOut } = useOutliers()
+  const { resolvedVal }  = useValidation()
+
+  // Derive live flag open counts (blend Firestore + any in-session resolutions)
+  const liveFlags = stats ? {
+    pii:            Math.max(0, stats.unresolved_flags.pii            - 0), // PII not yet in context
+    duplicates:     Math.max(0, stats.unresolved_flags.duplicates),
+    outliers:       Math.max(0, stats.unresolved_flags.outliers       - resolvedOut.size),
+    npi_validation: Math.max(0, stats.unresolved_flags.npi_validation - resolvedVal.size),
+  } : null
+  const liveFlagTotal = liveFlags ? Object.values(liveFlags).reduce((a, b) => a + b, 0) : 0
+
   return (
     <div className="p-8">
       <SectionHeader
         title="Dashboard"
         subtitle="Overview of your HCP data platform"
-        actions={<Btn variant="primary" onClick={() => onNavigate('upload')} icon={Icon.upload}>Upload Data</Btn>}
+        actions={
+          <div className="flex items-center gap-3">
+            {lastFetched && (
+              <span className="text-[10px]" style={{ color: C.midText }}>
+                Updated {lastFetched.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                {stats?.source === 'demo_seed' && ' · demo data'}
+              </span>
+            )}
+            <Btn variant="ghost" size="sm" onClick={refresh} icon={loading ? Icon.spinner : undefined}>
+              {loading ? 'Refreshing…' : 'Refresh'}
+            </Btn>
+            <Btn variant="primary" onClick={() => onNavigate('upload')} icon={Icon.upload}>Upload Data</Btn>
+          </div>
+        }
       />
 
       <ExecutiveMetricCards companyId="acme" />
@@ -823,7 +934,11 @@ function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Current Upload Quality</h3>
           <Btn variant="secondary" size="sm" onClick={() => onNavigate('data-review')}>Resolve Flags</Btn>
         </div>
-        <ProgressBar value={84} color="info" label="Overall Quality Score" />
+        {loading ? (
+          <div className="animate-pulse h-4 rounded w-full" style={{ background: '#E2E8F0' }} />
+        ) : (
+          <ProgressBar value={stats?.health_score ?? 84} color={(stats?.health_score ?? 84) >= 80 ? 'success' : 'warning'} label="Overall Quality Score" />
+        )}
       </Card>
 
       {/* Activity feed */}
@@ -881,6 +996,7 @@ const MOCK_PARSE_ERRORS: ParseError[] = [
 ]
 
 function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { setMeta } = useUploadMeta()
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [fileName,    setFileName]    = useState('')
   const [fileSize,    setFileSize]    = useState(0)   // bytes
@@ -892,13 +1008,14 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const totalPct = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0
 
   // ── core upload simulator ──────────────────────────────────────────────────
-  const runUpload = (name: string, sizeMB: number) => {
+  const runUpload = (name: string, sizeMB: number, rowCount = 10412, fileType = 'CSV') => {
     const total = Math.max(1, Math.ceil(sizeMB / CHUNK_SIZE_MB))
     setFileName(name)
     setFileSize(sizeMB)
     setChunksDone(0)
     setChunksTotal(total)
     setUploadState('uploading')
+    setMeta({ fileName: name, fileSize: sizeMB, rowCount, fileType, uploadedAt: new Date().toLocaleString() })
 
     let done = 0
     intervalRef.current = setInterval(() => {
@@ -964,8 +1081,14 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     const file = e.target.files?.[0]
     if (!file) return
     const sizeMB = file.size / (1024 * 1024)
-    validateAndUpload(file.name, sizeMB)
-    // reset so the same file can be picked again
+    const ext = file.name.split('.').pop()?.toUpperCase() || 'CSV'
+    if (!file.name.endsWith('.csv') && !file.name.endsWith('.xlsx')) {
+      setFileName(file.name); setUploadState('error-type'); e.currentTarget.value = ''; return
+    }
+    if (sizeMB > MAX_FILE_MB) {
+      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); e.currentTarget.value = ''; return
+    }
+    runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
     e.currentTarget.value = ''
   }
 
@@ -1012,7 +1135,14 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     const file = e.dataTransfer.files[0]
     if (!file) { setUploadState('idle'); return }
     const sizeMB = file.size / (1024 * 1024)
-    validateAndUpload(file.name, sizeMB)
+    const ext = file.name.split('.').pop()?.toUpperCase() || 'CSV'
+    if (!file.name.toLowerCase().endsWith('.csv') && !file.name.toLowerCase().endsWith('.xlsx')) {
+      setFileName(file.name); setUploadState('error-type'); return
+    }
+    if (sizeMB > MAX_FILE_MB) {
+      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); return
+    }
+    runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
   }
 
   // ── demo: trigger network error manually ──────────────────────────────────
@@ -1408,6 +1538,7 @@ const PREVIEW_DATA = [
 ]
 
 function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { meta } = useUploadMeta()
   const [mappings, setMappings] = useState<string[]>(INITIAL_MAPPINGS.map(m => m.suggested))
   const [overridden, setOverridden] = useState<Set<number>>(new Set())
   const [showConfidence, setShowConfidence] = useState(true)
@@ -1670,6 +1801,16 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
         </div>
         {/* Gating status strip below the preview */}
         <div className="mt-3 flex flex-wrap items-center gap-3">
+          {meta && (
+            <div className="flex items-center gap-2 mr-3 px-3 py-1 rounded-[6px] text-[11px]" style={{ background: C.lightTint, color: C.navy }}>
+              <span style={{ color: C.teal }}>{Icon.fileCheck}</span>
+              <span className="font-semibold mono">{meta.fileName}</span>
+              <span style={{ color: C.midText }}>·</span>
+              <span style={{ color: C.midText }}>~{meta.rowCount.toLocaleString()} rows</span>
+              <span style={{ color: C.midText }}>·</span>
+              <span className="font-bold" style={{ color: C.corpBlue }}>{meta.fileType}</span>
+            </div>
+          )}
           {REQUIRED_FIELDS.map(rf => {
             const mapped = mappings.includes(rf)
             return (
@@ -1761,32 +1902,52 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
 // ── Data Review data ─────────────────────────────────────────────────────────
 
 const PII_FLAGS = [
-  { record: 'James Morrison #4821',  field: 'SSN',           type: 'Social Security Number', severity: 'High',   nullPct: 2  },
-  { record: 'Sarah Chen #2204',      field: 'DOB',           type: 'Date of Birth',           severity: 'Medium', nullPct: 8  },
-  { record: 'Robert Patel #8812',    field: 'Personal Email',type: 'Personal Identifier',     severity: 'Low',    nullPct: 14 },
-  { record: 'Linda Torres #3391',    field: 'Home Address',  type: 'Physical Address',        severity: 'High',   nullPct: 5  },
-  { record: 'Michael Brennan #7741', field: 'SSN',           type: 'Social Security Number',  severity: 'High',   nullPct: 2  },
-  { record: 'Yuki Tanaka #0293',     field: 'Credit Card',   type: 'Financial Identifier',    severity: 'High',   nullPct: 0  },
+  { id: 0, record: 'James Morrison #4821',  field: 'SSN',           type: 'Social Security Number', severity: 'High',   nullPct: 2  },
+  { id: 1, record: 'Sarah Chen #2204',      field: 'DOB',           type: 'Date of Birth',           severity: 'Medium', nullPct: 8  },
+  { id: 2, record: 'Robert Patel #8812',    field: 'Personal Email',type: 'Personal Identifier',     severity: 'Low',    nullPct: 14 },
+  { id: 3, record: 'Linda Torres #3391',    field: 'Home Address',  type: 'Physical Address',        severity: 'High',   nullPct: 5  },
+  { id: 4, record: 'Michael Brennan #7741', field: 'SSN',           type: 'Social Security Number',  severity: 'High',   nullPct: 2  },
+  { id: 5, record: 'Yuki Tanaka #0293',     field: 'Credit Card',   type: 'Financial Identifier',    severity: 'High',   nullPct: 0  },
 ]
 
-const DUPLICATES = [
-  { id: 'A', similarity: 97, rec1: { npi: '1234567890', name: 'James Morrison',  spec: 'Cardiology', state: 'FL', source: 'Q1_Upload' }, rec2: { npi: '1234567890', name: 'Jim Morrison',    spec: 'Cardiology', state: 'FL', source: 'Q2_Upload' } },
-  { id: 'B', similarity: 91, rec1: { npi: '5544332211', name: 'Robert Patel',    spec: 'Neurology',  state: 'CA', source: 'Q1_Upload' }, rec2: { npi: '5544332211', name: 'Rob Patel MD',    spec: 'Neurology',  state: 'CA', source: 'Q1_Upload' } },
-  { id: 'C', similarity: 84, rec1: { npi: '9988221100', name: 'Angela Ruiz',     spec: 'Oncology',   state: 'TX', source: 'Q1_Upload' }, rec2: { npi: '9988221100', name: 'Angela M. Ruiz', spec: 'Oncology',   state: 'TX', source: 'Q2_Upload' } },
+interface DupRecord {
+  npi: string; firstName: string; lastName: string; spec: string
+  state: string; email: string; phone: string; address: string; source: string
+}
+interface DupCluster {
+  id: string; similarity: number
+  rec1: DupRecord; rec2: DupRecord
+}
+const DUPLICATES: DupCluster[] = [
+  {
+    id: 'A', similarity: 97,
+    rec1: { npi: '1234567890', firstName: 'James',  lastName: 'Morrison',   spec: 'Cardiology', state: 'FL', email: 'j.morrison@floridahealth.com',  phone: '(305) 882-4411', address: '101 Medical Dr, Miami FL',              source: 'Q1_Upload' },
+    rec2: { npi: '1234567890', firstName: 'Jim',    lastName: 'Morrison',   spec: 'Cardiology', state: 'FL', email: 'jmorrison@baptisthealth.net',   phone: '(305) 882-4411', address: '101 Medical Dr, Miami, FL 33101',       source: 'Q2_Upload' },
+  },
+  {
+    id: 'B', similarity: 91,
+    rec1: { npi: '5544332211', firstName: 'Robert', lastName: 'Patel',      spec: 'Neurology',  state: 'CA', email: 'rpatel@ucsf.edu',               phone: '(415) 476-0001', address: '505 Parnassus Ave, San Francisco CA',   source: 'Q1_Upload' },
+    rec2: { npi: '5544332211', firstName: 'Rob',    lastName: 'Patel MD',   spec: 'Neurology',  state: 'CA', email: 'robert.patel@ucsf.edu',         phone: '(415) 476-0001', address: '505 Parnassus Ave, San Francisco CA 94143', source: 'Q1_Upload' },
+  },
+  {
+    id: 'C', similarity: 84,
+    rec1: { npi: '9988221100', firstName: 'Angela', lastName: 'Ruiz',       spec: 'Oncology',   state: 'TX', email: 'aruiz@mdanderson.org',          phone: '(713) 792-2121', address: '1515 Holcombe Blvd, Houston TX',        source: 'Q1_Upload' },
+    rec2: { npi: '9988221100', firstName: 'Angela', lastName: 'M. Ruiz',    spec: 'Oncology',   state: 'TX', email: 'a.m.ruiz@mdanderson.org',       phone: '(713) 792-9999', address: '1515 Holcombe Blvd, Houston TX 77030',  source: 'Q2_Upload' },
+  },
 ]
 
 const OUTLIERS = [
-  { record: 'Dr. Chen #1192',    specialty: 'Oncology',    reason: 'NPI claims volume 10x above oncology specialty average',       severity: 'High',   anomalyScore: 0.94, nullPct: 3  },
-  { record: 'Dr. Williams #4490',specialty: 'Cardiology',  reason: 'Prescribing pattern spans 14 states — geographically implausible', severity: 'Medium', anomalyScore: 0.78, nullPct: 7  },
-  { record: 'Dr. Kim #7723',     specialty: 'Dermatology', reason: 'License expiry date 22 years in the future',                   severity: 'Low',    anomalyScore: 0.61, nullPct: 11 },
-  { record: 'Dr. Okonkwo #5512', specialty: 'Neurology',   reason: 'Email domain does not match registered practice location',    severity: 'Medium', anomalyScore: 0.71, nullPct: 0  },
+  { id: 0, record: 'Dr. Chen #1192',    specialty: 'Oncology',    reason: 'NPI claims volume 10x above oncology specialty average',              severity: 'High',   anomalyScore: 0.94, nullPct: 3  },
+  { id: 1, record: 'Dr. Williams #4490',specialty: 'Cardiology',  reason: 'Prescribing pattern spans 14 states — geographically implausible',   severity: 'Medium', anomalyScore: 0.78, nullPct: 7  },
+  { id: 2, record: 'Dr. Kim #7723',     specialty: 'Dermatology', reason: 'License expiry date 22 years in the future',                          severity: 'Low',    anomalyScore: 0.61, nullPct: 11 },
+  { id: 3, record: 'Dr. Okonkwo #5512', specialty: 'Neurology',   reason: 'Email domain does not match registered practice location',           severity: 'Medium', anomalyScore: 0.71, nullPct: 0  },
 ]
 
 const VALIDATION_ERRORS = [
-  { record: 'Thomas Nguyen #5501', npi: '0000000001', specialty: 'Internal Medicine', state: 'CA', issue: 'NPI not found in NPPES registry',                              issueType: 'Not Found',  nullPct: 6  },
-  { record: 'Carol Davis #3320',   npi: '9988776655', specialty: 'Cardiology',        state: 'NY', issue: 'NPI is inactive since 2019',                                    issueType: 'Inactive',   nullPct: 2  },
-  { record: 'Steven Park #8811',   npi: '1122334455', specialty: 'Surgery',           state: 'TX', issue: 'NPI specialty mismatch — registered as GP, uploaded as Surgeon', issueType: 'Mismatch',   nullPct: 9  },
-  { record: 'Maria Santos #6630',  npi: '4455667788', specialty: 'Oncology',          state: 'FL', issue: 'NPI check digit invalid',                                       issueType: 'Invalid',    nullPct: 4  },
+  { id: 0, record: 'Thomas Nguyen #5501', npi: '0000000001', specialty: 'Internal Medicine', state: 'CA', issue: 'NPI not found in NPPES registry',                              issueType: 'Not Found',  severity: 'High',   nullPct: 6  },
+  { id: 1, record: 'Carol Davis #3320',   npi: '9988776655', specialty: 'Cardiology',        state: 'NY', issue: 'NPI is inactive since 2019',                                    issueType: 'Inactive',   severity: 'Medium', nullPct: 2  },
+  { id: 2, record: 'Steven Park #8811',   npi: '1122334455', specialty: 'Surgery',           state: 'TX', issue: 'NPI specialty mismatch — registered as GP, uploaded as Surgeon', issueType: 'Mismatch',   severity: 'Medium', nullPct: 9  },
+  { id: 3, record: 'Maria Santos #6630',  npi: '4455667788', specialty: 'Oncology',          state: 'FL', issue: 'NPI check digit invalid',                                       issueType: 'Invalid',    severity: 'High',   nullPct: 4  },
 ]
 
 // ── Field-level null completeness summary (shown above each table) ────────────
@@ -1873,14 +2034,39 @@ function DataReviewScreen() {
   const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
-  const [resolvedPII, setResolvedPII] = useState<Set<number>>(new Set())
-  const [resolvedVal, setResolvedVal] = useState<Set<number>>(new Set())
-  const [resolvedOut, setResolvedOut] = useState<Set<number>>(new Set())
+  // Map of PII id -> action ('anonymized'|'removed'|'override')
+  const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override'>>(new Map())
+  // NPI validation resolution — lifted into ValidationContext so ExportScreen can gate export
+  const { resolvedVal, setResolvedVal } = useValidation()
+  // Outlier resolution — lifted into OutlierContext so Analytics + Export can read tagged records
+  const { resolvedOut, setResolvedOut, warnNotes, setWarnNotes } = useOutliers()
+  // Set of outlier ids with the tag-note drawer open
+  const [tagOpen, setTagOpen] = useState<Set<number>>(new Set())
+  // Override justification text (keyed by VALIDATION_ERRORS id)
+  const [valJustifications, setValJustifications] = useState<Record<number, string>>({})
+  // Set of validation error ids with override drawer open
+  const [overrideOpen, setOverrideOpen] = useState<Set<number>>(new Set())
+  // Set of validation error ids currently re-validating (spinner)
+  const [revalidating, setRevalidating] = useState<Set<number>>(new Set())
+  // Duplicate cluster resolution
+  const [resolvedDup, setResolvedDup] = useState<Map<string, 'merged' | 'distinct' | 'removed'>>(new Map())
+  const [masterSel,   setMasterSel]   = useState<Map<string, 1 | 2>>(new Map())
+  const [mergingDup,  setMergingDup]  = useState<Set<string>>(new Set())
+
+  const resolveDup = (id: string, action: 'merged' | 'distinct' | 'removed', master?: 1 | 2) => {
+    setMergingDup(prev => { const s = new Set(prev); s.add(id); return s })
+    // Simulate backend merge/distinct endpoint (~900 ms)
+    setTimeout(() => {
+      setMergingDup(prev => { const s = new Set(prev); s.delete(id); return s })
+      setResolvedDup(prev => { const m = new Map(prev); m.set(id, action); return m })
+      if (master) setMasterSel(prev => { const m = new Map(prev); m.set(id, master); return m })
+    }, 900)
+  }
 
   // ── sort state ───────────────────────────────────────────────────────────
   const [piiSort,  setPiiSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'severity', dir: 'desc' })
   const [outSort,  setOutSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'anomalyScore', dir: 'desc' })
-  const [valSort,  setValSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'issueType', dir: 'asc' })
+  const [valSort,  setValSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'severity', dir: 'desc' })
   const [dupSort,  setDupSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'similarity', dir: 'desc' })
 
   const cycleSort = (
@@ -1919,6 +2105,7 @@ function DataReviewScreen() {
   const sortedVal = [...VALIDATION_ERRORS].sort((a, b) => {
     if (!valSort.key) return 0
     const dir = valSort.dir === 'asc' ? 1 : -1
+    if (valSort.key === 'severity')  return (severityRank(a.severity) - severityRank(b.severity)) * dir
     if (valSort.key === 'issueType') return a.issueType.localeCompare(b.issueType) * dir
     if (valSort.key === 'nullPct')   return (a.nullPct - b.nullPct) * dir
     if (valSort.key === 'npi')       return a.npi.localeCompare(b.npi) * dir
@@ -1930,15 +2117,52 @@ function DataReviewScreen() {
     if (!dupSort.key) return 0
     const dir = dupSort.dir === 'asc' ? 1 : -1
     if (dupSort.key === 'similarity') return (a.similarity - b.similarity) * dir
-    if (dupSort.key === 'name')       return a.rec1.name.localeCompare(b.rec1.name) * dir
+    if (dupSort.key === 'name')       return `${a.rec1.lastName} ${a.rec1.firstName}`.localeCompare(`${b.rec1.lastName} ${b.rec1.firstName}`) * dir
     return 0
   })
 
-  const quality = Math.round(67 + (resolvedPII.size * 4) + (resolvedVal.size * 5) + (resolvedOut.size * 3))
+  // ── Data Health Score (0–100) ───────────────────────────────────────────
+  // Each category contributes a weighted share. Within each category flags are
+  // weighted by severity so resolving High > Medium > Low flags scores more.
+  // Base score of 100 is penalised by unresolved flags, then capped 0–100.
+  const TOTAL_ROWS = 10_412
+
+  const scoreCategory = (
+    flags: { severity: string; id: number }[],
+    resolved: Map<number, unknown>,
+    weight: number               // max points this category can contribute
+  ) => {
+    if (flags.length === 0) return weight
+    const sev = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
+    const totalWeight  = flags.reduce((a, f) => a + sev(f.severity), 0)
+    const earnedWeight = flags
+      .filter(f => resolved.has(f.id))
+      .reduce((a, f) => a + sev(f.severity), 0)
+    return (earnedWeight / totalWeight) * weight
+  }
+
+  // Category weights: NPI (30) > PII (25) > Duplicates (25) > Outliers (20)
+  const npiPoints = scoreCategory(
+    VALIDATION_ERRORS.map(v => ({ severity: v.severity, id: v.id })), resolvedVal, 30)
+  const piiPoints = scoreCategory(
+    PII_FLAGS.map(f => ({ severity: f.severity, id: f.id })), resolvedPII, 25)
+  const dupPoints  = DUPLICATES.length === 0 ? 25
+    : (resolvedDup.size / DUPLICATES.length) * 25
+  const outPoints  = scoreCategory(
+    OUTLIERS.map(o => ({ severity: o.severity, id: o.id })), resolvedOut, 20)
+
+  // Flag-density penalty: reduce base by up to 5 pts if many flags per 1k rows
+  const totalFlags    = PII_FLAGS.length + DUPLICATES.length + OUTLIERS.length + VALIDATION_ERRORS.length
+  const flagDensity   = totalFlags / (TOTAL_ROWS / 1000)          // flags per 1k rows
+  const densityPenalty = Math.min(5, flagDensity * 0.4)
+
+  const quality = Math.min(100, Math.max(0,
+    Math.round(npiPoints + piiPoints + dupPoints + outPoints - densityPenalty)
+  ))
 
   const tabs = [
     { id: 'pii',        label: 'PII / PHI Flags',      count: PII_FLAGS.length - resolvedPII.size },
-    { id: 'duplicates', label: 'Duplicates',            count: DUPLICATES.length },
+    { id: 'duplicates', label: 'Duplicates',            count: DUPLICATES.length - resolvedDup.size },
     { id: 'outliers',   label: 'Statistical Outliers',  count: OUTLIERS.length - resolvedOut.size },
     { id: 'validation', label: 'NPI Validation',        count: VALIDATION_ERRORS.length - resolvedVal.size },
   ] as const
@@ -1950,27 +2174,119 @@ function DataReviewScreen() {
         subtitle="Resolve all flags to improve your data quality score and unlock export"
         actions={
           <div className="flex items-center gap-3">
-            <span className="text-[13px] font-semibold" style={{ color: quality >= 80 ? C.success : C.warning }}>{Math.min(quality, 100)}% Quality</span>
+            <span className="text-[13px] font-bold px-3 py-1 rounded-full"
+              style={{
+                background: quality >= 85 ? '#E8F5EF' : quality >= 65 ? '#EBF4FA' : quality >= 45 ? '#FEF3C7' : '#FEE2E2',
+                color:      quality >= 85 ? C.success  : quality >= 65 ? C.corpBlue : quality >= 45 ? C.warning : C.danger,
+              }}>
+              {quality}/100
+            </span>
             <Btn variant="secondary" size="sm">Export Report</Btn>
           </div>
         }
       />
 
-      {/* Quality bar — updates as flags are resolved */}
-      <Card className="mb-6">
-        <ProgressBar value={Math.min(quality, 100)} color={quality >= 80 ? 'success' : 'warning'} label="Data Quality Score" />
-        <div className="flex gap-6 mt-3">
-          {[
-            { label: 'PII resolved',        val: resolvedPII.size, total: PII_FLAGS.length },
-            { label: 'Outliers resolved',   val: resolvedOut.size, total: OUTLIERS.length },
-            { label: 'NPI errors resolved', val: resolvedVal.size, total: VALIDATION_ERRORS.length },
-          ].map(s => (
-            <div key={s.label} className="text-[11px]" style={{ color: C.midText }}>
-              <span className="font-semibold" style={{ color: s.val === s.total ? C.success : C.navy }}>{s.val}/{s.total}</span> {s.label}
+      {/* ── Data Health Score bar ── */}
+      {(() => {
+        const scoreColor = quality >= 85 ? C.success : quality >= 65 ? C.corpBlue : quality >= 45 ? C.warning : C.danger
+        const scoreLabel = quality >= 85 ? 'Excellent' : quality >= 65 ? 'Good' : quality >= 45 ? 'Fair' : 'Poor'
+        const totalResolved = resolvedPII.size + resolvedDup.size + resolvedOut.size + resolvedVal.size
+        const totalFlags    = PII_FLAGS.length + DUPLICATES.length + OUTLIERS.length + VALIDATION_ERRORS.length
+
+        const segments = [
+          { label: 'NPI Validation', pts: npiPoints,  max: 30, resolved: resolvedVal.size, total: VALIDATION_ERRORS.length, color: C.navy },
+          { label: 'PII / PHI',      pts: piiPoints,  max: 25, resolved: resolvedPII.size, total: PII_FLAGS.length,         color: C.corpBlue },
+          { label: 'Duplicates',     pts: dupPoints,  max: 25, resolved: resolvedDup.size, total: DUPLICATES.length,        color: C.teal },
+          { label: 'Outliers',       pts: outPoints,  max: 20, resolved: resolvedOut.size, total: OUTLIERS.length,          color: '#5C85C4' },
+        ]
+
+        return (
+          <Card className="mb-6">
+            {/* Header row */}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <span className="text-[13px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Health Score</span>
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                  style={{ background: quality >= 85 ? '#E8F5EF' : quality >= 65 ? '#EBF4FA' : quality >= 45 ? '#FEF3C7' : '#FEE2E2',
+                           color: scoreColor }}>
+                  {scoreLabel}
+                </span>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-[11px]" style={{ color: C.midText }}>
+                  {totalResolved}/{totalFlags} flags resolved
+                  <span className="mx-1.5" style={{ color: C.border }}>·</span>
+                  {TOTAL_ROWS.toLocaleString()} rows processed
+                </span>
+                <span className="text-[28px] font-bold leading-none" style={{ fontFamily: 'Calibri, Georgia, serif', color: scoreColor }}>
+                  {quality}
+                  <span className="text-[14px] font-semibold">/ 100</span>
+                </span>
+              </div>
             </div>
-          ))}
-        </div>
-      </Card>
+
+            {/* Master bar with zone markers */}
+            <div className="relative mb-1">
+              <div className="progress-track" style={{ height: 14, borderRadius: 8 }}>
+                <div style={{
+                  height: '100%', borderRadius: 8,
+                  width: `${quality}%`,
+                  background: `linear-gradient(90deg, ${C.danger} 0%, ${C.warning} 30%, ${C.corpBlue} 60%, ${C.success} 85%)`,
+                  transition: 'width 0.6s cubic-bezier(0.4,0,0.2,1)',
+                  backgroundSize: '100% 100%',
+                  backgroundAttachment: 'fixed',
+                }} />
+                {/* Zone threshold tick marks */}
+                {[45, 65, 85].map(t => (
+                  <div key={t} style={{
+                    position: 'absolute', top: 0, bottom: 0,
+                    left: `${t}%`, width: 1,
+                    background: 'rgba(255,255,255,0.6)',
+                    pointerEvents: 'none',
+                  }} />
+                ))}
+              </div>
+              {/* Zone labels below bar */}
+              <div className="flex justify-between mt-1" style={{ fontSize: 9, color: C.midText }}>
+                <span style={{ width: '45%', textAlign: 'left' }}>Poor</span>
+                <span style={{ width: '20%', textAlign: 'center' }}>Fair</span>
+                <span style={{ width: '20%', textAlign: 'center' }}>Good</span>
+                <span style={{ width: '15%', textAlign: 'right' }}>Excellent</span>
+              </div>
+            </div>
+
+            {/* Per-category sub-bars */}
+            <div className="grid grid-cols-4 gap-3 mt-4 pt-4 border-t border-[#EDF2F7]">
+              {segments.map(seg => {
+                const pct = Math.round((seg.pts / seg.max) * 100)
+                return (
+                  <div key={seg.label}>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-[10px] font-semibold" style={{ color: C.midText }}>{seg.label}</span>
+                      <span className="text-[10px] font-bold mono" style={{ color: seg.color }}>
+                        {Math.round(seg.pts * 10) / 10}<span style={{ color: C.midText, fontWeight: 400 }}>/{seg.max}</span>
+                      </span>
+                    </div>
+                    <div className="progress-track" style={{ height: 6 }}>
+                      <div style={{
+                        height: '100%', borderRadius: 4,
+                        width: `${pct}%`,
+                        background: seg.color,
+                        transition: 'width 0.5s cubic-bezier(0.4,0,0.2,1)',
+                      }} />
+                    </div>
+                    <p className="text-[10px] mt-1" style={{ color: C.midText }}>
+                      <span className="font-semibold" style={{ color: seg.resolved === seg.total ? C.success : C.navy }}>
+                        {seg.resolved}/{seg.total}
+                      </span> resolved
+                    </p>
+                  </div>
+                )
+              })}
+            </div>
+          </Card>
+        )
+      })()}
 
       {/* Tabs */}
       <div className="border-b-2 border-[#EDF2F7] mb-6 flex gap-1">
@@ -2006,14 +2322,20 @@ function DataReviewScreen() {
             <div className="flex items-center gap-3 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
               <span className="text-[12px] font-semibold" style={{ color: C.navy }}>{selected.size} records selected</span>
               <Btn size="sm" variant="primary" onClick={() => {
-                const next = new Set(resolvedPII)
-                selected.forEach(i => next.add(i))
-                setResolvedPII(next); setSelected(new Set())
+                setResolvedPII(prev => {
+                  const m = new Map(prev)
+                  selected.forEach(id => m.set(id, 'anonymized'))
+                  return m
+                })
+                setSelected(new Set())
               }}>Anonymize {selected.size} selected</Btn>
               <Btn size="sm" variant="danger" onClick={() => {
-                const next = new Set(resolvedPII)
-                selected.forEach(i => next.add(i))
-                setResolvedPII(next); setSelected(new Set())
+                setResolvedPII(prev => {
+                  const m = new Map(prev)
+                  selected.forEach(id => m.set(id, 'removed'))
+                  return m
+                })
+                setSelected(new Set())
               }}>Remove {selected.size} selected</Btn>
               <button className="text-[11px] hover:underline ml-auto" style={{ color: C.midText }}
                 onClick={() => setSelected(new Set())}>Clear selection</button>
@@ -2025,9 +2347,9 @@ function DataReviewScreen() {
               <tr>
                 <th style={{ width: 32 }}>
                   <input type="checkbox"
-                    checked={selected.size === sortedPII.filter((_,i) => !resolvedPII.has(i)).length && selected.size > 0}
+                    checked={selected.size === sortedPII.filter(f => !resolvedPII.has(f.id)).length && selected.size > 0}
                     onChange={e => setSelected(e.target.checked
-                      ? new Set(sortedPII.map((_,i) => i).filter(i => !resolvedPII.has(i)))
+                      ? new Set(sortedPII.map(f => f.id).filter(id => !resolvedPII.has(id)))
                       : new Set()
                     )} />
                 </th>
@@ -2040,15 +2362,16 @@ function DataReviewScreen() {
               </tr>
             </thead>
             <tbody>
-              {sortedPII.map((f, i) => {
-                const resolved = resolvedPII.has(i)
+              {sortedPII.map((f) => {
+                const resolved = resolvedPII.has(f.id)
+                const action = resolvedPII.get(f.id)
                 return (
-                  <tr key={i} style={{ opacity: resolved ? 0.45 : 1, background: f.severity === 'High' && !resolved ? '#FFF9F9' : undefined }}>
+                  <tr key={f.id} style={{ opacity: resolved ? 0.45 : 1, background: f.severity === 'High' && !resolved ? '#FFF9F9' : undefined }}>
                     <td>
-                      <input type="checkbox" disabled={resolved} checked={selected.has(i)}
+                      <input type="checkbox" disabled={resolved} checked={selected.has(f.id)}
                         onChange={e => {
                           const s = new Set(selected)
-                          e.target.checked ? s.add(i) : s.delete(i)
+                          e.target.checked ? s.add(f.id) : s.delete(f.id)
                           setSelected(s)
                         }} />
                     </td>
@@ -2063,12 +2386,14 @@ function DataReviewScreen() {
                     <td><NullPctBadge pct={f.nullPct} /></td>
                     <td>
                       {resolved ? (
-                        <Badge tier={1} color="success">Resolved</Badge>
+                        action === 'anonymized' ? <Badge tier={1} color="success">Anonymized</Badge>
+                        : action === 'removed' ? <Badge tier={1} color="danger">Removed</Badge>
+                        : <Badge tier={1} color="info">Overridden</Badge>
                       ) : (
                         <div className="flex gap-1">
-                          <Btn size="sm" variant="primary" onClick={() => setResolvedPII(new Set([...resolvedPII, i]))}>Anonymize</Btn>
-                          <Btn size="sm" variant="danger"  onClick={() => setResolvedPII(new Set([...resolvedPII, i]))}>Remove</Btn>
-                          <Btn size="sm" variant="ghost"   onClick={() => setResolvedPII(new Set([...resolvedPII, i]))}>Override</Btn>
+                          <Btn size="sm" variant="primary" onClick={() => setResolvedPII(prev => { const m = new Map(prev); m.set(f.id, 'anonymized'); return m })}>Anonymize</Btn>
+                          <Btn size="sm" variant="danger"  onClick={() => setResolvedPII(prev => { const m = new Map(prev); m.set(f.id, 'removed'); return m })}>Remove</Btn>
+                          <Btn size="sm" variant="ghost"   onClick={() => setResolvedPII(prev => { const m = new Map(prev); m.set(f.id, 'override'); return m })}>Override</Btn>
                         </div>
                       )}
                     </td>
@@ -2083,75 +2408,200 @@ function DataReviewScreen() {
       {/* ── DUPLICATES TAB ───────────────────────────────────────────────────── */}
       {tab === 'duplicates' && (
         <div className="flex flex-col gap-4">
-          {/* Sort control for duplicates */}
+
+          {/* Sort + summary bar */}
           <div className="flex items-center gap-3">
             <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Sort by:</span>
             {[
               { label: 'Similarity', key: 'similarity' },
-              { label: 'Name', key: 'name' },
+              { label: 'Name',       key: 'name' },
             ].map(opt => (
               <button key={opt.key}
                 className="text-[11px] px-2 py-1 rounded-[4px] border transition-all"
                 style={{
                   borderColor: dupSort.key === opt.key ? C.corpBlue : C.border,
-                  background: dupSort.key === opt.key ? C.lightTint : 'white',
-                  color: dupSort.key === opt.key ? C.corpBlue : C.midText,
-                  fontWeight: dupSort.key === opt.key ? 700 : 400,
+                  background:  dupSort.key === opt.key ? C.lightTint : 'white',
+                  color:       dupSort.key === opt.key ? C.corpBlue : C.midText,
+                  fontWeight:  dupSort.key === opt.key ? 700 : 400,
                 }}
                 onClick={() => cycleSort(dupSort, setDupSort, opt.key)}>
                 {opt.label} {dupSort.key === opt.key ? (dupSort.dir === 'asc' ? '↑' : '↓') : '↕'}
               </button>
             ))}
             <span className="text-[11px] ml-auto" style={{ color: C.midText }}>
-              {sortedDup.length} duplicate pair{sortedDup.length !== 1 ? 's' : ''} detected
+              {DUPLICATES.length - resolvedDup.size} of {DUPLICATES.length} cluster{DUPLICATES.length !== 1 ? 's' : ''} pending
             </span>
           </div>
 
-          {sortedDup.map(d => (
-            <Card key={d.id}>
-              <div className="flex items-center gap-2 mb-3">
-                <span style={{ color: C.warning }}>{Icon.copy}</span>
-                <span className="text-[12px] font-semibold" style={{ color: C.darkText }}>Duplicate pair detected</span>
-                <Badge tier={1} color="warning">Cross-upload</Badge>
-                <span className="ml-auto flex items-center gap-1.5 text-[11px]" style={{ color: C.midText }}>
-                  Similarity:
-                  <span className="font-bold mono" style={{ color: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.midText }}>
-                    {d.similarity}%
-                  </span>
-                </span>
-              </div>
-              {/* Similarity bar */}
-              <div className="progress-track mb-4" style={{ height: 5 }}>
-                <div className="progress-fill" style={{
-                  width: `${d.similarity}%`,
-                  background: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue,
-                }} />
-              </div>
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                {[d.rec1, d.rec2].map((r, i) => (
-                  <div key={i} className="p-3 rounded-[6px] border border-[#EDF2F7]" style={{ background: C.lightTint }}>
-                    <p className="text-[11px] font-semibold mb-2" style={{ color: C.navy }}>Record {i + 1} — {r.source}</p>
-                    {[
-                      { label: 'Name',      val: r.name },
-                      { label: 'NPI',       val: r.npi  },
-                      { label: 'Specialty', val: r.spec },
-                      { label: 'State',     val: r.state },
-                    ].map(row => (
-                      <div key={row.label} className="flex gap-2 text-[11px] mb-0.5">
-                        <span style={{ color: C.midText, width: 60, flexShrink: 0 }}>{row.label}</span>
-                        <span className="mono font-medium" style={{ color: C.darkText }}>{row.val}</span>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-              <div className="flex gap-2">
-                <Btn size="sm" variant="primary">Merge → keep best fields</Btn>
-                <Btn size="sm" variant="secondary">Keep Both</Btn>
-                <Btn size="sm" variant="danger">Remove duplicate</Btn>
-              </div>
+          {/* Empty state */}
+          {resolvedDup.size === DUPLICATES.length && (
+            <Card>
+              <EmptyState
+                icon={Icon.checkCircle}
+                title="All duplicate clusters resolved"
+                subtitle="No further deduplication required. Your dataset is clean."
+              />
             </Card>
-          ))}
+          )}
+
+          {sortedDup.map(d => {
+            const isResolved = resolvedDup.has(d.id)
+            const isMerging  = mergingDup.has(d.id)
+            const resolution = resolvedDup.get(d.id)
+            const master     = masterSel.get(d.id)
+            const hasMaster  = masterSel.has(d.id)
+
+            // Compare field-by-field to find diffs
+            const COMPARE_FIELDS: { label: string; key: keyof DupRecord }[] = [
+              { label: 'NPI',        key: 'npi'       },
+              { label: 'First Name', key: 'firstName' },
+              { label: 'Last Name',  key: 'lastName'  },
+              { label: 'Specialty',  key: 'spec'      },
+              { label: 'State',      key: 'state'     },
+              { label: 'Email',      key: 'email'     },
+              { label: 'Phone',      key: 'phone'     },
+              { label: 'Address',    key: 'address'   },
+              { label: 'Source',     key: 'source'    },
+            ]
+
+            return (
+              <Card key={d.id} className={isResolved ? 'opacity-50' : ''}>
+                {/* ── Cluster header ── */}
+                <div className="flex items-center gap-2 mb-3">
+                  <span style={{ color: C.warning }}>{Icon.copy}</span>
+                  <span className="text-[13px] font-bold" style={{ color: C.darkText }}>Duplicate cluster detected</span>
+                  <Badge tier={1} color={d.rec1.source !== d.rec2.source ? 'warning' : 'info'}>
+                    {d.rec1.source !== d.rec2.source ? 'Cross-upload' : 'Same upload'}
+                  </Badge>
+                  <span className="ml-auto flex items-center gap-2">
+                    <span className="text-[11px]" style={{ color: C.midText }}>Similarity</span>
+                    <span className="font-bold mono text-[13px]" style={{ color: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue }}>
+                      {d.similarity}%
+                    </span>
+                    {isResolved && (
+                      <Badge tier={2}
+                        color={resolution === 'merged' ? 'approve' : resolution === 'distinct' ? 'info' : 'block'}>
+                        {resolution === 'merged' ? `✓ Merged → Record ${master}` : resolution === 'distinct' ? 'Distinct entities' : 'Duplicate removed'}
+                      </Badge>
+                    )}
+                  </span>
+                </div>
+
+                {/* ── Similarity bar ── */}
+                <div className="progress-track mb-4" style={{ height: 5 }}>
+                  <div className="progress-fill" style={{
+                    width: `${d.similarity}%`,
+                    background: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue,
+                  }} />
+                </div>
+
+                {/* ── Side-by-side comparison table ── */}
+                <div className="rounded-[6px] border border-[#EDF2F7] overflow-hidden mb-4">
+                  {/* Column headers with master-select */}
+                  <div className="grid" style={{ gridTemplateColumns: '130px 1fr 1fr' }}>
+                    <div className="px-3 py-2 border-b border-r border-[#EDF2F7] text-[10px] font-semibold uppercase tracking-wider" style={{ background: '#F7FAFC', color: C.midText }}>Field</div>
+                    {[1, 2].map(idx => {
+                      const rec  = idx === 1 ? d.rec1 : d.rec2
+                      const isMaster = master === idx
+                      return (
+                        <div key={idx}
+                          className="px-3 py-2 border-b border-[#EDF2F7] flex items-center justify-between"
+                          style={{ borderLeft: '1px solid #EDF2F7', background: isMaster ? '#F0FDF4' : '#F7FAFC' }}>
+                          <div>
+                            <p className="text-[11px] font-bold" style={{ color: isMaster ? C.success : C.navy }}>Record {idx}</p>
+                            <p className="text-[10px]" style={{ color: C.midText }}>{rec.source}</p>
+                          </div>
+                          {!isResolved && (
+                            <button
+                              onClick={() => setMasterSel(prev => {
+                                const m = new Map(prev)
+                                m.set(d.id, idx as 1 | 2)
+                                return m
+                              })}
+                              className="text-[10px] font-bold px-2 py-1 rounded-[4px] border transition-all"
+                              style={{
+                                borderColor: isMaster ? C.success : C.border,
+                                background:  isMaster ? '#E8F5EF' : 'white',
+                                color:       isMaster ? C.success : C.midText,
+                              }}>
+                              {isMaster ? '★ Master' : '☆ Set as Master'}
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {/* Field-by-field rows */}
+                  {COMPARE_FIELDS.map((f, fi) => {
+                    const v1   = d.rec1[f.key]
+                    const v2   = d.rec2[f.key]
+                    const diff = v1 !== v2
+                    return (
+                      <div key={f.key}
+                        className="grid"
+                        style={{
+                          gridTemplateColumns: '130px 1fr 1fr',
+                          background: fi % 2 === 0 ? 'white' : '#FAFBFC',
+                          borderTop: '1px solid #EDF2F7',
+                        }}>
+                        <div className="px-3 py-2 border-r border-[#EDF2F7] text-[11px] font-semibold flex items-center" style={{ color: C.midText }}>
+                          {f.label}
+                          {diff && <span className="ml-1.5 text-[9px] font-bold px-1 py-0.5 rounded" style={{ background: '#FEF3C7', color: '#92400E' }}>DIFF</span>}
+                        </div>
+                        {[1, 2].map(idx => {
+                          const val      = idx === 1 ? v1 : v2
+                          const isMasterCol = master === idx
+                          return (
+                            <div key={idx}
+                              className="px-3 py-2 mono text-[11px] flex items-center"
+                              style={{
+                                borderLeft: '1px solid #EDF2F7',
+                                color:      diff ? (isMasterCol ? C.success : C.danger) : C.darkText,
+                                fontWeight: diff && isMasterCol ? 700 : 400,
+                                background: diff && isMasterCol ? '#F0FDF4' : diff && !isMasterCol ? '#FFF9F9' : 'transparent',
+                              }}>
+                              {val || <span style={{ color: C.border }}>—</span>}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* ── Action bar ── */}
+                {!isResolved && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Btn
+                      variant={hasMaster ? 'primary' : 'disabled'}
+                      disabled={!hasMaster || isMerging}
+                      size="sm"
+                      icon={isMerging ? Icon.spinner : Icon.checkCircle}
+                      onClick={() => resolveDup(d.id, 'merged', master)}
+                    >
+                      {isMerging ? 'Merging…' : `Confirm Merge → keep Record ${master ?? '?'}`}
+                    </Btn>
+                    {!hasMaster && (
+                      <span className="text-[11px]" style={{ color: C.midText }}>Select a master record above to enable merge</span>
+                    )}
+                    <div className="ml-auto flex gap-2">
+                      <Btn size="sm" variant="ghost"
+                        disabled={isMerging}
+                        onClick={() => resolveDup(d.id, 'distinct')}>
+                        Mark as Distinct Entities
+                      </Btn>
+                      <Btn size="sm" variant="danger"
+                        disabled={isMerging}
+                        onClick={() => resolveDup(d.id, 'removed')}>
+                        Remove Duplicate
+                      </Btn>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            )
+          })}
         </div>
       )}
 
@@ -2159,35 +2609,75 @@ function DataReviewScreen() {
       {tab === 'outliers' && (
         <Card>
           <NullSummaryBar tab="outliers" />
+
+          {/* Tagged-records summary strip */}
+          {(() => {
+            const tagged = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
+            if (tagged.length === 0) return null
+            return (
+              <div className="mb-4 p-3 rounded-[6px] border-l-4 flex items-start gap-3"
+                style={{ background: '#FEF3C7', borderLeftColor: C.warning }}>
+                <span style={{ color: C.warning, marginTop: 1 }}>{Icon.alertTriangle}</span>
+                <div className="flex-1">
+                  <p className="text-[12px] font-semibold" style={{ color: '#92400E' }}>
+                    {tagged.length} record{tagged.length > 1 ? 's' : ''} tagged as Data Quality Warning — retained in dataset, flagged on all analytical exports
+                  </p>
+                  <div className="flex flex-wrap gap-2 mt-1">
+                    {tagged.map(o => (
+                      <span key={o.id} className="text-[10px] font-semibold px-2 py-0.5 rounded-[4px]"
+                        style={{ background: '#FDE68A', color: '#92400E' }}>
+                        {o.record}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )
+          })()}
+
           <table className="data-table w-full border-collapse">
             <thead>
               <tr>
-                <SortTh label="Record"       sortKey="record"       current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Record"        sortKey="record"       current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
                 <th>Specialty</th>
                 <th>Outlier Reason</th>
                 <SortTh label="Anomaly Score" sortKey="anomalyScore" current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
-                <SortTh label="Severity"     sortKey="severity"     current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
-                <SortTh label="Null %"       sortKey="nullPct"      current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Severity"      sortKey="severity"     current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Null %"        sortKey="nullPct"      current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
                 <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {sortedOut.map((o, i) => {
-                const resolved = resolvedOut.has(i)
+              {sortedOut.map((o) => {
+                const action    = resolvedOut.get(o.id)
+                const resolved  = action !== undefined
+                const isTagOpen = tagOpen.has(o.id)
                 return (
-                  <>
-                    <tr key={i} style={{ opacity: resolved ? 0.45 : 1 }}>
-                      <td className="font-medium">{o.record}</td>
+                  <Fragment key={o.id}>
+                    <tr style={{
+                      opacity:    resolved && action !== 'warned' ? 0.45 : 1,
+                      background: action === 'warned' ? '#FFFBEB'
+                                : o.severity === 'High' && !resolved ? '#FFF9F9'
+                                : undefined,
+                      borderLeft: action === 'warned' ? `3px solid ${C.warning}`
+                                : o.severity === 'High' && !resolved ? `3px solid ${C.danger}`
+                                : '3px solid transparent',
+                    }}>
+                      <td className="font-medium">
+                        {action === 'warned' && (
+                          <span className="inline-block mr-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded"
+                            style={{ background: '#FDE68A', color: '#92400E' }}>⚠ DQ WARNING</span>
+                        )}
+                        {o.record}
+                      </td>
                       <td><Badge tier={1} color="neutral">{o.specialty}</Badge></td>
                       <td>
                         <div>
                           <p className="text-[11px]">{o.reason}</p>
-                          {!resolved && (
-                            <button className="text-[10px] mt-0.5 hover:underline" style={{ color: C.corpBlue }}
-                              onClick={() => setExpandedOutlier(expandedOutlier === i ? null : i)}>
-                              {expandedOutlier === i ? '▲ Hide reasoning' : '▼ Why flagged?'}
-                            </button>
-                          )}
+                          <button className="text-[10px] mt-0.5 hover:underline" style={{ color: C.corpBlue }}
+                            onClick={() => setExpandedOutlier(expandedOutlier === o.id ? null : o.id)}>
+                            {expandedOutlier === o.id ? '▲ Hide reasoning' : '▼ Why flagged?'}
+                          </button>
                         </div>
                       </td>
                       <td>
@@ -2211,18 +2701,46 @@ function DataReviewScreen() {
                       <td><NullPctBadge pct={o.nullPct} /></td>
                       <td>
                         {resolved ? (
-                          <Badge tier={1} color="success">Resolved</Badge>
+                          <div className="flex flex-col gap-0.5">
+                            {action === 'removed' && <Badge tier={1} color="danger">Removed</Badge>}
+                            {action === 'kept'    && <Badge tier={1} color="success">Kept</Badge>}
+                            {action === 'warned'  && (
+                              <>
+                                <Badge tier={1} color="warning">Data Quality Warning</Badge>
+                                {warnNotes[o.id] && (
+                                  <span className="text-[10px] italic" style={{ color: C.midText }}>
+                                    "{warnNotes[o.id].slice(0, 40)}{warnNotes[o.id].length > 40 ? '…' : ''}"
+                                  </span>
+                                )}
+                              </>
+                            )}
+                            <button className="text-[10px] hover:underline mt-0.5" style={{ color: C.corpBlue }}
+                              onClick={() => { const m = new Map(resolvedOut); m.delete(o.id); setResolvedOut(m) }}>
+                              Undo
+                            </button>
+                          </div>
                         ) : (
-                          <div className="flex gap-1">
-                            <Btn size="sm" variant="danger"    onClick={() => setResolvedOut(new Set([...resolvedOut, i]))}>Remove</Btn>
-                            <Btn size="sm" variant="secondary" onClick={() => setResolvedOut(new Set([...resolvedOut, i]))}>Keep</Btn>
-                            <Btn size="sm" variant="ghost"     onClick={() => setResolvedOut(new Set([...resolvedOut, i]))}>Excl. Campaigns</Btn>
+                          <div className="flex gap-1 flex-wrap">
+                            <Btn size="sm" variant="danger"
+                              onClick={() => { const m = new Map(resolvedOut); m.set(o.id, 'removed'); setResolvedOut(m) }}>
+                              Remove
+                            </Btn>
+                            <Btn size="sm" variant="secondary"
+                              onClick={() => { const m = new Map(resolvedOut); m.set(o.id, 'kept'); setResolvedOut(m) }}>
+                              Keep
+                            </Btn>
+                            <Btn size="sm" variant="ghost"
+                              onClick={() => { const s = new Set(tagOpen); s.has(o.id) ? s.delete(o.id) : s.add(o.id); setTagOpen(s) }}>
+                              {isTagOpen ? '✕ Cancel' : '⚠ Tag Warning'}
+                            </Btn>
                           </div>
                         )}
                       </td>
                     </tr>
-                    {expandedOutlier === i && !resolved && (
-                      <tr key={`exp-${i}`} style={{ background: C.lightTint }}>
+
+                    {/* Statistical reasoning drawer */}
+                    {expandedOutlier === o.id && (
+                      <tr style={{ background: C.lightTint, borderLeft: '3px solid transparent' }}>
                         <td colSpan={7} className="px-4 py-3">
                           <p className="text-[12px] font-semibold mb-1" style={{ color: C.navy }}>Statistical reasoning</p>
                           <p className="text-[12px]" style={{ color: C.darkText }}>
@@ -2231,7 +2749,37 @@ function DataReviewScreen() {
                         </td>
                       </tr>
                     )}
-                  </>
+
+                    {/* Tag: Data Quality Warning drawer */}
+                    {isTagOpen && !resolved && (
+                      <tr style={{ background: '#FFFBEB', borderLeft: `3px solid ${C.warning}` }}>
+                        <td colSpan={7} className="px-4 py-3">
+                          <p className="text-[12px] font-semibold mb-1" style={{ color: '#92400E' }}>
+                            ⚠ Tag as Data Quality Warning — record stays in the database but is highlighted in red on all analytical exports and reports
+                          </p>
+                          <div className="flex gap-3 items-start">
+                            <textarea
+                              className="flex-1 border rounded-[6px] text-[12px] px-2 py-1.5"
+                              style={{ borderColor: C.warning, minHeight: 56, fontFamily: 'Inter, Arial, sans-serif' }}
+                              rows={2}
+                              placeholder="Optional: describe why this record is flagged for downstream consumers…"
+                              value={warnNotes[o.id] || ''}
+                              onChange={e => setWarnNotes({ ...warnNotes, [o.id]: e.target.value })}
+                            />
+                            <div className="flex flex-col gap-1 items-center shrink-0">
+                              <Btn size="sm" variant="primary"
+                                onClick={() => {
+                                  const m = new Map(resolvedOut); m.set(o.id, 'warned'); setResolvedOut(m)
+                                  const s = new Set(tagOpen); s.delete(o.id); setTagOpen(s)
+                                }}>
+                                Confirm Tag
+                              </Btn>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>
@@ -2242,8 +2790,25 @@ function DataReviewScreen() {
       {/* ── NPI VALIDATION TAB ───────────────────────────────────────────────── */}
       {tab === 'validation' && (
         <Card>
+          {/* High-severity export interlock banner */}
+          {(() => {
+            const openHigh = VALIDATION_ERRORS.filter(v => v.severity === 'High' && !resolvedVal.has(v.id))
+            if (openHigh.length > 0) return (
+              <Banner type="error">
+                <strong>Export blocked:</strong> {openHigh.length} High-severity NPI error{openHigh.length > 1 ? 's' : ''} ({openHigh.map(v => v.issueType).join(', ')}) must be resolved before dataset export is permitted. Remove the record or submit an Override with justification.
+              </Banner>
+            )
+            if (resolvedVal.size === VALIDATION_ERRORS.length) return (
+              <Banner type="success">All NPI validation errors resolved — dataset export is unlocked.</Banner>
+            )
+            return (
+              <Banner type="warning">All High-severity errors resolved. {VALIDATION_ERRORS.length - resolvedVal.size} lower-severity issue{VALIDATION_ERRORS.length - resolvedVal.size !== 1 ? 's' : ''} remaining.</Banner>
+            )
+          })()}
+
           <Banner type="warning">NPI Registry is temporarily unavailable. 847 records marked pending. Will auto-retry in 5 minutes.</Banner>
           <NullSummaryBar tab="validation" />
+
           <table className="data-table w-full border-collapse">
             <thead>
               <tr>
@@ -2252,40 +2817,130 @@ function DataReviewScreen() {
                 <th>Specialty</th>
                 <th>State</th>
                 <SortTh label="Issue Type" sortKey="issueType" current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <SortTh label="Severity"   sortKey="severity"  current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
                 <th>Issue Detail</th>
                 <SortTh label="Null %"     sortKey="nullPct"   current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
                 <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {sortedVal.map((v, i) => {
-                const resolved = resolvedVal.has(i)
+              {sortedVal.map((v) => {
+                const resolved = resolvedVal.has(v.id)
+                const action   = resolvedVal.get(v.id)
+                const isHigh   = v.severity === 'High'
+                const isOvOpen = overrideOpen.has(v.id)
+                const isReval  = revalidating.has(v.id)
                 return (
-                  <tr key={i} style={{ opacity: resolved ? 0.45 : 1 }}>
-                    <td className="font-medium">{v.record}</td>
-                    <td className="mono">{v.npi}</td>
-                    <td>{v.specialty}</td>
-                    <td>{v.state}</td>
-                    <td>
-                      <Badge tier={2}
-                        color={v.issueType === 'Not Found' || v.issueType === 'Invalid' ? 'block' : v.issueType === 'Inactive' ? 'warning' : 'info'}>
-                        {v.issueType}
-                      </Badge>
-                    </td>
-                    <td style={{ color: C.danger, fontSize: 11 }}>{v.issue}</td>
-                    <td><NullPctBadge pct={v.nullPct} /></td>
-                    <td>
-                      {resolved ? (
-                        <Badge tier={1} color="success">Resolved</Badge>
-                      ) : (
-                        <div className="flex gap-1">
-                          <Btn size="sm" variant="danger"    onClick={() => setResolvedVal(new Set([...resolvedVal, i]))}>Remove</Btn>
-                          <Btn size="sm" variant="ghost"     onClick={() => setResolvedVal(new Set([...resolvedVal, i]))}>Override</Btn>
-                          <Btn size="sm" variant="secondary" onClick={() => setResolvedVal(new Set([...resolvedVal, i]))}>Re-validate</Btn>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
+                  <Fragment key={v.id}>
+                    <tr style={{
+                      opacity: resolved ? 0.45 : 1,
+                      background: isHigh && !resolved ? '#FFF5F5' : undefined,
+                      borderLeft: isHigh && !resolved ? `3px solid ${C.danger}` : '3px solid transparent',
+                    }}>
+                      <td className="font-medium">
+                        {isHigh && !resolved && (
+                          <span className="inline-block mr-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded"
+                            style={{ background: '#FEE2E2', color: C.danger }}>HIGH RISK</span>
+                        )}
+                        {v.record}
+                      </td>
+                      <td className="mono">{v.npi}</td>
+                      <td>{v.specialty}</td>
+                      <td>{v.state}</td>
+                      <td>
+                        <Badge tier={2}
+                          color={v.issueType === 'Not Found' || v.issueType === 'Invalid' ? 'block' : v.issueType === 'Inactive' ? 'warning' : 'info'}>
+                          {v.issueType}
+                        </Badge>
+                      </td>
+                      <td>
+                        <Badge tier={2} color={v.severity === 'High' ? 'block' : v.severity === 'Medium' ? 'warning' : 'info'}>
+                          {v.severity}
+                        </Badge>
+                      </td>
+                      <td style={{ color: C.danger, fontSize: 11 }}>{v.issue}</td>
+                      <td><NullPctBadge pct={v.nullPct} /></td>
+                      <td>
+                        {resolved ? (
+                          <div className="flex flex-col gap-0.5">
+                            {action === 'removed'
+                              ? <Badge tier={1} color="danger">Removed</Badge>
+                              : <Badge tier={1} color="info">Overridden</Badge>
+                            }
+                            {action === 'override' && valJustifications[v.id] && (
+                              <span className="text-[10px] italic" style={{ color: C.midText }}>
+                                "{valJustifications[v.id].slice(0, 38)}{valJustifications[v.id].length > 38 ? '…' : ''}"
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex gap-1 flex-wrap">
+                            <Btn size="sm" variant="danger"
+                              disabled={isReval}
+                              onClick={() => { const m = new Map(resolvedVal); m.set(v.id, 'removed'); setResolvedVal(m) }}>
+                              Remove
+                            </Btn>
+                            <Btn size="sm" variant="ghost"
+                              disabled={isReval}
+                              onClick={() => {
+                                const s = new Set(overrideOpen)
+                                s.has(v.id) ? s.delete(v.id) : s.add(v.id)
+                                setOverrideOpen(s)
+                              }}>
+                              {isOvOpen ? '✕ Cancel' : 'Override Flag'}
+                            </Btn>
+                            <Btn size="sm" variant="secondary"
+                              disabled={isReval}
+                              icon={isReval ? Icon.spinner : undefined}
+                              onClick={() => {
+                                setRevalidating(prev => { const s = new Set(prev); s.add(v.id); return s })
+                                setTimeout(() => setRevalidating(prev => { const s = new Set(prev); s.delete(v.id); return s }), 1200)
+                              }}>
+                              {isReval ? 'Checking…' : 'Re-validate'}
+                            </Btn>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+
+                    {/* Override justification drawer */}
+                    {isOvOpen && !resolved && (
+                      <tr style={{ background: '#FFFBEB', borderLeft: `3px solid ${C.warning}` }}>
+                        <td colSpan={9} className="px-4 py-3">
+                          <p className="text-[12px] font-semibold mb-2" style={{ color: C.warning }}>
+                            {isHigh
+                              ? '⚠ High-severity override — justification is mandatory and will be permanently logged to the audit trail'
+                              : 'Justification required — will be logged to the audit trail'}
+                          </p>
+                          <div className="flex gap-3 items-start">
+                            <textarea
+                              className="flex-1 border rounded-[6px] text-[12px] px-2 py-1.5"
+                              style={{ borderColor: C.warning, minHeight: 60, fontFamily: 'Inter, Arial, sans-serif' }}
+                              rows={2}
+                              placeholder="Describe why this NPI validation error should be overridden (min 15 characters)…"
+                              value={valJustifications[v.id] || ''}
+                              onChange={e => setValJustifications(prev => ({ ...prev, [v.id]: e.target.value }))}
+                            />
+                            <div className="flex flex-col gap-1 items-center shrink-0">
+                              <Btn
+                                size="sm"
+                                variant={(valJustifications[v.id]?.length ?? 0) >= 15 ? 'primary' : 'disabled'}
+                                disabled={(valJustifications[v.id]?.length ?? 0) < 15}
+                                onClick={() => {
+                                  const m = new Map(resolvedVal); m.set(v.id, 'override'); setResolvedVal(m)
+                                  const s = new Set(overrideOpen); s.delete(v.id); setOverrideOpen(s)
+                                }}>
+                                Submit Override
+                              </Btn>
+                              <span className="text-[10px]" style={{ color: (valJustifications[v.id]?.length ?? 0) >= 15 ? C.success : C.midText }}>
+                                {valJustifications[v.id]?.length ?? 0}/15 chars
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })}
             </tbody>
@@ -2755,6 +3410,9 @@ function ComplianceReviewScreen() {
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 
 function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { resolvedOut, warnNotes } = useOutliers()
+  const taggedOutliers = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
+
   const states = [
     { abbr: 'FL', density: 90 }, { abbr: 'CA', density: 85 }, { abbr: 'NY', density: 82 },
     { abbr: 'TX', density: 78 }, { abbr: 'PA', density: 65 }, { abbr: 'OH', density: 60 },
@@ -2847,6 +3505,45 @@ function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           </div>
         </Card>
       </div>
+
+      {/* Data Quality Warning panel — only shown when records are tagged */}
+      {taggedOutliers.length > 0 && (
+        <div className="mb-6 bg-white rounded-[8px] border-2 p-4" style={{ borderColor: C.warning }}>
+          <div className="flex items-center gap-2 mb-3">
+            <span style={{ color: C.warning }}>{Icon.alertTriangle}</span>
+            <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: '#92400E' }}>
+              Data Quality Warnings — {taggedOutliers.length} record{taggedOutliers.length > 1 ? 's' : ''} flagged
+            </h3>
+            <Badge tier={2} color="warning">Retained in dataset</Badge>
+            <span className="ml-auto text-[11px]" style={{ color: C.midText }}>These records are highlighted in red on all exports</span>
+          </div>
+          <table className="w-full border-collapse" style={{ fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: '#FEF3C7' }}>
+                {['Record', 'Specialty', 'Anomaly Score', 'Outlier Reason', 'Warning Note'].map(h => (
+                  <th key={h} className="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#92400E' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {taggedOutliers.map((o, i) => (
+                <tr key={o.id} style={{ background: i % 2 === 0 ? '#FFFBEB' : '#FEF9EC', borderBottom: '1px solid #FDE68A' }}>
+                  <td className="px-3 py-2 font-semibold" style={{ color: C.danger }}>
+                    <span className="inline-block mr-1.5 text-[9px] font-bold px-1 py-0.5 rounded" style={{ background: '#FEE2E2', color: C.danger }}>⚠</span>
+                    {o.record}
+                  </td>
+                  <td className="px-3 py-2"><Badge tier={1} color="neutral">{o.specialty}</Badge></td>
+                  <td className="px-3 py-2 mono font-bold" style={{ color: o.anomalyScore >= 0.85 ? C.danger : C.warning }}>{o.anomalyScore.toFixed(2)}</td>
+                  <td className="px-3 py-2 text-[11px]" style={{ color: C.darkText }}>{o.reason}</td>
+                  <td className="px-3 py-2 text-[11px] italic" style={{ color: C.midText }}>
+                    {warnNotes[o.id] || <span style={{ color: C.border }}>No note provided</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Geographic density */}
       <Card>
@@ -3298,28 +3995,203 @@ const EXPORT_HISTORY = [
   { name: 'HCP_Clean_Jan2026.csv', date: 'Jan 4, 2026 11:08', by: 'Jane Doe', size: '3.1 MB', expired: true },
 ]
 
+interface ExportHistoryRow { name: string; date: string; by: string; size: string; expired: boolean; live?: boolean }
+
 function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { role } = useRole()
+  const { meta } = useUploadMeta()
+  const { resolvedVal: resolvedValCtx } = useValidation()
+  const { resolvedOut: resolvedOutCtx, warnNotes } = useOutliers()
   const [generating, setGenerating] = useState<string | null>(null)
   const [done, setDone] = useState<Set<string>>(new Set())
   const [progress, setProgress] = useState(0)
+  const [history, setHistory] = useState<ExportHistoryRow[]>(EXPORT_HISTORY)
+  const [logStatus, setLogStatus] = useState<'idle' | 'logging' | 'ok' | 'err'>('idle')
+
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+  }
+
+  const logToFirestore = async (format: string, filename: string, size: string, records: number) => {
+    setLogStatus('logging')
+    try {
+      await fetch('http://localhost:8000/api/export/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ format, fileName: filename, size, role, records, timestamp: new Date().toISOString() }),
+      })
+      setLogStatus('ok')
+    } catch {
+      setLogStatus('err') // non-fatal — download still worked
+    }
+  }
 
   const startExport = (id: string) => {
     setGenerating(id)
     setProgress(0)
     const iv = setInterval(() => {
       setProgress(p => {
-        if (p >= 100) { clearInterval(iv); setGenerating(null); setDone(new Set([...done, id])); return 100 }
+        if (p >= 100) {
+          clearInterval(iv)
+          setGenerating(null)
+          setDone(prev => new Set([...prev, id]))
+
+          // ── generate & download blob ───────────────────────────────────
+          const opt = EXPORT_OPTIONS.find(o => o.id === id)!
+          const now = new Date()
+          const dateStr = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+          const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+          const records = meta?.rowCount ?? 10412
+          const roleMeta = ROLE_META[role]
+
+          let blob: Blob
+          let filename: string
+
+          if (id === 'csv') {
+            const taggedRows = OUTLIERS
+              .filter(o => resolvedOutCtx.get(o.id) === 'warned')
+              .map(o => `[DATA QUALITY WARNING],${o.record.replace(',','')},${o.specialty},,,,,,, // Anomaly score ${o.anomalyScore.toFixed(2)} — ${o.reason}${warnNotes[o.id] ? ` | Note: ${warnNotes[o.id]}` : ''}`)
+            const csvRows = [
+              'DQ_FLAG,NPI,First Name,Last Name,Specialty,State,Email,Phone,ZIP,DEA Number',
+              ',1234567890,James,Morrison,Cardiology,FL,j.morrison@floridahealth.com,(813) 555-0147,33602,BX1234567',
+              ',9876543210,Sarah,Chen,Oncology,NY,schen@nyoncology.org,(212) 555-0388,10001,AX9876543',
+              ',5544332211,Robert,Patel,Neurology,CA,rpatel@stanford.edu,(650) 555-0219,94305,',
+              ...taggedRows,
+              `# ... ${records.toLocaleString()} total records · ${taggedRows.length} DQ warnings · Exported ${dateStr} ${timeStr} · Role: ${roleMeta.label}`,
+            ]
+            blob = new Blob([csvRows.join('\n')], { type: 'text/csv' })
+            filename = `HCP_Clean_${meta?.fileName?.replace(/\..+$/, '') ?? 'Export'}_${now.toISOString().slice(0,10)}.csv`
+          } else {
+            const taggedForReport = OUTLIERS.filter(o => resolvedOutCtx.get(o.id) === 'warned')
+            const report = [
+              'MedReach AI — PDF Audit Report',
+              '='.repeat(40),
+              `Generated: ${dateStr} ${timeStr}`,
+              `Exported by: ${roleMeta.label} (role: ${role})`,
+              `Source file: ${meta?.fileName ?? 'Q2_HCP_Oncology.csv'}`,
+              `Total records: ${records.toLocaleString()}`,
+              '',
+              'Data Quality Summary',
+              '-'.repeat(30),
+              'Quality score: 84%',
+              'PII flags resolved: 6',
+              'Duplicates merged: 3',
+              'NPI validation pass rate: 97.2%',
+              `Data Quality Warnings: ${taggedForReport.length}`,
+              '',
+              ...(taggedForReport.length > 0 ? [
+                'Data Quality Warning Records (highlighted red on export):',
+                '-'.repeat(30),
+                ...taggedForReport.map(o =>
+                  `  [WARNING] ${o.record} | ${o.specialty} | Score: ${o.anomalyScore.toFixed(2)} | ${o.reason}${warnNotes[o.id] ? `\n           Note: ${warnNotes[o.id]}` : ''}`
+                ),
+                '',
+              ] : []),
+              'All actions logged in Firestore audit trail.',
+            ]
+            blob = new Blob([report.join('\n')], { type: 'text/plain' })
+            filename = `Audit_Report_${now.toISOString().slice(0,10)}.pdf`
+          }
+
+          triggerDownload(blob, filename)
+          logToFirestore(id, filename, opt.size, records)
+
+          // Prepend to live history
+          setHistory(h => [{
+            name: filename,
+            date: `${dateStr} ${timeStr}`,
+            by: roleMeta.label,
+            size: opt.size,
+            expired: false,
+            live: true,
+          }, ...h])
+
+          return 100
+        }
         return p + 15
       })
     }, 200)
   }
 
+  const openHighNPI = VALIDATION_ERRORS.filter(v => v.severity === 'High' && !resolvedValCtx.has(v.id)).length
+  const exportOptions = EXPORT_OPTIONS.map(opt =>
+    opt.id === 'csv' && openHighNPI > 0
+      ? { ...opt, available: false, blockReason: `${openHighNPI} High-severity NPI error${openHighNPI > 1 ? 's' : ''} must be resolved in Data Review before export.` }
+      : opt
+  )
+
   return (
     <div className="p-8">
-      <SectionHeader title="Export" subtitle="Download cleaned data, campaign assets, and audit reports" />
+      <SectionHeader title="Export" subtitle="Download cleaned data, campaign assets, and audit reports"
+        actions={logStatus === 'ok' ? <Badge tier={1} color="success">Logged to Firestore ✓</Badge>
+          : logStatus === 'err' ? <Badge tier={1} color="warning">Firestore offline — download saved locally</Badge>
+          : logStatus === 'logging' ? <Badge tier={1} color="info">Logging…</Badge>
+          : undefined}
+      />
+
+      {/* NPI validation export interlock */}
+      {openHighNPI > 0 && (
+        <Banner type="error">
+          <strong>Export locked — {openHighNPI} High-severity NPI error{openHighNPI > 1 ? 's' : ''} unresolved.</strong>{' '}
+          Clean HCP CSV export is disabled until all High-severity NPI validation failures are explicitly resolved.{' '}
+          <button className="underline font-semibold" style={{ color: 'inherit' }} onClick={() => onNavigate('data-review')}>
+            → Go to Data Review / NPI Validation
+          </button>
+        </Banner>
+      )}
+
+      {/* Outlier Data Quality Warning summary */}
+      {(() => {
+        const tagged = OUTLIERS.filter(o => resolvedOutCtx.get(o.id) === 'warned')
+        if (tagged.length === 0) return null
+        return (
+          <div className="mb-5 p-4 rounded-[8px] border-2 border-[#E67E22]" style={{ background: '#FFFBEB' }}>
+            <div className="flex items-center gap-2 mb-2">
+              <span style={{ color: C.warning }}>{Icon.alertTriangle}</span>
+              <p className="text-[13px] font-bold" style={{ color: '#92400E' }}>
+                {tagged.length} Data Quality Warning{tagged.length > 1 ? 's' : ''} included in export
+              </p>
+            </div>
+            <p className="text-[12px] mb-2" style={{ color: '#92400E' }}>
+              The following records are retained in the dataset but are marked with a <code className="mono text-[11px] px-1 py-0.5 rounded" style={{ background: '#FDE68A' }}>[DATA QUALITY WARNING]</code> column in the CSV and highlighted in the PDF audit report:
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {tagged.map(o => (
+                <span key={o.id} className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-[4px]"
+                  style={{ background: '#FEE2E2', color: C.danger }}>
+                  <span>⚠</span> {o.record}
+                  {warnNotes[o.id] && <span className="font-normal italic" style={{ color: '#92400E' }}>— {warnNotes[o.id].slice(0, 30)}{warnNotes[o.id].length > 30 ? '…' : ''}</span>}
+                </span>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* File context banner */}
+      {meta && (
+        <div className="mb-5 px-4 py-2.5 rounded-[8px] border flex items-center gap-4 text-[12px]" style={{ background: C.lightTint, borderColor: C.corpBlue }}>
+          <span style={{ color: C.teal }}>{Icon.fileCheck}</span>
+          <span className="font-semibold" style={{ color: C.navy }}>Ready to export:</span>
+          <span className="mono font-bold" style={{ color: C.corpBlue }}>{meta.fileName}</span>
+          <span style={{ color: C.midText }}>·</span>
+          <span style={{ color: C.midText }}>{meta.rowCount.toLocaleString()} records</span>
+          <span style={{ color: C.midText }}>·</span>
+          <span style={{ color: C.midText }}>{meta.fileSize.toFixed(1)} MB source</span>
+          <span style={{ color: C.midText }}>·</span>
+          <span style={{ color: C.midText }}>Uploaded {meta.uploadedAt}</span>
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-6 mb-8">
-        {EXPORT_OPTIONS.map(opt => (
+        {exportOptions.map(opt => (
           <Card key={opt.id} className={!opt.available ? 'opacity-80' : 'card-hover'}>
             <div className="flex items-start gap-3 mb-4">
               <span style={{ color: opt.available ? C.teal : C.midText }}>{opt.icon}</span>
@@ -3330,7 +4202,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             </div>
             <div className="flex items-center justify-between mb-3">
               <span className="text-[11px]" style={{ color: C.midText }}>Est. size: {opt.size}</span>
-              {done.has(opt.id) && <Badge tier={1} color="success">Downloaded</Badge>}
+              {done.has(opt.id) && <Badge tier={1} color="success">Downloaded ✓</Badge>}
             </div>
 
             {generating === opt.id && (
@@ -3369,9 +4241,12 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             <tr><th>File Name</th><th>Date</th><th>Exported By</th><th>Size</th><th>Action</th></tr>
           </thead>
           <tbody>
-            {EXPORT_HISTORY.map(h => (
-              <tr key={h.name} style={{ opacity: h.expired ? 0.55 : 1 }}>
-                <td className="font-medium" style={{ color: h.expired ? C.midText : C.corpBlue }}>{h.name}</td>
+            {history.map((h, i) => (
+              <tr key={h.name + i} style={{ opacity: h.expired ? 0.55 : 1, background: h.live ? '#F0FFF4' : undefined }}>
+                <td className="font-medium" style={{ color: h.expired ? C.midText : C.corpBlue }}>
+                  {h.live && <span className="inline-block mr-1.5 text-[9px] px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.success, color: 'white' }}>NEW</span>}
+                  {h.name}
+                </td>
                 <td>{h.date}</td>
                 <td>{h.by}</td>
                 <td>{h.size}</td>
@@ -3804,6 +4679,10 @@ export default function App() {
   const routerNavigate = useNavigate()
   const location = useLocation()
   const [role, setRole] = useState<Role>('admin')
+  const [uploadMeta, setUploadMeta] = useState<UploadMeta | null>(null)
+  const [resolvedValApp, setResolvedValApp] = useState<Map<number, ValAction>>(new Map())
+  const [resolvedOutApp, setResolvedOutApp] = useState<Map<number, OutAction>>(new Map())
+  const [warnNotesApp,   setWarnNotesApp]   = useState<Record<number, string>>({})
 
   // Derive current Screen from URL path (e.g. /dashboard → 'dashboard')
   const pathToScreen = (path: string): Screen => {
@@ -3864,14 +4743,23 @@ export default function App() {
 
   if (isAuth) {
     return (
-      <RoleContext.Provider value={{ role, setRole }}>
-        {renderScreen()}
-        <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
-      </RoleContext.Provider>
+      <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
+      <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
+      <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
+        <RoleContext.Provider value={{ role, setRole }}>
+          {renderScreen()}
+          <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
+        </RoleContext.Provider>
+      </UploadContext.Provider>
+      </ValidationContext.Provider>
+      </OutlierContext.Provider>
     )
   }
 
   return (
+    <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
+    <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
+    <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
     <RoleContext.Provider value={{ role, setRole }}>
       <div className="flex h-screen overflow-hidden" style={{ background: C.pageBg }}>
         <Sidebar current={screen} onNavigate={navigate} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
@@ -3901,5 +4789,8 @@ export default function App() {
         <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
       </div>
     </RoleContext.Provider>
+    </UploadContext.Provider>
+    </ValidationContext.Provider>
+    </OutlierContext.Provider>
   )
 }
