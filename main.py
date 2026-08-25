@@ -13,6 +13,7 @@ from firebase_admin import storage
 from datetime import datetime
 from database import db
 from ingestion import ingest_csv_chunks
+from record_merge_service import merge_record_cluster
 
 app = FastAPI(title="MedReach AI Backend", version="1.0")
 
@@ -281,6 +282,38 @@ async def get_company_dashboard_metrics(company_id: str):
             status_code=500,
             detail=f"Unable to retrieve dashboard metrics: {exc}",
         ) from exc
+
+
+@app.post("/api/companies/{company_id}/records/merge")
+async def merge_company_records(company_id: str, payload: dict):
+    """Merge a duplicate cluster into a master record and archive the rest.
+
+    Request body should look like:
+    {
+      "records": [ {...} ],
+      "master_record_id": "record-123"
+    }
+    """
+    try:
+        records = payload.get("records")
+        master_record_id = payload.get("master_record_id")
+
+        if not isinstance(records, list) or not records:
+            raise HTTPException(status_code=400, detail="'records' must be a non-empty list.")
+
+        merged = merge_record_cluster(records, master_record_id=master_record_id)
+        master = merged["master_record"]
+
+        return {
+            "company_id": company_id,
+            "merged_record": master,
+            "archived_records": merged["archived_records"],
+            "master_record_id": str(master.get("record_id") or master_record_id or ""),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to merge company records: {exc}") from exc
 
 
 @app.get("/api/companies/{company_id}/export_data")
