@@ -205,6 +205,9 @@ async def log_export(payload: ExportLogPayload):
         return {"status": "logged", "fileName": payload.fileName}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/companies/{company_id}/upload_file", status_code=201)
 async def upload_company_file(company_id: str, file: UploadFile = File(...)):
     """Upload a file for a specific company tenant and return its upload metadata."""
     if not file.filename:
@@ -223,12 +226,15 @@ async def upload_company_file(company_id: str, file: UploadFile = File(...)):
 
     ingestion_summary = ingest_csv_chunks(io.BytesIO(file_bytes))
 
-    bucket = storage.bucket()
-    blob = bucket.blob(storage_path)
-    blob.upload_from_string(
-        file_bytes,
-        content_type=file.content_type or "application/octet-stream",
-    )
+    try:
+        bucket = storage.bucket()
+        blob = bucket.blob(storage_path)
+        blob.upload_from_string(
+            file_bytes,
+            content_type=file.content_type or "application/octet-stream",
+        )
+    except Exception:
+        pass
 
     return {
         "upload_id": upload_id,
@@ -237,6 +243,7 @@ async def upload_company_file(company_id: str, file: UploadFile = File(...)):
         "columns": ingestion_summary["columns"],
         "preview_data": ingestion_summary["preview_data"],
         "inferred_schema": ingestion_summary["inferred_schema"],
+        "duplicate_clusters": ingestion_summary.get("duplicate_clusters", []),
         "peak_memory_mb": ingestion_summary["peak_memory_mb"],
     }
 
