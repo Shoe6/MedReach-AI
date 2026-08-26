@@ -1,3 +1,4 @@
+import math
 import tracemalloc
 from collections import defaultdict
 from typing import Any
@@ -5,6 +6,28 @@ from typing import Any
 import pandas as pd
 
 from heuristics import infer_column_types
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert Pandas/NumPy values into JSON-safe Python native types."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return value
 
 
 def _normalize_text(value: Any) -> str:
@@ -100,8 +123,8 @@ def ingest_csv_chunks(file_obj) -> dict[str, Any]:
     return {
         "total_rows": total_rows,
         "columns": columns,
-        "preview_data": preview_data,
-        "inferred_schema": inferred_schema,
-        "duplicate_clusters": detect_duplicate_clusters(all_rows),
+        "preview_data": _json_safe(preview_data),
+        "inferred_schema": {str(key): str(value) for key, value in inferred_schema.items()},
+        "duplicate_clusters": detect_duplicate_clusters(_json_safe(all_rows)),
         "peak_memory_mb": round(peak / (1024 * 1024), 4),
     }
