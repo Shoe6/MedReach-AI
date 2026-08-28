@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, createContext, useContext, Fragment, type 
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip as RechartTooltip,
-  Cell, CartesianGrid, Legend,
+  Cell, CartesianGrid, Legend, PieChart, Pie,
 } from 'recharts'
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
@@ -3560,46 +3560,49 @@ function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           </div>
         </Card>
 
-        {/* Specialty donut */}
+        {/* Recharts Specialty Pie */}
         <Card>
-          <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Records by Specialty</h3>
-          <div className="flex items-center gap-6">
-            <svg width="120" height="120" viewBox="0 0 120 120">
-              {[
-                { pct: 28, color: C.navy, offset: 0 },
-                { pct: 22, color: C.corpBlue, offset: 28 },
-                { pct: 17, color: C.teal, offset: 50 },
-                { pct: 14, color: '#5C85C4', offset: 67 },
-                { pct: 19, color: '#CBD5E0', offset: 81 },
-              ].map((s, i) => {
-                const r = 45, cx = 60, cy = 60
-                const circ = 2 * Math.PI * r
-                const dash = (s.pct / 100) * circ
-                const gap = circ - dash
-                const rot = (s.offset / 100) * 360 - 90
-                return (
-                  <circle key={i} cx={cx} cy={cy} r={r} fill="none" stroke={s.color} strokeWidth="18"
-                    strokeDasharray={`${dash} ${gap}`}
-                    transform={`rotate(${rot} ${cx} ${cy})`} />
-                )
-              })}
-            </svg>
-            <div className="flex flex-col gap-1.5">
-              {[
-                { name: 'Cardiology', pct: 28, color: C.navy },
-                { name: 'Oncology', pct: 22, color: C.corpBlue },
-                { name: 'Neurology', pct: 17, color: C.teal },
-                { name: 'Orthopedics', pct: 14, color: '#5C85C4' },
-                { name: 'Other', pct: 19, color: '#CBD5E0' },
-              ].map(s => (
-                <div key={s.name} className="flex items-center gap-2">
-                  <div className="w-2.5 h-2.5 rounded-full" style={{ background: s.color }} />
-                  <span className="text-[11px]" style={{ color: C.darkText }}>{s.name}</span>
-                  <span className="text-[11px] font-semibold ml-auto" style={{ color: C.midText }}>{s.pct}%</span>
+          <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Records by Specialty</h3>
+          {(() => {
+            const TOTAL = 10412
+            const SPEC_DATA = [
+              { name: 'Cardiology',   pct: 28, color: C.navy },
+              { name: 'Oncology',     pct: 22, color: C.corpBlue },
+              { name: 'Neurology',    pct: 17, color: C.teal },
+              { name: 'Orthopedics', pct: 14, color: '#5C85C4' },
+              { name: 'Other',        pct: 19, color: '#CBD5E0' },
+            ].map(d => ({ ...d, count: Math.round(d.pct / 100 * TOTAL) }))
+            const SpecTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof SPEC_DATA[0] }> }) => {
+              if (!active || !payload?.length) return null
+              const d = payload[0].payload
+              return (
+                <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+                  <p className="font-bold mb-1" style={{ color: d.color }}>{d.name}</p>
+                  <p style={{ color: C.darkText }}><strong>{d.count.toLocaleString()}</strong> records</p>
+                  <p style={{ color: C.midText }}>{d.pct}% of total</p>
                 </div>
-              ))}
-            </div>
-          </div>
+              )
+            }
+            return (
+              <div style={{ height: 210 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={SPEC_DATA} dataKey="count" nameKey="name"
+                      cx="40%" cy="50%" innerRadius={48} outerRadius={78}
+                      paddingAngle={2} stroke="none">
+                      {SPEC_DATA.map((s, i) => <Cell key={i} fill={s.color} />)}
+                    </Pie>
+                    <RechartTooltip content={<SpecTooltip />} />
+                    <Legend layout="vertical" align="right" verticalAlign="middle"
+                      iconType="circle" iconSize={8}
+                      formatter={(value: string) => (
+                        <span style={{ fontSize: 11, color: C.darkText }}>{value}</span>
+                      )} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            )
+          })()}
         </Card>
       </div>
 
@@ -3642,30 +3645,150 @@ function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         </div>
       )}
 
-      {/* Geographic density */}
-      <Card>
-        <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Record Density by State</h3>
-        <div className="flex flex-wrap gap-2">
-          {states.map(s => {
-            const intensity = s.density / 100
+      {/* ── OUTLIER DISTRIBUTION CHARTS ───────────────────────────────────── */}
+      <div className="grid grid-cols-2 gap-6 mb-6">
+        {/* Outlier specialty breakdown — pie */}
+        <Card>
+          <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Outlier Distribution by Specialty</h3>
+          {(() => {
+            // Aggregate OUTLIERS + VALIDATION_ERRORS by specialty
+            const allFlagged = [
+              ...OUTLIERS.map(o => o.specialty),
+              ...VALIDATION_ERRORS.map(v => v.specialty),
+            ]
+            const specMap: Record<string, number> = {}
+            for (const s of allFlagged) specMap[s] = (specMap[s] ?? 0) + 1
+            const OUTLIER_SPEC_COLORS: Record<string, string> = {
+              Oncology:           C.danger,
+              Cardiology:         C.corpBlue,
+              Dermatology:        C.teal,
+              Neurology:          '#5C85C4',
+              Surgery:            C.warning,
+              'Internal Medicine': '#A78BFA',
+            }
+            const pieData = Object.entries(specMap)
+              .sort((a, b) => b[1] - a[1])
+              .map(([name, count]) => ({ name, count, color: OUTLIER_SPEC_COLORS[name] ?? '#CBD5E0' }))
+            const total = pieData.reduce((s, d) => s + d.count, 0)
+            const OutlierSpecTip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof pieData[0] }> }) => {
+              if (!active || !payload?.length) return null
+              const d = payload[0].payload
+              return (
+                <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+                  <p className="font-bold mb-1" style={{ color: d.color }}>{d.name}</p>
+                  <p style={{ color: C.darkText }}><strong>{d.count}</strong> flagged records</p>
+                  <p style={{ color: C.midText }}>{Math.round(d.count / total * 100)}% of all outliers</p>
+                </div>
+              )
+            }
             return (
-              <div key={s.abbr} className="flex flex-col items-center rounded-[6px] px-3 py-2 transition-all cursor-pointer hover:scale-105"
-                style={{ background: `rgba(27,58,107,${0.1 + intensity * 0.7})` }}>
-                <span className="text-[13px] font-bold" style={{ color: intensity > 0.5 ? 'white' : C.navy }}>{s.abbr}</span>
-                <span className="text-[9px]" style={{ color: intensity > 0.5 ? 'rgba(255,255,255,0.8)' : C.midText }}>{s.density}%</span>
+              <div style={{ height: 200 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={pieData} dataKey="count" nameKey="name"
+                      cx="42%" cy="50%" innerRadius={44} outerRadius={72}
+                      paddingAngle={3} stroke="none">
+                      {pieData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                    </Pie>
+                    <RechartTooltip content={<OutlierSpecTip />} />
+                    <Legend layout="vertical" align="right" verticalAlign="middle"
+                      iconType="circle" iconSize={8}
+                      formatter={(value: string) => <span style={{ fontSize: 11, color: C.darkText }}>{value}</span>} />
+                  </PieChart>
+                </ResponsiveContainer>
               </div>
             )
-          })}
-        </div>
-        <div className="flex items-center gap-2 mt-4">
-          <span className="text-[11px]" style={{ color: C.midText }}>Density:</span>
-          <div className="flex gap-1">
-            {[10, 30, 50, 70, 90].map(v => (
-              <div key={v} className="w-8 h-3 rounded" style={{ background: `rgba(27,58,107,${0.1 + (v/100) * 0.7})` }} />
-            ))}
-          </div>
-          <span className="text-[11px]" style={{ color: C.midText }}>Low → High</span>
-        </div>
+          })()}
+        </Card>
+
+        {/* Geographic outlier concentration — horizontal bar */}
+        <Card>
+          <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Outlier Concentration by State</h3>
+          {(() => {
+            // Build state data: combine validation errors (have state) with density
+            const GEO_DATA = [
+              { state: 'FL', outliers: 3, records: 937  },
+              { state: 'CA', records: 885, outliers: 2 },
+              { state: 'NY', records: 854, outliers: 2 },
+              { state: 'TX', records: 812, outliers: 3 },
+              { state: 'MA', records: 750, outliers: 1 },
+              { state: 'PA', records: 677, outliers: 1 },
+              { state: 'OH', records: 625, outliers: 0 },
+              { state: 'IL', records: 604, outliers: 1 },
+              { state: 'GA', records: 573, outliers: 0 },
+              { state: 'WA', records: 500, outliers: 0 },
+            ].sort((a, b) => b.outliers - a.outliers || b.records - a.records)
+            const GeoTip = ({ active, payload, label }: { active?: boolean; label?: string; payload?: Array<{ name: string; value: number; fill: string }> }) => {
+              if (!active || !payload?.length) return null
+              const rec = GEO_DATA.find(d => d.state === label)
+              return (
+                <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+                  <p className="font-bold mb-1" style={{ color: C.navy }}>{label}</p>
+                  {payload.map(p => (
+                    <p key={p.name} style={{ color: p.fill }}>
+                      {p.name}: <strong>{p.value}</strong>
+                    </p>
+                  ))}
+                  {rec && <p style={{ color: C.midText }}>Outlier rate: {((rec.outliers / rec.records) * 100).toFixed(2)}%</p>}
+                </div>
+              )
+            }
+            return (
+              <div style={{ height: 200 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={GEO_DATA} layout="vertical"
+                    margin={{ top: 0, right: 48, left: 8, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#EDF2F7" />
+                    <XAxis type="number" tick={{ fontSize: 10, fill: C.midText }} tickLine={false} axisLine={false} />
+                    <YAxis type="category" dataKey="state" width={28} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} />
+                    <RechartTooltip content={<GeoTip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
+                    <Legend iconType="square" iconSize={8} wrapperStyle={{ fontSize: 10, color: C.midText }} />
+                    <Bar dataKey="records" name="Total Records" fill={C.corpBlue} opacity={0.35} radius={[0, 3, 3, 0]} />
+                    <Bar dataKey="outliers" name="Outlier Flags" fill={C.danger} radius={[0, 3, 3, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )
+          })()}
+        </Card>
+      </div>
+
+      {/* Geographic record density — horizontal bar replacing old tile grid */}
+      <Card>
+        <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Record Density by State</h3>
+        {(() => {
+          const densityData = states
+            .slice()
+            .sort((a, b) => b.density - a.density)
+            .map(s => ({ ...s, count: Math.round(s.density / 100 * 10412) }))
+          const DensityTip = ({ active, payload, label }: { active?: boolean; label?: string; payload?: Array<{ value: number }> }) => {
+            if (!active || !payload?.length) return null
+            return (
+              <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+                <p className="font-bold mb-1" style={{ color: C.navy }}>{label}</p>
+                <p style={{ color: C.darkText }}><strong>{payload[0].value.toLocaleString()}</strong> records</p>
+                <p style={{ color: C.midText }}>{states.find(s => s.abbr === label)?.density ?? 0}% relative density</p>
+              </div>
+            )
+          }
+          return (
+            <div style={{ height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={densityData} margin={{ top: 4, right: 16, left: 0, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
+                  <XAxis dataKey="abbr" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} />
+                  <YAxis tickFormatter={(v: number) => v.toLocaleString()} tick={{ fontSize: 10, fill: C.midText }} tickLine={false} axisLine={false} width={44} />
+                  <RechartTooltip content={<DensityTip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
+                  <Bar dataKey="count" name="Records" radius={[4, 4, 0, 0]}>
+                    {densityData.map((s, i) => (
+                      <Cell key={i} fill={`rgba(27,58,107,${0.25 + (s.density / 100) * 0.75})`} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )
+        })()}
       </Card>
     </div>
   )
