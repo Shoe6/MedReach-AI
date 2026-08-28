@@ -18,8 +18,8 @@ const ROLE_META: Record<Role, { label: string; color: string; bg: string; descri
 
 // Which nav items each role can see
 const ROLE_NAV: Record<Role, string[]> = {
-  'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','export','team','audit-log','settings','org-management'],
-  'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','export','team','audit-log','settings'],
+  'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','settings','org-management'],
+  'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','settings'],
   'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics'],
   'viewer':      ['dashboard','data-review','data-heatmap','query','analytics'],
 }
@@ -59,7 +59,7 @@ type Screen =
   | 'login' | 'register' | 'forgot-password' | 'reset-password' | 'mfa'
   | 'dashboard' | 'upload' | 'column-mapping'
   | 'data-review' | 'query' | 'segments' | 'campaign-generator'
-  | 'compliance-review' | 'analytics' | 'data-heatmap'
+  | 'compliance-review' | 'financial-disclosures' | 'analytics' | 'data-heatmap'
   | 'export' | 'team' | 'audit-log' | 'settings' | 'org-management'
 
 type ToastType = 'success' | 'warning' | 'error' | 'info'
@@ -441,8 +441,9 @@ const ALL_NAV_ITEMS = [
   { id: 'data-heatmap',       label: 'Data Heatmap',   icon: Icon.chart },
   { id: 'query',              label: 'Query',          icon: Icon.query },
   { id: 'segments',           label: 'Segments',       icon: Icon.users },
-  { id: 'campaign-generator', label: 'Campaigns',      icon: Icon.send },
-  { id: 'analytics',          label: 'Analytics',      icon: Icon.chart },
+  { id: 'campaign-generator',    label: 'Campaigns',       icon: Icon.send },
+  { id: 'financial-disclosures', label: 'Disclosures',     icon: Icon.fileCheck },
+  { id: 'analytics',             label: 'Analytics',       icon: Icon.chart },
   { id: 'export',             label: 'Export',         icon: Icon.download },
   { id: 'team',               label: 'Team',           icon: Icon.userPlus },
   { id: 'audit-log',          label: 'Audit Log',      icon: Icon.audit },
@@ -3504,6 +3505,308 @@ function ComplianceReviewScreen() {
   )
 }
 
+// ─── FINANCIAL DISCLOSURES ────────────────────────────────────────────────────
+
+interface DisclosureRecord {
+  id: number
+  physician: string
+  npi: string
+  specialty: string
+  state: string
+  company: string
+  category: string
+  amount: number
+  date: string
+  status: 'Reported' | 'Pending' | 'Disputed'
+  year: number
+}
+
+const DISCLOSURES: DisclosureRecord[] = [
+  { id:  0, physician: 'Dr. Sarah Chen',       npi: '1234567890', specialty: 'Oncology',          state: 'CA', company: 'Pfizer Inc.',           category: 'Consulting Fee',   amount:  42500, date: '2025-03-15', status: 'Reported', year: 2025 },
+  { id:  1, physician: 'Dr. James Williams',   npi: '9876543210', specialty: 'Cardiology',         state: 'NY', company: 'AstraZeneca',           category: 'Speaking Fee',     amount:  18750, date: '2025-01-22', status: 'Reported', year: 2025 },
+  { id:  2, physician: 'Dr. Priya Patel',      npi: '1122334455', specialty: 'Neurology',          state: 'TX', company: 'Merck & Co.',           category: 'Research Grant',   amount: 125000, date: '2024-11-10', status: 'Reported', year: 2024 },
+  { id:  3, physician: 'Dr. Marcus Okonkwo',   npi: '5566778899', specialty: 'Surgery',            state: 'FL', company: 'Johnson & Johnson',     category: 'Travel & Lodging', amount:   3200, date: '2025-02-08', status: 'Pending',  year: 2025 },
+  { id:  4, physician: 'Dr. Emily Torres',     npi: '6677889900', specialty: 'Internal Medicine',  state: 'IL', company: 'Novartis',              category: 'Food & Beverage',  amount:    890, date: '2025-04-01', status: 'Reported', year: 2025 },
+  { id:  5, physician: 'Dr. Kevin Park',       npi: '7788990011', specialty: 'Dermatology',        state: 'WA', company: 'AbbVie Inc.',           category: 'Consulting Fee',   amount:  31000, date: '2025-05-14', status: 'Disputed', year: 2025 },
+  { id:  6, physician: 'Dr. Maria Santos',     npi: '8899001122', specialty: 'Oncology',           state: 'FL', company: 'Roche',                 category: 'Speaking Fee',     amount:   9500, date: '2024-08-20', status: 'Reported', year: 2024 },
+  { id:  7, physician: 'Dr. Thomas Nguyen',    npi: '9900112233', specialty: 'Cardiology',         state: 'CA', company: 'Sanofi',                category: 'Education',        amount:   4200, date: '2025-06-03', status: 'Reported', year: 2025 },
+  { id:  8, physician: 'Dr. Angela Ruiz',      npi: '0011223344', specialty: 'Oncology',           state: 'TX', company: 'Bristol-Myers Squibb', category: 'Research Grant',   amount:  87000, date: '2024-12-01', status: 'Reported', year: 2024 },
+  { id:  9, physician: 'Dr. Carol Davis',      npi: '1122334456', specialty: 'Orthopedics',        state: 'NY', company: 'Stryker Corp.',         category: 'Consulting Fee',   amount:  22500, date: '2025-03-29', status: 'Pending',  year: 2025 },
+  { id: 10, physician: 'Dr. Steven Park',      npi: '2233445566', specialty: 'Surgery',            state: 'TX', company: 'Medtronic',             category: 'Travel & Lodging', amount:   5800, date: '2025-01-11', status: 'Reported', year: 2025 },
+  { id: 11, physician: 'Dr. Linda Morrison',   npi: '3344556677', specialty: 'Psychiatry',         state: 'MA', company: 'Eli Lilly',             category: 'Speaking Fee',     amount:  14250, date: '2025-04-22', status: 'Reported', year: 2025 },
+  { id: 12, physician: 'Dr. Robert Tanaka',    npi: '4455667789', specialty: 'Dermatology',        state: 'CA', company: 'AbbVie Inc.',           category: 'Consulting Fee',   amount:  58000, date: '2024-09-15', status: 'Disputed', year: 2024 },
+  { id: 13, physician: 'Dr. Jennifer Brown',   npi: '5566778801', specialty: 'Neurology',          state: 'OH', company: 'Biogen',                category: 'Research Grant',   amount: 210000, date: '2024-07-01', status: 'Reported', year: 2024 },
+  { id: 14, physician: 'Dr. David Garcia',     npi: '6677889912', specialty: 'Cardiology',         state: 'GA', company: 'Boehringer Ingelheim',  category: 'Food & Beverage',  amount:   1240, date: '2025-05-30', status: 'Reported', year: 2025 },
+  { id: 15, physician: 'Dr. Susan Martinez',   npi: '7788990023', specialty: 'Oncology',           state: 'PA', company: 'Pfizer Inc.',           category: 'Speaking Fee',     amount:  26750, date: '2025-02-14', status: 'Reported', year: 2025 },
+  { id: 16, physician: 'Dr. Michael Johnson',  npi: '8899001134', specialty: 'Internal Medicine',  state: 'NC', company: 'AstraZeneca',           category: 'Education',        amount:   3100, date: '2024-10-05', status: 'Pending',  year: 2024 },
+  { id: 17, physician: 'Dr. Lisa Wang',        npi: '9900112245', specialty: 'Psychiatry',         state: 'IL', company: 'Janssen',               category: 'Consulting Fee',   amount:  47000, date: '2025-06-18', status: 'Reported', year: 2025 },
+  { id: 18, physician: 'Dr. Andrew Anderson',  npi: '0011223356', specialty: 'Orthopedics',        state: 'WA', company: 'Zimmer Biomet',         category: 'Travel & Lodging', amount:   7800, date: '2025-03-07', status: 'Disputed', year: 2025 },
+  { id: 19, physician: 'Dr. Rachel Kim',       npi: '1122334468', specialty: 'Dermatology',        state: 'NY', company: 'Regeneron',             category: 'Research Grant',   amount:  95000, date: '2024-06-20', status: 'Reported', year: 2024 },
+]
+
+type DisclosureSortKey = 'physician' | 'specialty' | 'company' | 'category' | 'amount' | 'date' | 'status'
+
+function FinancialDisclosureScreen() {
+  const { role } = useRole()
+  const [search, setSearch] = useState('')
+  const [filterCat, setFilterCat] = useState('All')
+  const [filterStatus, setFilterStatus] = useState('All')
+  const [filterYear, setFilterYear] = useState('All')
+  const [sortKey, setSortKey] = useState<DisclosureSortKey>('amount')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [exporting, setExporting] = useState(false)
+
+  const canExport = role === 'super-admin' || role === 'admin'
+
+  const categories = ['All', ...Array.from(new Set(DISCLOSURES.map(d => d.category))).sort()]
+  const statuses   = ['All', 'Reported', 'Pending', 'Disputed']
+  const years      = ['All', '2025', '2024']
+
+  const filtered = DISCLOSURES.filter(d => {
+    const q = search.toLowerCase()
+    if (q && !d.physician.toLowerCase().includes(q) && !d.company.toLowerCase().includes(q) && !d.npi.includes(q)) return false
+    if (filterCat !== 'All' && d.category !== filterCat) return false
+    if (filterStatus !== 'All' && d.status !== filterStatus) return false
+    if (filterYear !== 'All' && d.year !== Number(filterYear)) return false
+    return true
+  })
+
+  const sorted = [...filtered].sort((a, b) => {
+    const av: string | number = a[sortKey]
+    const bv: string | number = b[sortKey]
+    const al = typeof av === 'string' ? av.toLowerCase() : av
+    const bl = typeof bv === 'string' ? bv.toLowerCase() : bv
+    if (al < bl) return sortDir === 'asc' ? -1 : 1
+    if (al > bl) return sortDir === 'asc' ? 1 : -1
+    return 0
+  })
+
+  const toggleSort = (key: DisclosureSortKey) => {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortKey(key); setSortDir('desc') }
+  }
+
+  const totalAmount     = filtered.reduce((s, d) => s + d.amount, 0)
+  const pendingCount    = filtered.filter(d => d.status === 'Pending').length
+  const disputedCount   = filtered.filter(d => d.status === 'Disputed').length
+  const uniquePhysicians = new Set(filtered.map(d => d.physician)).size
+
+  const exportExcel = () => {
+    setExporting(true)
+    const headers = ['Physician', 'NPI', 'Specialty', 'State', 'Company', 'Category', 'Amount (USD)', 'Date', 'Status', 'Year']
+    const rows = sorted.map(d => [
+      d.physician, d.npi, d.specialty, d.state, d.company, d.category,
+      d.amount.toFixed(2), d.date, d.status, String(d.year),
+    ])
+    const htmlTable = [
+      `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">`,
+      `<head><meta charset="UTF-8"><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>`,
+      `<x:Name>Financial Disclosures</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>`,
+      `</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--></head>`,
+      `<body><table border="1" style="border-collapse:collapse">`,
+      `<tr>${headers.map(h => `<th style="background:#1B3A6B;color:white;font-weight:bold;padding:6px 10px;white-space:nowrap">${h}</th>`).join('')}</tr>`,
+      ...rows.map((r, i) => `<tr style="background:${i % 2 === 0 ? '#ffffff' : '#EBF4FA'}">${
+        r.map((c, ci) => `<td style="padding:5px 10px${ci === 6 ? ';text-align:right;font-family:monospace' : ''}">${c}</td>`).join('')
+      }</tr>`),
+      `<tr style="background:#F7FAFC;font-weight:bold;border-top:2px solid #CBD5E0">`,
+      `<td colspan="6" style="padding:6px 10px">Total (${sorted.length} records)</td>`,
+      `<td style="padding:6px 10px;text-align:right;font-family:monospace">$${sorted.reduce((s, d) => s + d.amount, 0).toFixed(2)}</td>`,
+      `<td colspan="3"></td></tr>`,
+      `</table></body></html>`,
+    ].join('\n')
+
+    const blob = new Blob([htmlTable], { type: 'application/vnd.ms-excel' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `Financial_Disclosures_${new Date().toISOString().slice(0, 10)}.xls`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+    setTimeout(() => setExporting(false), 800)
+  }
+
+  const SortBtn = ({ k, label, right = false }: { k: DisclosureSortKey; label: string; right?: boolean }) => (
+    <button
+      className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-white hover:text-[#BEE3F8] transition-colors ${right ? 'ml-auto' : ''}`}
+      onClick={() => toggleSort(k)}>
+      {label}
+      <span className="opacity-70">{sortKey === k ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
+    </button>
+  )
+
+  const catStyle: Record<string, { bg: string; color: string }> = {
+    'Research Grant':   { bg: '#EBF4FA', color: C.corpBlue },
+    'Consulting Fee':   { bg: '#FEF3C7', color: '#92400E' },
+    'Speaking Fee':     { bg: '#F1F5F9', color: '#334155' },
+    'Travel & Lodging': { bg: '#FEE2E2', color: '#991B1B' },
+    'Food & Beverage':  { bg: '#E8F5EF', color: C.success },
+    'Education':        { bg: '#F0FDF4', color: '#166534' },
+  }
+
+  const fmtUSD = (n: number) => n >= 100000 ? `$${(n / 1000).toFixed(0)}k` : n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : `$${n.toLocaleString()}`
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Financial Disclosures"
+        subtitle="Open Payments (Sunshine Act) — physician-manufacturer financial relationships requiring mandatory reporting"
+        actions={
+          <Btn
+            variant={canExport ? 'primary' : 'disabled'}
+            disabled={!canExport || exporting}
+            icon={Icon.download}
+            onClick={exportExcel}>
+            {exporting ? 'Exporting…' : 'Export to Excel'}
+          </Btn>
+        }
+      />
+
+      {!canExport && (
+        <Banner type="warning">
+          <strong>Export restricted.</strong> Only Admin and Super Admin roles may export mandatory reporting logs.
+        </Banner>
+      )}
+
+      {/* Summary cards */}
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        {[
+          { label: 'Total Disclosed',  value: `$${totalAmount.toLocaleString()}`,  color: C.navy,    sub: `${filtered.length} transactions` },
+          { label: 'Physicians',       value: String(uniquePhysicians),             color: C.corpBlue, sub: 'unique in current view' },
+          { label: 'Pending Review',   value: String(pendingCount),                 color: C.warning, sub: pendingCount > 0 ? 'Awaiting submission' : 'All submitted' },
+          { label: 'Disputed',         value: String(disputedCount),                color: C.danger,  sub: disputedCount > 0 ? 'Requires attention' : 'No disputes' },
+        ].map(c => (
+          <Card key={c.label}>
+            <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={{ color: C.midText }}>{c.label}</p>
+            <p className="text-[26px] font-bold leading-tight" style={{ fontFamily: 'Calibri, Georgia, serif', color: c.color }}>{c.value}</p>
+            <p className="text-[10px] mt-0.5" style={{ color: C.midText }}>{c.sub}</p>
+          </Card>
+        ))}
+      </div>
+
+      {/* Filters */}
+      <Card className="mb-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative">
+            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#A0AEC0]">{Icon.search}</span>
+            <input
+              type="text"
+              placeholder="Search physician, company or NPI…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="border rounded-[6px] text-[12px] pl-8 pr-3 py-1.5"
+              style={{ borderColor: C.border, color: C.darkText, width: 260 }}
+            />
+          </div>
+          {([
+            { label: 'Category', value: filterCat,    opts: categories, set: setFilterCat    },
+            { label: 'Status',   value: filterStatus, opts: statuses,   set: setFilterStatus },
+            { label: 'Year',     value: filterYear,   opts: years,      set: setFilterYear   },
+          ] as { label: string; value: string; opts: string[]; set: (v: string) => void }[]).map(f => (
+            <div key={f.label} className="flex items-center gap-1.5">
+              <span className="text-[11px]" style={{ color: C.midText }}>{f.label}:</span>
+              <select
+                className="border rounded-[6px] text-[12px] px-2 py-1.5"
+                style={{ borderColor: C.border, color: C.darkText }}
+                value={f.value}
+                onChange={e => f.set(e.target.value)}>
+                {f.opts.map(o => <option key={o}>{o}</option>)}
+              </select>
+            </div>
+          ))}
+          <span className="ml-auto text-[11px]" style={{ color: C.midText }}>
+            Showing <strong style={{ color: C.navy }}>{sorted.length}</strong> of {DISCLOSURES.length} records
+          </span>
+          {(search || filterCat !== 'All' || filterStatus !== 'All' || filterYear !== 'All') && (
+            <button className="text-[11px] hover:underline" style={{ color: C.corpBlue }}
+              onClick={() => { setSearch(''); setFilterCat('All'); setFilterStatus('All'); setFilterYear('All') }}>
+              Clear all ×
+            </button>
+          )}
+        </div>
+      </Card>
+
+      {/* Table */}
+      <Card className="p-0 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse" style={{ fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: C.navy }}>
+                <th className="px-4 py-3 text-left"><SortBtn k="physician" label="Physician" /></th>
+                <th className="px-3 py-3 text-left"><SortBtn k="specialty" label="Specialty" /></th>
+                <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-white opacity-80">NPI</th>
+                <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-white opacity-80">State</th>
+                <th className="px-3 py-3 text-left"><SortBtn k="company" label="Company" /></th>
+                <th className="px-3 py-3 text-left"><SortBtn k="category" label="Category" /></th>
+                <th className="px-3 py-3"><div className="flex justify-end"><SortBtn k="amount" label="Amount" right /></div></th>
+                <th className="px-3 py-3 text-left"><SortBtn k="date" label="Date" /></th>
+                <th className="px-3 py-3 text-left"><SortBtn k="status" label="Status" /></th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="text-center py-14 text-[13px]" style={{ color: C.midText }}>
+                    No disclosures match the current filters.
+                  </td>
+                </tr>
+              )}
+              {sorted.map((d, i) => {
+                const cs = catStyle[d.category] ?? { bg: '#F1F5F9', color: '#334155' }
+                return (
+                  <tr key={d.id}
+                    style={{ background: i % 2 === 0 ? 'white' : C.lightTint, borderBottom: '1px solid #EDF2F7' }}
+                    className="hover:bg-[#EBF4FA] transition-colors">
+                    <td className="px-4 py-3 font-semibold whitespace-nowrap" style={{ color: C.navy }}>{d.physician}</td>
+                    <td className="px-3 py-3"><Badge tier={1} color="neutral">{d.specialty}</Badge></td>
+                    <td className="px-3 py-3 mono text-[11px]" style={{ color: C.midText }}>{d.npi}</td>
+                    <td className="px-3 py-3"><Badge tier={1} color="info">{d.state}</Badge></td>
+                    <td className="px-3 py-3 whitespace-nowrap" style={{ color: C.darkText }}>{d.company}</td>
+                    <td className="px-3 py-3">
+                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded-[4px] whitespace-nowrap"
+                        style={{ background: cs.bg, color: cs.color }}>{d.category}</span>
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      <span
+                        className="font-bold mono text-[12px]"
+                        title={`$${d.amount.toLocaleString()}`}
+                        style={{ color: d.amount >= 50000 ? C.danger : d.amount >= 10000 ? C.warning : C.success }}>
+                        {fmtUSD(d.amount)}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3 mono text-[11px] whitespace-nowrap" style={{ color: C.midText }}>{d.date}</td>
+                    <td className="px-3 py-3">
+                      <Badge
+                        tier={d.status === 'Reported' ? 1 : 2}
+                        color={d.status === 'Reported' ? 'success' : d.status === 'Pending' ? 'warning' : 'danger'}>
+                        {d.status}
+                      </Badge>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+            {sorted.length > 0 && (
+              <tfoot>
+                <tr style={{ borderTop: '2px solid #EDF2F7', background: '#F7FAFC' }}>
+                  <td colSpan={6} className="px-4 py-3 text-[11px] font-bold" style={{ color: C.midText }}>
+                    Totals — {sorted.length} record{sorted.length !== 1 ? 's' : ''} in current view
+                  </td>
+                  <td className="px-3 py-3 text-right font-bold mono text-[13px]" style={{ color: C.navy }}>
+                    ${sorted.reduce((s, d) => s + d.amount, 0).toLocaleString()}
+                  </td>
+                  <td colSpan={2} />
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 
 function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
@@ -4994,6 +5297,7 @@ const SCREEN_TITLES: Record<Screen, string> = {
   dashboard: 'Dashboard', upload: 'Upload Data', 'column-mapping': 'Column Mapping',
   'data-review': 'Data Review', query: 'Natural Language Query', segments: 'Segmentation',
   'campaign-generator': 'Campaign Generator', 'compliance-review': 'Compliance Review',
+  'financial-disclosures': 'Financial Disclosures',
   analytics: 'Analytics Dashboard', 'data-heatmap': 'Data Quality Heatmap',
   export: 'Export', team: 'Team Management', 'audit-log': 'Audit Log', settings: 'Settings',
   'org-management': 'Organization Management',
@@ -5058,6 +5362,7 @@ export default function App() {
       case 'segments': return <SegmentsScreen onNavigate={navigate} />
       case 'campaign-generator': return <CampaignGeneratorScreen onNavigate={navigate} />
       case 'compliance-review': return <ComplianceReviewScreen />
+      case 'financial-disclosures': return <FinancialDisclosureScreen />
       case 'analytics': return <AnalyticsScreen onNavigate={navigate} />
       case 'data-heatmap': return <DataHeatmapScreen />
       case 'export': return <ExportScreen onNavigate={navigate} />
