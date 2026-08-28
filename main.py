@@ -4,15 +4,17 @@ import os
 from datetime import datetime
 from uuid import uuid4
 
-import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from firebase_admin import storage
 from pydantic import BaseModel
 
 from database import db
-from ingestion import ingest_csv_chunks
+
+def _get_ingest():
+    """Lazy import so the app can start even when pandas is not installed."""
+    from ingestion import ingest_csv_chunks
+    return ingest_csv_chunks
 
 app = FastAPI(title="MedReach AI Backend", version="1.0")
 
@@ -367,8 +369,9 @@ async def upload_company_file(company_id: str, file: UploadFile = File(...)):
     await file.seek(0)
     file_bytes = await file.read()
 
-    ingestion_summary = ingest_csv_chunks(io.BytesIO(file_bytes))
+    ingestion_summary = _get_ingest()(io.BytesIO(file_bytes))
 
+    from firebase_admin import storage  # lazy: optional dependency
     bucket = storage.bucket()
     blob = bucket.blob(storage_path)
     blob.upload_from_string(
@@ -395,6 +398,8 @@ async def export_company_data(company_id: str):
     HIPAA COMPLIANCE: Only records with Has_Opted_In=true are included.
     """
     try:
+        import pandas as pd  # lazy: optional dependency
+
         records_ref = db.collection("companies").document(company_id).collection("records")
         records = [doc.to_dict() for doc in records_ref.stream()]
 
