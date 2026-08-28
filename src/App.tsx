@@ -1,5 +1,9 @@
 import { useState, useRef, useEffect, createContext, useContext, Fragment, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
+import {
+  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip as RechartTooltip,
+  Cell, CartesianGrid, Legend,
+} from 'recharts'
 
 // ─── TYPES ───────────────────────────────────────────────────────────────────
 
@@ -3721,7 +3725,7 @@ function DataHeatmapScreen() {
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [filterField, setFilterField] = useState<string>('All fields')
   const [filterStatus, setFilterStatus] = useState<CellStatus | 'all'>('all')
-  const [viewMode, setViewMode] = useState<'matrix' | 'field'>('matrix')
+  const [viewMode, setViewMode] = useState<'matrix' | 'field' | 'chart'>('matrix')
 
   const onCellEnter = (r: number, c: number) => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
@@ -3772,6 +3776,12 @@ function DataHeatmapScreen() {
               style={{ borderColor: viewMode === 'field' ? C.navy : C.border, background: viewMode === 'field' ? C.navy : 'white', color: viewMode === 'field' ? 'white' : C.midText }}
               onClick={() => setViewMode('field')}>
               Field summary
+            </button>
+            <button
+              className="text-[12px] px-3 py-1.5 rounded-[6px] border transition-all"
+              style={{ borderColor: viewMode === 'chart' ? C.navy : C.border, background: viewMode === 'chart' ? C.navy : 'white', color: viewMode === 'chart' ? 'white' : C.midText }}
+              onClick={() => setViewMode('chart')}>
+              📊 Chart view
             </button>
           </div>
         }
@@ -4002,6 +4012,108 @@ function DataHeatmapScreen() {
           </div>
         </Card>
       )}
+
+      {/* ── VIEW: RECHARTS CHART ─────────────────────────────────────────── */}
+      {viewMode === 'chart' && (() => {
+        // Build per-field data for both charts
+        const fieldChartData = HEATMAP_FIELDS.map((f, fi) => ({
+          name: f.name.length > 8 ? f.name.slice(0, 8) + '…' : f.name,
+          fullName: f.name,
+          complete: FIELD_HEALTH[fi].completePct,
+          partial:  f.partialPct,
+          invalid:  f.invalidPct,
+          missing:  f.nullPct,
+          health:   FIELD_HEALTH[fi].completePct,
+        }))
+
+        const healthColor = (pct: number) =>
+          pct >= 90 ? C.success : pct >= 70 ? C.warning : C.danger
+
+        // Custom tooltip for health bar
+        const HealthTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof fieldChartData[0] }> }) => {
+          if (!active || !payload?.length) return null
+          const d = payload[0].payload
+          return (
+            <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+              <p className="font-bold mb-1" style={{ color: C.navy }}>{d.fullName}</p>
+              <p style={{ color: C.success }}>✅ Complete: {d.complete}%</p>
+              <p style={{ color: C.warning }}>⚠ Partial: {d.partial}%</p>
+              <p style={{ color: C.danger }}>✗ Invalid: {d.invalid}%</p>
+              <p style={{ color: '#A0AEC0' }}>○ Missing: {d.missing}%</p>
+            </div>
+          )
+        }
+
+        // Custom tooltip for stacked chart
+        const StackTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ name: string; value: number; fill: string }> }) => {
+          if (!active || !payload?.length) return null
+          return (
+            <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+              {payload.slice().reverse().map(p => (
+                <p key={p.name} style={{ color: p.fill }}>{p.name}: {p.value}%</p>
+              ))}
+            </div>
+          )
+        }
+
+        return (
+          <div className="flex flex-col gap-6">
+            {/* Chart 1 – Field health score (color-coded bar per field) */}
+            <Card>
+              <p className="text-[13px] font-bold mb-4" style={{ color: C.navy }}>Field Health Score (% Complete)</p>
+              <div style={{ height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 24 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} />
+                    <YAxis domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} width={38} />
+                    <RechartTooltip content={<HealthTooltip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
+                    {/* Threshold reference lines via custom label not available in simple BarChart, keep it clean */}
+                    <Bar dataKey="health" radius={[4, 4, 0, 0]}>
+                      {fieldChartData.map((entry, i) => (
+                        <Cell key={i} fill={healthColor(entry.health)} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              {/* Threshold legend */}
+              <div className="flex items-center gap-6 mt-2 justify-end">
+                {[
+                  { label: '≥ 90% — Healthy',    color: C.success },
+                  { label: '70–89% — Warning',   color: C.warning },
+                  { label: '< 70% — Critical',   color: C.danger  },
+                ].map(l => (
+                  <span key={l.label} className="flex items-center gap-1.5 text-[10px]" style={{ color: l.color }}>
+                    <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: l.color }} />
+                    {l.label}
+                  </span>
+                ))}
+              </div>
+            </Card>
+
+            {/* Chart 2 – Stacked breakdown per field */}
+            <Card>
+              <p className="text-[13px] font-bold mb-4" style={{ color: C.navy }}>Field Quality Breakdown (Stacked %)</p>
+              <div style={{ height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 24 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} />
+                    <YAxis domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} width={38} />
+                    <RechartTooltip content={<StackTooltip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
+                    <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 11, paddingTop: 12, color: C.midText }} />
+                    <Bar dataKey="complete" name="Complete" stackId="a" fill={C.success} />
+                    <Bar dataKey="partial"  name="Partial"  stackId="a" fill={C.warning} />
+                    <Bar dataKey="invalid"  name="Invalid"  stackId="a" fill={C.danger}  />
+                    <Bar dataKey="missing"  name="Missing"  stackId="a" fill="#CBD5E0" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </Card>
+          </div>
+        )
+      })()}
 
       {/* ── VIEW: FIELD SUMMARY ───────────────────────────────────────────── */}
       {viewMode === 'field' && (
