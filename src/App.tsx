@@ -18,10 +18,10 @@ const ROLE_META: Record<Role, { label: string; color: string; bg: string; descri
 
 // Which nav items each role can see
 const ROLE_NAV: Record<Role, string[]> = {
-  'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','settings','org-management'],
-  'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','settings'],
-  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics'],
-  'viewer':      ['dashboard','data-review','data-heatmap','query','analytics'],
+  'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings','org-management'],
+  'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings'],
+  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','scrubbing-sessions'],
+  'viewer':      ['dashboard','data-review','data-heatmap','query','analytics','scrubbing-sessions'],
 }
 
 const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
@@ -60,7 +60,7 @@ type Screen =
   | 'dashboard' | 'upload' | 'column-mapping'
   | 'data-review' | 'query' | 'segments' | 'campaign-generator'
   | 'compliance-review' | 'financial-disclosures' | 'analytics' | 'data-heatmap'
-  | 'export' | 'team' | 'audit-log' | 'settings' | 'org-management'
+  | 'export' | 'team' | 'audit-log' | 'scrubbing-sessions' | 'settings' | 'org-management'
 
 type ToastType = 'success' | 'warning' | 'error' | 'info'
 
@@ -447,7 +447,8 @@ const ALL_NAV_ITEMS = [
   { id: 'export',             label: 'Export',         icon: Icon.download },
   { id: 'team',               label: 'Team',           icon: Icon.userPlus },
   { id: 'audit-log',          label: 'Audit Log',      icon: Icon.audit },
-  { id: 'settings',           label: 'Settings',       icon: Icon.gear },
+  { id: 'scrubbing-sessions', label: 'Scrub Sessions',  icon: Icon.shield },
+  { id: 'settings',           label: 'Settings',        icon: Icon.gear },
   // Super-admin only
   { id: 'org-management',     label: 'Organizations',  icon: Icon.shield },
 ]
@@ -5035,6 +5036,300 @@ const ACTION_COLORS: Record<string, { bg: string; text: string }> = {
   invite: { bg: '#EBF4FA', text: C.teal },
 }
 
+// ─── SCRUBBING SESSIONS ───────────────────────────────────────────────────────
+
+interface ScrubbingSession {
+  id: string
+  name: string
+  date: string
+  operator: string
+  role: string
+  recordsBefore: number
+  recordsAfter: number
+  removed: number
+  flagsResolved: number
+  piiFlagged: number
+  duplicatesMerged: number
+  npiFixed: number
+  outliersTagged: number
+  healthBefore: number
+  healthAfter: number
+  status: 'Complete' | 'Partial' | 'Aborted'
+  notes: string
+}
+
+const SCRUBBING_SESSIONS: ScrubbingSession[] = [
+  {
+    id: 'sess_001', name: 'Q2 2026 Full Scrub', date: '2026-06-15', operator: 'Jane Doe', role: 'Admin',
+    recordsBefore: 10412, recordsAfter: 10238, removed: 174, flagsResolved: 41, piiFlagged: 12,
+    duplicatesMerged: 8, npiFixed: 17, outliersTagged: 4, healthBefore: 71, healthAfter: 84,
+    status: 'Complete', notes: 'Full quarterly scrub prior to Q2 campaign launch. All high-severity flags cleared.',
+  },
+  {
+    id: 'sess_002', name: 'March Duplicate Pass', date: '2026-03-22', operator: 'Mark Chen', role: 'Editor',
+    recordsBefore: 9874, recordsAfter: 9812, removed: 62, flagsResolved: 19, piiFlagged: 0,
+    duplicatesMerged: 19, npiFixed: 0, outliersTagged: 0, healthBefore: 68, healthAfter: 74,
+    status: 'Complete', notes: 'Targeted duplicate-only pass following March upload batch.',
+  },
+  {
+    id: 'sess_003', name: 'NPI Validation Run', date: '2026-02-08', operator: 'Jane Doe', role: 'Admin',
+    recordsBefore: 9812, recordsAfter: 9790, removed: 22, flagsResolved: 26, piiFlagged: 3,
+    duplicatesMerged: 0, npiFixed: 23, outliersTagged: 0, healthBefore: 74, healthAfter: 79,
+    status: 'Complete', notes: 'NPI registry cross-check after NPPES refresh. 4 records overridden with justification.',
+  },
+  {
+    id: 'sess_004', name: 'Q1 2026 Scrub', date: '2026-01-04', operator: 'Jane Doe', role: 'Admin',
+    recordsBefore: 11200, recordsAfter: 9812, removed: 1388, flagsResolved: 53, piiFlagged: 18,
+    duplicatesMerged: 14, npiFixed: 21, outliersTagged: 0, healthBefore: 58, healthAfter: 68,
+    status: 'Complete', notes: 'Large Q1 scrub including deduplication of merged CRM export. Significant record removal.',
+  },
+  {
+    id: 'sess_005', name: 'Outlier Review — Oncology', date: '2025-11-17', operator: 'Sarah Kim', role: 'Viewer',
+    recordsBefore: 11200, recordsAfter: 11200, removed: 0, flagsResolved: 4, piiFlagged: 0,
+    duplicatesMerged: 0, npiFixed: 0, outliersTagged: 4, healthBefore: 62, healthAfter: 62,
+    status: 'Partial', notes: 'Read-only review of oncology outliers. Tags applied but no records removed — pending admin sign-off.',
+  },
+  {
+    id: 'sess_006', name: 'Emergency PII Sweep', date: '2025-10-03', operator: 'Mark Chen', role: 'Editor',
+    recordsBefore: 10800, recordsAfter: 10800, removed: 0, flagsResolved: 7, piiFlagged: 7,
+    duplicatesMerged: 0, npiFixed: 0, outliersTagged: 0, healthBefore: 64, healthAfter: 66,
+    status: 'Aborted', notes: 'PII sweep aborted mid-session due to upstream data quality incident. Partial flags resolved.',
+  },
+]
+
+function ScrubbingSessionsScreen() {
+  const [downloading, setDownloading] = useState<string | null>(null)
+  const [dlError, setDlError] = useState<string | null>(null)
+  const [filterStatus, setFilterStatus] = useState<'All' | ScrubbingSession['status']>('All')
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  const visible = filterStatus === 'All'
+    ? SCRUBBING_SESSIONS
+    : SCRUBBING_SESSIONS.filter(s => s.status === filterStatus)
+
+  const downloadPDF = async (session: ScrubbingSession) => {
+    setDownloading(session.id)
+    setDlError(null)
+    try {
+      const res = await fetch(`http://localhost:8000/api/scrubbing-sessions/${session.id}/pdf`)
+      if (!res.ok) throw new Error(`Server returned ${res.status}`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `Scrub_Report_${session.id}_${session.date}.pdf`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 2000)
+    } catch (err) {
+      setDlError(`Could not reach the report server. Make sure the backend is running on port 8000. (${err instanceof Error ? err.message : String(err)})`)
+    } finally {
+      setDownloading(null)
+    }
+  }
+
+  const statusColor = (s: ScrubbingSession['status']) =>
+    s === 'Complete' ? 'success' : s === 'Partial' ? 'warning' : 'danger'
+
+  const deltaHealth = (s: ScrubbingSession) => s.healthAfter - s.healthBefore
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Scrubbing Sessions"
+        subtitle="Chronological log of all team data scrubbing sessions with audit reports"
+        actions={
+          <div className="flex items-center gap-2">
+            {(['All', 'Complete', 'Partial', 'Aborted'] as const).map(st => (
+              <button key={st}
+                className="text-[11px] px-3 py-1.5 rounded-[6px] border font-semibold transition-all"
+                style={{
+                  background: filterStatus === st ? C.navy : 'white',
+                  color:      filterStatus === st ? 'white' : C.midText,
+                  borderColor:filterStatus === st ? C.navy : C.border,
+                }}
+                onClick={() => setFilterStatus(st)}>
+                {st}
+              </button>
+            ))}
+          </div>
+        }
+      />
+
+      {dlError && (
+        <Banner type="error" onClose={() => setDlError(null)}>{dlError}</Banner>
+      )}
+
+      {/* Summary strip */}
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        {[
+          { label: 'Total Sessions',     value: String(SCRUBBING_SESSIONS.length) },
+          { label: 'Records Cleaned',    value: SCRUBBING_SESSIONS.reduce((s, x) => s + x.removed, 0).toLocaleString() },
+          { label: 'Flags Resolved',     value: SCRUBBING_SESSIONS.reduce((s, x) => s + x.flagsResolved, 0).toLocaleString() },
+          { label: 'Avg Health Lift',    value: `+${Math.round(SCRUBBING_SESSIONS.filter(s => s.status === 'Complete').reduce((s, x) => s + deltaHealth(x), 0) / SCRUBBING_SESSIONS.filter(s => s.status === 'Complete').length)}pts` },
+        ].map(c => (
+          <Card key={c.label}>
+            <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={{ color: C.midText }}>{c.label}</p>
+            <p className="text-[26px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>{c.value}</p>
+          </Card>
+        ))}
+      </div>
+
+      {/* Session list */}
+      <div className="flex flex-col gap-4">
+        {visible.map(session => {
+          const expanded = expandedId === session.id
+          const dh = deltaHealth(session)
+          return (
+            <Card key={session.id} className="p-0 overflow-hidden">
+              {/* Header row */}
+              <div
+                className="flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-[#F7FAFC] transition-colors"
+                onClick={() => setExpandedId(expanded ? null : session.id)}>
+                {/* Date badge */}
+                <div className="flex flex-col items-center justify-center rounded-[8px] px-3 py-2 shrink-0"
+                  style={{ background: C.lightTint, minWidth: 58 }}>
+                  <span className="text-[9px] font-bold uppercase tracking-wide" style={{ color: C.corpBlue }}>
+                    {new Date(session.date).toLocaleString('default', { month: 'short' })}
+                  </span>
+                  <span className="text-[20px] font-bold leading-none" style={{ color: C.navy }}>
+                    {String(new Date(session.date).getDate()).padStart(2, '0')}
+                  </span>
+                  <span className="text-[9px]" style={{ color: C.midText }}>
+                    {new Date(session.date).getFullYear()}
+                  </span>
+                </div>
+
+                {/* Name + meta */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <p className="text-[14px] font-bold truncate" style={{ color: C.navy }}>{session.name}</p>
+                    <Badge tier={1} color={statusColor(session.status)}>{session.status}</Badge>
+                  </div>
+                  <p className="text-[11px]" style={{ color: C.midText }}>
+                    Operator: <strong style={{ color: C.darkText }}>{session.operator}</strong>
+                    <span className="mx-2">·</span>
+                    <Badge tier={1} color="neutral">{session.role}</Badge>
+                    <span className="mx-2">·</span>
+                    <span className="mono">{session.id}</span>
+                  </p>
+                </div>
+
+                {/* Stats strip */}
+                <div className="flex items-center gap-5 shrink-0">
+                  {[
+                    { label: 'Removed',  value: session.removed,       color: session.removed > 0 ? C.danger : C.midText },
+                    { label: 'Flags',    value: session.flagsResolved,  color: C.corpBlue },
+                    { label: 'Health',   value: `${dh >= 0 ? '+' : ''}${dh}pts`, color: dh > 0 ? C.success : dh < 0 ? C.danger : C.midText },
+                  ].map(stat => (
+                    <div key={stat.label} className="text-center">
+                      <p className="text-[18px] font-bold mono leading-none" style={{ color: stat.color }}>{stat.value}</p>
+                      <p className="text-[9px] uppercase tracking-wide" style={{ color: C.midText }}>{stat.label}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* PDF download button */}
+                <button
+                  className="flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-[6px] border shrink-0 transition-all"
+                  style={{
+                    borderColor: downloading === session.id ? C.border : C.navy,
+                    color:       downloading === session.id ? C.midText : C.navy,
+                    background:  downloading === session.id ? '#F7FAFC' : C.lightTint,
+                    cursor: downloading && downloading !== session.id ? 'not-allowed' : 'pointer',
+                    opacity: downloading && downloading !== session.id ? 0.5 : 1,
+                  }}
+                  onClick={e => { e.stopPropagation(); downloadPDF(session) }}
+                  disabled={downloading !== null}>
+                  {downloading === session.id
+                    ? <>{Icon.spinner} Generating…</>
+                    : <>{Icon.download} PDF Report</>}
+                </button>
+
+                {/* Expand chevron */}
+                <span style={{ color: C.midText, transform: expanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }}>
+                  {Icon.chevronRight}
+                </span>
+              </div>
+
+              {/* Expanded detail panel */}
+              {expanded && (
+                <div style={{ borderTop: `1px solid #EDF2F7`, background: '#FAFBFC' }} className="px-5 py-4">
+                  <div className="grid grid-cols-3 gap-6 mb-4">
+                    {/* Records */}
+                    <div>
+                      <p className="text-[11px] font-bold mb-2 uppercase tracking-wide" style={{ color: C.midText }}>Record Counts</p>
+                      <div className="flex flex-col gap-1 text-[12px]">
+                        {[
+                          { label: 'Before scrub', val: session.recordsBefore.toLocaleString(), color: C.darkText },
+                          { label: 'After scrub',  val: session.recordsAfter.toLocaleString(),  color: C.darkText },
+                          { label: 'Removed',      val: session.removed.toLocaleString(),       color: session.removed > 0 ? C.danger : C.midText },
+                        ].map(r => (
+                          <div key={r.label} className="flex justify-between">
+                            <span style={{ color: C.midText }}>{r.label}</span>
+                            <span className="font-semibold mono" style={{ color: r.color }}>{r.val}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Flag breakdown */}
+                    <div>
+                      <p className="text-[11px] font-bold mb-2 uppercase tracking-wide" style={{ color: C.midText }}>Flag Breakdown</p>
+                      <div className="flex flex-col gap-1 text-[12px]">
+                        {[
+                          { label: 'PII flagged',        val: session.piiFlagged },
+                          { label: 'Duplicates merged',  val: session.duplicatesMerged },
+                          { label: 'NPI fixes',          val: session.npiFixed },
+                          { label: 'Outliers tagged',    val: session.outliersTagged },
+                        ].map(r => (
+                          <div key={r.label} className="flex justify-between">
+                            <span style={{ color: C.midText }}>{r.label}</span>
+                            <span className="font-semibold mono" style={{ color: r.val > 0 ? C.corpBlue : C.midText }}>{r.val}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Health change */}
+                    <div>
+                      <p className="text-[11px] font-bold mb-2 uppercase tracking-wide" style={{ color: C.midText }}>Health Score</p>
+                      <div className="flex items-end gap-3 mb-2">
+                        <div>
+                          <p className="text-[9px]" style={{ color: C.midText }}>Before</p>
+                          <p className="text-[22px] font-bold mono" style={{ color: session.healthBefore >= 80 ? C.success : session.healthBefore >= 65 ? C.warning : C.danger }}>{session.healthBefore}%</p>
+                        </div>
+                        <span className="text-[18px] mb-1" style={{ color: C.midText }}>→</span>
+                        <div>
+                          <p className="text-[9px]" style={{ color: C.midText }}>After</p>
+                          <p className="text-[22px] font-bold mono" style={{ color: session.healthAfter >= 80 ? C.success : session.healthAfter >= 65 ? C.warning : C.danger }}>{session.healthAfter}%</p>
+                        </div>
+                        <div className="ml-auto text-right">
+                          <p className="text-[9px]" style={{ color: C.midText }}>Lift</p>
+                          <p className="text-[22px] font-bold mono" style={{ color: dh > 0 ? C.success : C.danger }}>{dh > 0 ? '+' : ''}{dh}pts</p>
+                        </div>
+                      </div>
+                      <ProgressBar value={session.healthAfter} color={session.healthAfter >= 80 ? 'success' : 'warning'} />
+                    </div>
+                  </div>
+
+                  {session.notes && (
+                    <div className="rounded-[6px] px-3 py-2 text-[12px]" style={{ background: '#EBF4FA', color: C.darkText }}>
+                      <span className="font-semibold" style={{ color: C.corpBlue }}>Session notes: </span>
+                      {session.notes}
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function AuditLogScreen() {
   const [filterType, setFilterType] = useState('All')
   const [expandedRow, setExpandedRow] = useState<number | null>(null)
@@ -5299,7 +5594,9 @@ const SCREEN_TITLES: Record<Screen, string> = {
   'campaign-generator': 'Campaign Generator', 'compliance-review': 'Compliance Review',
   'financial-disclosures': 'Financial Disclosures',
   analytics: 'Analytics Dashboard', 'data-heatmap': 'Data Quality Heatmap',
-  export: 'Export', team: 'Team Management', 'audit-log': 'Audit Log', settings: 'Settings',
+  export: 'Export', team: 'Team Management', 'audit-log': 'Audit Log',
+  'scrubbing-sessions': 'Scrubbing Sessions',
+  settings: 'Settings',
   'org-management': 'Organization Management',
 }
 
@@ -5368,6 +5665,7 @@ export default function App() {
       case 'export': return <ExportScreen onNavigate={navigate} />
       case 'team': return <TeamScreen showToast={showToast} />
       case 'audit-log': return <AuditLogScreen />
+      case 'scrubbing-sessions': return <ScrubbingSessionsScreen />
       case 'settings': return <SettingsScreen showToast={showToast} />
       case 'org-management': return <OrgManagementScreen />
       default: return <DashboardScreen onNavigate={navigate} />
