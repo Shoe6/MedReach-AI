@@ -1,0 +1,16 @@
+provider_id,first_name,last_name,specialty,npi,npi_status,billing_volume,prescription_volume,sunshine_act_transaction_total,payer_name,nature_of_payment
+normal-01,Ava,Bennett,Cardiology,1000000001,Active,115,190,28.0,Standard Health Partners,Food and Beverage
+normal-02,Noah,Carter,Internal Medicine,1000000002,Active,120,200,31.0,Standard Health Partners,Food and Beverage
+normal-03,Mia,Davis,Pediatrics,1000000003,Active,125,210,34.0,Standard Health Partners,Food and Beverage
+normal-04,Liam,Evans,Neurology,1000000004,Active,130,220,37.0,Standard Health Partners,Food and Beverage
+normal-05,Emma,Flores,Oncology,1000000005,Active,135,230,40.0,Standard Health Partners,Food and Beverage
+normal-06,Ethan,Garcia,Family Medicine,1000000006,Active,140,240,43.0,Standard Health Partners,Food and Beverage
+normal-07,Olivia,Hughes,Dermatology,1000000007,Active,145,250,46.0,Standard Health Partners,Food and Beverage
+normal-08,Lucas,Irving,Orthopedics,1000000008,Active,150,260,49.0,Standard Health Partners,Food and Beverage
+normal-09,Sophia,Johnson,Endocrinology,1000000009,Active,155,270,52.0,Standard Health Partners,Food and Beverage
+normal-10,Mason,King,Pulmonology,1000000010,Active,160,280,55.0,Standard Health Partners,Food and Beverage
+normal-11,Isabella,Lopez,Gastroenterology,1000000011,Active,165,290,58.0,Standard Health Partners,Food and Beverage
+persona-a-statistical-anomaly,Aria,Outlier,Cardiology,1000000001,Active,115,10000,28.0,Standard Health Partners,Food and Beverage
+persona-b-npi-failure,Blake,Deactivated,Internal Medicine,DEACTIVATED-NPI,Deactivated,120,200,31.0,Standard Health Partners,Food and Beverage
+persona-c-financial-conflict,Casey,Conflict,Pediatrics,1000000003,Active,125,210,250.0,Acme Pharmaceutical,Consulting Fee
+normal-04,Liam,Evans,Neurology,1000000004,Active,130,220,37.0,Standard Health Partners,Food and Beverage
