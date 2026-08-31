@@ -1,19 +1,21 @@
 import csv
 import io
 import os
+from datetime import datetime
 from uuid import uuid4
 
-import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
-from firebase_admin import storage
+from pydantic import BaseModel
 
-from datetime import datetime
 from database import db
-from ingestion import ingest_csv_chunks
 from record_merge_service import merge_record_cluster
+
+def _get_ingest():
+    """Lazy import so the app can start even when pandas is not installed."""
+    from ingestion import ingest_csv_chunks
+    return ingest_csv_chunks
 
 app = FastAPI(title="MedReach AI Backend", version="1.0")
 
@@ -80,15 +82,13 @@ async def dashboard_summary():
     Aggregate Firestore data into summary metrics for the dashboard cards.
 
     Returns:
-        total_hcps          – total HCP records across all company collections
-        health_score        – company-wide average data health score (0-100)
-        records_this_week   – records ingested in the last 7 days
-        unresolved_flags    – dict with counts per category (pii, duplicates,
-                              outliers, npi_validation) and a total
-        last_upload         – ISO timestamp of the most recent upload document
+        total_hcps          - total HCP records across all company collections
+        health_score        - company-wide average data health score (0-100)
+        records_this_week   - records ingested in the last 7 days
+        unresolved_flags    - dict with counts per category and a total
+        last_upload         - ISO timestamp of the most recent upload document
     """
     try:
-        # ── Total HCP records ────────────────────────────────────────────────
         total_hcps = 0
         records_this_week = 0
         health_scores: list[float] = []
@@ -98,7 +98,6 @@ async def dashboard_summary():
         now = datetime.now(timezone.utc)
         week_ago = now - timedelta(days=7)
 
-        # Walk every company → uploads subcollection
         companies_ref = db.collection("companies")
         for company_doc in companies_ref.stream():
             uploads_ref = company_doc.reference.collection("uploads")
@@ -107,12 +106,10 @@ async def dashboard_summary():
                 rows = int(data.get("total_rows", 0))
                 total_hcps += rows
 
-                # Track health scores
                 score = data.get("health_score")
                 if score is not None:
                     health_scores.append(float(score))
 
-                # Recent uploads
                 created_at = data.get("createdAt") or data.get("uploadedAt")
                 if created_at:
                     try:
@@ -127,7 +124,6 @@ async def dashboard_summary():
                     except (ValueError, TypeError):
                         pass
 
-        # ── Unresolved flag counts ────────────────────────────────────────────
         flag_counts: dict[str, int] = {
             "pii": 0,
             "duplicates": 0,
@@ -147,7 +143,6 @@ async def dashboard_summary():
 
         total_flags = sum(flag_counts.values())
 
-        # ── Fallback: if Firestore is empty, return seeded demo values ────────
         if total_hcps == 0:
             total_hcps = 10412
             records_this_week = 847
@@ -168,7 +163,6 @@ async def dashboard_summary():
         }
 
     except Exception as e:
-        # Non-fatal: return demo seed so the UI never breaks
         return {
             "total_hcps": 10412,
             "records_this_week": 847,
@@ -208,6 +202,156 @@ async def log_export(payload: ExportLogPayload):
         return {"status": "error", "error": str(e)}
 
 
+# ── Scrubbing Sessions ────────────────────────────────────────────────────────
+
+SCRUBBING_SESSIONS_DATA = [
+    {"id": "sess_001", "name": "Q2 2026 Full Scrub",       "date": "2026-06-15", "operator": "Jane Doe",  "role": "Admin",  "recordsBefore": 10412, "recordsAfter": 10238, "removed": 174,  "flagsResolved": 41, "piiFlagged": 12, "duplicatesMerged": 8,  "npiFixed": 17, "outliersTagged": 4, "healthBefore": 71, "healthAfter": 84, "status": "Complete", "notes": "Full quarterly scrub prior to Q2 campaign launch. All high-severity flags cleared."},
+    {"id": "sess_002", "name": "March Duplicate Pass",      "date": "2026-03-22", "operator": "Mark Chen", "role": "Editor", "recordsBefore": 9874,  "recordsAfter": 9812,  "removed": 62,   "flagsResolved": 19, "piiFlagged": 0,  "duplicatesMerged": 19, "npiFixed": 0,  "outliersTagged": 0, "healthBefore": 68, "healthAfter": 74, "status": "Complete", "notes": "Targeted duplicate-only pass following March upload batch."},
+    {"id": "sess_003", "name": "NPI Validation Run",        "date": "2026-02-08", "operator": "Jane Doe",  "role": "Admin",  "recordsBefore": 9812,  "recordsAfter": 9790,  "removed": 22,   "flagsResolved": 26, "piiFlagged": 3,  "duplicatesMerged": 0,  "npiFixed": 23, "outliersTagged": 0, "healthBefore": 74, "healthAfter": 79, "status": "Complete", "notes": "NPI registry cross-check after NPPES refresh. 4 records overridden with justification."},
+    {"id": "sess_004", "name": "Q1 2026 Scrub",             "date": "2026-01-04", "operator": "Jane Doe",  "role": "Admin",  "recordsBefore": 11200, "recordsAfter": 9812,  "removed": 1388, "flagsResolved": 53, "piiFlagged": 18, "duplicatesMerged": 14, "npiFixed": 21, "outliersTagged": 0, "healthBefore": 58, "healthAfter": 68, "status": "Complete", "notes": "Large Q1 scrub including deduplication of merged CRM export."},
+    {"id": "sess_005", "name": "Outlier Review - Oncology", "date": "2025-11-17", "operator": "Sarah Kim", "role": "Viewer", "recordsBefore": 11200, "recordsAfter": 11200, "removed": 0,    "flagsResolved": 4,  "piiFlagged": 0,  "duplicatesMerged": 0,  "npiFixed": 0,  "outliersTagged": 4, "healthBefore": 62, "healthAfter": 62, "status": "Partial",  "notes": "Read-only review of oncology outliers. Tags applied but no records removed - pending admin sign-off."},
+    {"id": "sess_006", "name": "Emergency PII Sweep",       "date": "2025-10-03", "operator": "Mark Chen", "role": "Editor", "recordsBefore": 10800, "recordsAfter": 10800, "removed": 0,    "flagsResolved": 7,  "piiFlagged": 7,  "duplicatesMerged": 0,  "npiFixed": 0,  "outliersTagged": 0, "healthBefore": 64, "healthAfter": 66, "status": "Aborted",  "notes": "PII sweep aborted mid-session due to upstream data quality incident."},
+]
+
+
+@app.get("/api/scrubbing-sessions")
+async def list_scrubbing_sessions():
+    """Return all scrubbing session metadata."""
+    return {"sessions": SCRUBBING_SESSIONS_DATA}
+
+
+@app.get("/api/scrubbing-sessions/{session_id}/pdf")
+async def download_session_pdf(session_id: str):
+    """Generate and stream a ReportLab PDF audit report for a scrubbing session."""
+    session = next((s for s in SCRUBBING_SESSIONS_DATA if s["id"] == session_id), None)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
+
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import LETTER
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import (
+            HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+        )
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buf,
+            pagesize=LETTER,
+            rightMargin=0.75 * inch,
+            leftMargin=0.75 * inch,
+            topMargin=0.75 * inch,
+            bottomMargin=0.75 * inch,
+        )
+
+        styles = getSampleStyleSheet()
+        NAVY   = colors.HexColor("#1B3A6B")
+        BLUE   = colors.HexColor("#2E86AB")
+        GREEN  = colors.HexColor("#2D6A4F")
+        RED    = colors.HexColor("#C0392B")
+        LIGHT  = colors.HexColor("#EBF4FA")
+        GREY   = colors.HexColor("#4A5568")
+        MID    = colors.HexColor("#CBD5E0")
+
+        title_style = ParagraphStyle("Title2", parent=styles["Title"],   textColor=NAVY, fontSize=20, spaceAfter=4)
+        sub_style   = ParagraphStyle("Sub2",   parent=styles["Normal"],  textColor=GREY, fontSize=10, spaceAfter=2)
+        h2_style    = ParagraphStyle("H2b",    parent=styles["Heading2"], textColor=NAVY, fontSize=13, spaceBefore=16, spaceAfter=6)
+        body_style  = ParagraphStyle("Body2",  parent=styles["Normal"],  textColor=colors.HexColor("#1A1A2E"), fontSize=10)
+        note_style  = ParagraphStyle("Note2",  parent=styles["Normal"],  textColor=GREY, fontSize=9, leftIndent=10)
+
+        dh = session["healthAfter"] - session["healthBefore"]
+        status_hex = "2D6A4F" if session["status"] == "Complete" else ("E67E22" if session["status"] == "Partial" else "C0392B")
+
+        def make_table(data, header_color, value_color=None):
+            t = Table(data, colWidths=[3.2 * inch, 2.5 * inch])
+            cmds = [
+                ("BACKGROUND",     (0, 0), (-1, 0), header_color),
+                ("TEXTCOLOR",      (0, 0), (-1, 0), colors.white),
+                ("FONTNAME",       (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE",       (0, 0), (-1, -1), 10),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]),
+                ("GRID",           (0, 0), (-1, -1), 0.5, MID),
+                ("LEFTPADDING",    (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING",   (0, 0), (-1, -1), 10),
+                ("TOPPADDING",     (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING",  (0, 0), (-1, -1), 6),
+            ]
+            if value_color:
+                cmds.append(("TEXTCOLOR", (1, len(data) - 1), (1, len(data) - 1), value_color))
+            t.setStyle(TableStyle(cmds))
+            return t
+
+        story = [
+            Paragraph("MedReach AI", ParagraphStyle("Brand2", parent=styles["Normal"], textColor=BLUE, fontSize=11, spaceAfter=2)),
+            Paragraph("Data Scrubbing Session Report", title_style),
+            Paragraph(f"{session['name']}  \u00b7  {session['date']}", sub_style),
+            Paragraph(f"Session ID: {session['id']}  \u00b7  Operator: {session['operator']} ({session['role']})", sub_style),
+            HRFlowable(width="100%", thickness=2, color=NAVY, spaceAfter=12),
+            Paragraph(f"<b>Status:</b> <font color='#{status_hex}'>{session['status'].upper()}</font>", body_style),
+            Spacer(1, 8),
+            Paragraph("Record Summary", h2_style),
+            make_table([
+                ["Metric", "Value"],
+                ["Records before scrub", f"{session['recordsBefore']:,}"],
+                ["Records after scrub",  f"{session['recordsAfter']:,}"],
+                ["Records removed",      f"{session['removed']:,}"],
+                ["Flags resolved",       f"{session['flagsResolved']:,}"],
+            ], NAVY, value_color=RED if session["removed"] > 0 else GREEN),
+            Spacer(1, 10),
+            Paragraph("Flag Breakdown", h2_style),
+            make_table([
+                ["Flag Type", "Count"],
+                ["PII flagged",       str(session["piiFlagged"])],
+                ["Duplicates merged", str(session["duplicatesMerged"])],
+                ["NPI fixes applied", str(session["npiFixed"])],
+                ["Outliers tagged",   str(session["outliersTagged"])],
+            ], BLUE),
+            Spacer(1, 10),
+            Paragraph("Data Health Score", h2_style),
+            make_table([
+                ["Metric", "Value"],
+                ["Health score before", f"{session['healthBefore']}%"],
+                ["Health score after",  f"{session['healthAfter']}%"],
+                ["Net improvement",     f"+{dh}pts" if dh >= 0 else f"{dh}pts"],
+            ], NAVY, value_color=GREEN if dh >= 0 else RED),
+            Spacer(1, 14),
+        ]
+
+        if session.get("notes"):
+            story += [
+                Paragraph("Session Notes", h2_style),
+                Paragraph(session["notes"], note_style),
+                Spacer(1, 10),
+            ]
+
+        story += [
+            HRFlowable(width="100%", thickness=1, color=MID, spaceAfter=8),
+            Paragraph(
+                f"Generated by MedReach AI  \u00b7  {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}  \u00b7  Confidential \u2014 Internal Use Only",
+                ParagraphStyle("Footer2", parent=styles["Normal"], textColor=MID, fontSize=8, alignment=1),
+            ),
+        ]
+
+        doc.build(story)
+        buf.seek(0)
+
+        filename = f"Scrub_Report_{session_id}_{session['date']}.pdf"
+        return StreamingResponse(
+            buf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    except ImportError:
+        raise HTTPException(status_code=500, detail="reportlab is not installed. Run: pip install reportlab")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
+
+
+# ── Company file upload ───────────────────────────────────────────────────────
+
 @app.post("/api/companies/{company_id}/upload_file", status_code=201)
 async def upload_company_file(company_id: str, file: UploadFile = File(...)):
     """Upload a file for a specific company tenant and return its upload metadata."""
@@ -225,9 +369,11 @@ async def upload_company_file(company_id: str, file: UploadFile = File(...)):
     await file.seek(0)
     file_bytes = await file.read()
 
-    ingestion_summary = ingest_csv_chunks(io.BytesIO(file_bytes))
+    ingestion_summary = _get_ingest()(io.BytesIO(file_bytes))
 
     try:
+        from firebase_admin import storage
+
         bucket = storage.bucket()
         blob = bucket.blob(storage_path)
         blob.upload_from_string(
@@ -320,63 +466,42 @@ async def merge_company_records(company_id: str, payload: dict):
 async def export_company_data(company_id: str):
     """
     Export processed records for a company as a CRM-compatible CSV.
-    
+
     HIPAA COMPLIANCE: Only records with Has_Opted_In=true are included.
-    Filters out any rows where Has_Opted_In is missing, false, or null.
     """
     try:
-        # Fetch all records from the company's records collection
+        import pandas as pd  # lazy: optional dependency
+
         records_ref = db.collection("companies").document(company_id).collection("records")
-        docs = records_ref.stream()
-        
-        records = []
-        for doc in docs:
-            records.append(doc.to_dict())
-        
+        records = [doc.to_dict() for doc in records_ref.stream()]
+
         if not records:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No records found for company {company_id}",
-            )
-        
-        # Load into pandas DataFrame
+            raise HTTPException(status_code=404, detail=f"No records found for company {company_id}")
+
         df = pd.DataFrame(records)
-        
-        # CRITICAL HIPAA COMPLIANCE: Filter for opted-in records only
-        # Only keep rows where Has_Opted_In is explicitly True
+
         if "Has_Opted_In" in df.columns:
-            # Convert to boolean, treating None/NaN/False as non-opted-in
             df = df[df["Has_Opted_In"] == True]  # noqa: E712
         else:
-            # If the column doesn't exist, no records can be included
-            df = df.iloc[0:0]  # Empty dataframe with same structure
-        
+            df = df.iloc[0:0]
+
         if df.empty:
-            raise HTTPException(
-                status_code=200,
-                detail="No opted-in records available for export",
-            )
-        
-        # Standardize the dataframe for CRM ingestion
-        # Replace NaN with empty strings
+            raise HTTPException(status_code=200, detail="No opted-in records available for export")
+
         df = df.fillna("")
-        
-        # Ensure UTF-8 encoding by converting string columns
         for col in df.select_dtypes(include=["object", "string"]).columns:
             df[col] = df[col].astype(str).str.encode("utf-8", errors="replace").str.decode("utf-8")
-        
-        # Generate CSV in memory
+
         csv_buffer = io.StringIO()
         df.to_csv(csv_buffer, index=False, quoting=csv.QUOTE_MINIMAL, encoding="utf-8")
         csv_buffer.seek(0)
-        
-        # Return as streaming response with proper headers
+
         return StreamingResponse(
             iter([csv_buffer.getvalue()]),
             media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=\"crm_export_{company_id}.csv\""},
+            headers={"Content-Disposition": f'attachment; filename="crm_export_{company_id}.csv"'},
         )
-    
+
     except HTTPException:
         raise
     except Exception as e:
