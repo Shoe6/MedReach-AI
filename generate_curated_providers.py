@@ -49,6 +49,7 @@ def build_curated_providers() -> pd.DataFrame:
         "provider_id": "persona-a-statistical-anomaly",
         "first_name": "Aria",
         "last_name": "Outlier",
+        "npi": "1000000098",
         "prescription_volume": 10_000,
     }
     npi_failure_persona = {
@@ -64,6 +65,7 @@ def build_curated_providers() -> pd.DataFrame:
         "provider_id": "persona-c-financial-conflict",
         "first_name": "Casey",
         "last_name": "Conflict",
+        "npi": "1000000099",
         "sunshine_act_transaction_total": 250.00,
         "payer_name": "Acme Pharmaceutical",
         "nature_of_payment": "Consulting Fee",
