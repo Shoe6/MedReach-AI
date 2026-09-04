@@ -438,7 +438,7 @@ async def get_company_dashboard_metrics(company_id: str):
 
 
 @app.post("/api/companies/{company_id}/records/merge")
-async def merge_company_records(company_id: str, payload: MergeRecordsPayload):
+async def merge_company_records(company_id: str, request: MergeRecordsPayload):
     """Merge a duplicate cluster into a master record and archive the rest.
 
     Request body should look like:
@@ -447,21 +447,40 @@ async def merge_company_records(company_id: str, payload: MergeRecordsPayload):
       "master_record_id": "record-123"
     }
     """
+    print(f"Received {len(request.records)} records to merge")
     try:
-        if not payload.records:
+        if not request.records:
             raise HTTPException(status_code=400, detail="'records' must be a non-empty list.")
 
         merged = merge_record_cluster(
-            payload.records,
-            master_record_id=payload.master_record_id,
+            request.records,
+            master_record_id=request.master_record_id,
         )
         master = merged["master_record"]
+        master_record_id = str(master.get("record_id") or request.master_record_id or uuid4())
+        master["record_id"] = master_record_id
+
+        try:
+            records_ref = db.collection("companies").document(company_id).collection("records")
+            write_batch = db.batch()
+            for record in request.records:
+                record_data = dict(record)
+                record_id = str(record_data.get("record_id") or uuid4())
+                record_data["record_id"] = record_id
+                record_data["is_anomaly"] = float(record_data.get("prescription_volume") or 0) > 1000
+                write_batch.set(records_ref.document(record_id), record_data)
+            write_batch.set(records_ref.document(master_record_id), master)
+            commit_results = write_batch.commit()
+            print(f"Committed {len(commit_results)} Firestore writes for company {company_id}")
+        except Exception as exc:
+            print(exc)
+            raise
 
         return {
             "company_id": company_id,
             "merged_record": master,
             "archived_records": merged["archived_records"],
-            "master_record_id": str(master.get("record_id") or payload.master_record_id or ""),
+            "master_record_id": master_record_id,
         }
     except HTTPException:
         raise
@@ -475,42 +494,16 @@ async def merge_company_records(company_id: str, payload: MergeRecordsPayload):
 @app.get("/api/companies/{company_id}/export_data")
 async def export_company_data(company_id: str):
     """
-    Export processed records for a company as a CRM-compatible CSV.
+    Return processed records for a company.
 
-    HIPAA COMPLIANCE: Only records with Has_Opted_In=true are included.
+    Return every processed record stored for the company.
     """
     try:
-        import pandas as pd  # lazy: optional dependency
+        docs = db.collection(f"companies/{company_id}/records").stream()
+        records_list = [doc.to_dict() or {} for doc in docs]
+        print(f"Export query found {len(records_list)} records")
 
-        records_ref = db.collection("companies").document(company_id).collection("records")
-        records = [doc.to_dict() for doc in records_ref.stream()]
-
-        if not records:
-            raise HTTPException(status_code=404, detail=f"No records found for company {company_id}")
-
-        df = pd.DataFrame(records)
-
-        if "Has_Opted_In" in df.columns:
-            df = df[df["Has_Opted_In"] == True]  # noqa: E712
-        else:
-            df = df.iloc[0:0]
-
-        if df.empty:
-            raise HTTPException(status_code=200, detail="No opted-in records available for export")
-
-        df = df.fillna("")
-        for col in df.select_dtypes(include=["object", "string"]).columns:
-            df[col] = df[col].astype(str).str.encode("utf-8", errors="replace").str.decode("utf-8")
-
-        csv_buffer = io.StringIO()
-        df.to_csv(csv_buffer, index=False, quoting=csv.QUOTE_MINIMAL, encoding="utf-8")
-        csv_buffer.seek(0)
-
-        return StreamingResponse(
-            iter([csv_buffer.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="crm_export_{company_id}.csv"'},
-        )
+        return {"records": records_list}
 
     except HTTPException:
         raise

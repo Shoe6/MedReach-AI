@@ -996,11 +996,46 @@ interface ParseError {
   detail: string
 }
 
+interface ExportResponse {
+  records: Record<string, unknown>[]
+}
+
 const MOCK_PARSE_ERRORS: ParseError[] = [
   { row: 47,  col: 'email_addr', detail: 'Unclosed quote in field value' },
   { row: 112, col: 'provider_id', detail: 'Non-numeric characters in NPI field' },
   { row: 203, col: 'phone_num',   detail: 'Field contains 15 characters — exceeds 14-char phone max' },
 ]
+
+function parseCsvRecords(
+  csvText: string,
+  options: { header: true; skipEmptyLines: true },
+): Record<string, string>[] {
+  const rows: string[][] = []
+  let row: string[] = []
+  let cell = ''
+  let quoted = false
+
+  for (let index = 0; index < csvText.length; index += 1) {
+    const character = csvText[index]
+    if (character === '"') {
+      if (quoted && csvText[index + 1] === '"') { cell += '"'; index += 1 }
+      else quoted = !quoted
+    } else if (character === ',' && !quoted) {
+      row.push(cell); cell = ''
+    } else if ((character === '\n' || character === '\r') && !quoted) {
+      if (character === '\r' && csvText[index + 1] === '\n') index += 1
+      row.push(cell); cell = ''
+      if (options.skipEmptyLines && row.some(value => value.trim())) rows.push(row)
+      row = []
+    } else {
+      cell += character
+    }
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row) }
+
+  const headers = options.header ? (rows.shift() || []).map(header => header.trim()) : []
+  return rows.map(values => Object.fromEntries(headers.map((header, index) => [header, values[index]?.trim() || ''])))
+}
 
 function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const { setMeta } = useUploadMeta()
@@ -1010,9 +1045,48 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const [chunksDone,  setChunksDone]  = useState(0)
   const [chunksTotal, setChunksTotal] = useState(0)
   const [retryCount,  setRetryCount]  = useState(0)
+  const [uploadError, setUploadError] = useState('')
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const totalPct = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0
+
+  const uploadRealFile = async (file: File) => {
+    setFileName(file.name)
+    setFileSize(file.size / (1024 * 1024))
+    setUploadError('')
+    setUploadState('uploading')
+
+    try {
+      const recordsToUpload = parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
+      setChunksDone(1)
+      setChunksTotal(1)
+      setUploadState('processing')
+
+      const formData = new FormData()
+      formData.append('file', file, file.name)
+      const uploadResponse = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/upload_file', {
+        method: 'POST',
+        body: formData,
+      })
+      if (!uploadResponse.ok) throw new Error(await uploadResponse.text())
+
+      console.log("Parsed Payload:", recordsToUpload);
+      const mergeResponse = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/records/merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: recordsToUpload }),
+      })
+      if (!mergeResponse.ok) throw new Error(await mergeResponse.text())
+      await new Promise(resolve => setTimeout(resolve, 500))
+
+      setMeta({ fileName: file.name, fileSize: file.size, rowCount: recordsToUpload.length, fileType: 'CSV', uploadedAt: new Date().toLocaleString() })
+      setUploadState('done')
+      onNavigate('data-review')
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'Upload failed')
+      setUploadState('error-network')
+    }
+  }
 
   // ── core upload simulator ──────────────────────────────────────────────────
   const runUpload = (name: string, sizeMB: number, rowCount = 10412, fileType = 'CSV') => {
@@ -1095,7 +1169,8 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     if (sizeMB > MAX_FILE_MB) {
       setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); e.currentTarget.value = ''; return
     }
-    runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
+    if (ext === 'CSV') uploadRealFile(file)
+    else runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
     e.currentTarget.value = ''
   }
 
@@ -1149,7 +1224,8 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     if (sizeMB > MAX_FILE_MB) {
       setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); return
     }
-    runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
+    if (ext === 'CSV') uploadRealFile(file)
+    else runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
   }
 
   // ── demo: trigger network error manually ──────────────────────────────────
@@ -1429,7 +1505,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
                 <span className="mono font-semibold">{fileName}</span>
               </p>
               <p className="text-[12px] mb-2" style={{ color: C.midText }}>
-                Connection was lost at chunk {chunksDone} of {chunksTotal} ({totalPct}% complete). Your progress has been saved. Click Retry to resume from where the upload stopped.
+                {uploadError || `Connection was lost at chunk ${chunksDone} of ${chunksTotal} (${totalPct}% complete). Your progress has been saved. Click Retry to resume from where the upload stopped.`}
               </p>
               {/* Partial progress bar */}
               <div className="progress-track mb-4 mx-8" style={{ height: 8 }}>
@@ -1908,15 +1984,6 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
 
 // ── Data Review data ─────────────────────────────────────────────────────────
 
-const PII_FLAGS = [
-  { id: 0, record: 'James Morrison #4821',  field: 'SSN',           type: 'Social Security Number', severity: 'High',   nullPct: 2  },
-  { id: 1, record: 'Sarah Chen #2204',      field: 'DOB',           type: 'Date of Birth',           severity: 'Medium', nullPct: 8  },
-  { id: 2, record: 'Robert Patel #8812',    field: 'Personal Email',type: 'Personal Identifier',     severity: 'Low',    nullPct: 14 },
-  { id: 3, record: 'Linda Torres #3391',    field: 'Home Address',  type: 'Physical Address',        severity: 'High',   nullPct: 5  },
-  { id: 4, record: 'Michael Brennan #7741', field: 'SSN',           type: 'Social Security Number',  severity: 'High',   nullPct: 2  },
-  { id: 5, record: 'Yuki Tanaka #0293',     field: 'Credit Card',   type: 'Financial Identifier',    severity: 'High',   nullPct: 0  },
-]
-
 interface DupRecord {
   npi: string; firstName: string; lastName: string; spec: string
   state: string; email: string; phone: string; address: string; source: string
@@ -2013,8 +2080,18 @@ function NullPctBadge({ pct }: { pct: number }) {
 }
 
 // ── Null completeness summary bar ─────────────────────────────────────────────
-function NullSummaryBar({ tab }: { tab: string }) {
-  const fields = NULL_SUMMARIES[tab]
+function NullSummaryBar({ tab, records = [] }: { tab: string; records?: Record<string, unknown>[] }) {
+  const totalRecords = records.length || 1
+  const emailNullCount = records.filter(record => !record.email).length
+  const phoneNullCount = records.filter(record => !record.phone).length
+  const emailNullPercent = Math.round((emailNullCount / totalRecords) * 100)
+  const phoneNullPercent = Math.round((phoneNullCount / totalRecords) * 100)
+  const fields = tab === 'pii'
+    ? [
+        { field: 'Email', nullPct: emailNullPercent },
+        { field: 'Phone', nullPct: phoneNullPercent },
+      ]
+    : NULL_SUMMARIES[tab]
   if (!fields) return null
   return (
     <div className="flex flex-wrap gap-4 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
@@ -2039,6 +2116,7 @@ function NullSummaryBar({ tab }: { tab: string }) {
 
 function DataReviewScreen() {
   const [processedRecords, setProcessedRecords] = useState<Record<string, unknown>[]>([])
+  const [selectedRecord, setSelectedRecord] = useState<Record<string, unknown> | null>(null)
   const [recordsLoading, setRecordsLoading] = useState(true)
   const [recordsError, setRecordsError] = useState<string | null>(null)
   const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
@@ -2070,17 +2148,10 @@ function DataReviewScreen() {
         if (!response.ok) throw new Error(`Export request failed (${response.status})`)
         const contentType = response.headers.get('content-type') || ''
         if (contentType.includes('json')) {
-          const data: unknown = await response.json()
-          const recordArray = Array.isArray(data)
-            ? data
-            : data && typeof data === 'object' && Array.isArray((data as { records?: unknown }).records)
-              ? (data as { records: unknown[] }).records
-              : null
-
-          if (!recordArray) throw new Error('Export response did not contain a records array')
-          setProcessedRecords(recordArray.filter((record): record is Record<string, unknown> => (
-            record !== null && typeof record === 'object' && !Array.isArray(record)
-          )))
+          const data = await response.json() as ExportResponse
+          console.log("Backend Export Response:", data);
+          if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
+          setProcessedRecords(data.records)
         } else {
           const payload = await response.text()
           const [headerLine, ...lines] = payload.trim().split(/\r?\n/)
@@ -2127,8 +2198,20 @@ function DataReviewScreen() {
 
   const severityRank = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
 
+  const piiFlags = processedRecords.flatMap((record, index) => {
+    const flags: { id: number; record: string; field: string; type: string; severity: string; nullPct: number; originalRecord: Record<string, unknown> }[] = []
+    const recordName = `${String(record.first_name || '')} ${String(record.last_name || '')}`.trim() || String(record.provider_id || record.npi || `Record ${index + 1}`)
+    if (!String(record.email || record.email_address || '').trim()) {
+      flags.push({ id: index * 2, record: recordName, field: 'Email', type: 'Personal Identifier', severity: 'High', nullPct: 100, originalRecord: record })
+    }
+    if (!String(record.phone || record.phone_number || '').trim()) {
+      flags.push({ id: index * 2 + 1, record: recordName, field: 'Phone', type: 'Personal Identifier', severity: 'High', nullPct: 100, originalRecord: record })
+    }
+    return flags
+  })
+
   // ── sorted data ──────────────────────────────────────────────────────────
-  const sortedPII = [...PII_FLAGS].sort((a, b) => {
+  const sortedPII = [...piiFlags].sort((a, b) => {
     if (!piiSort.key) return 0
     const dir = piiSort.dir === 'asc' ? 1 : -1
     if (piiSort.key === 'severity') return (severityRank(a.severity) - severityRank(b.severity)) * dir
@@ -2234,7 +2317,7 @@ function DataReviewScreen() {
         }
       />
 
-      <RecordDetailDashboard records={processedRecords} />
+      <RecordDetailDashboard records={processedRecords} selectedRecord={selectedRecord} onSelectRecord={setSelectedRecord} />
 
       {/* ── Data Health Score bar ── */}
       {(() => {
@@ -2366,7 +2449,7 @@ function DataReviewScreen() {
       {/* ── PII / PHI FLAGS TAB ──────────────────────────────────────────────── */}
       {tab === 'pii' && (
         <Card>
-          <NullSummaryBar tab="pii" />
+          <NullSummaryBar tab="pii" records={processedRecords} />
 
           {selected.size > 0 && (
             <div className="flex items-center gap-3 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
@@ -2425,7 +2508,7 @@ function DataReviewScreen() {
                           setSelected(s)
                         }} />
                     </td>
-                    <td className="font-medium">{f.record}</td>
+                    <td className="font-medium"><span onClick={(event) => { event.stopPropagation(); setSelectedRecord(f.originalRecord || f); console.log("Bottom table name clicked! Selected:", f.originalRecord || f) }} style={{ cursor: 'pointer', color: '#0066cc', textDecoration: 'underline', fontWeight: 'bold' }}>{f.record}</span></td>
                     <td className="mono">{f.field}</td>
                     <td>{f.type}</td>
                     <td>
