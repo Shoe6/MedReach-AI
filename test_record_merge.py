@@ -71,3 +71,25 @@ def test_merge_records_endpoint_returns_master_and_archived_records():
     assert data["company_id"] == "test-merge-company"
     assert data["merged_record"]["record_id"] == "r1"
     assert len(data["archived_records"]) == 1
+
+
+def test_merge_records_endpoint_requires_records_field():
+    response = client.post("/api/companies/test-merge-company/records/merge", json={})
+
+    assert response.status_code == 422
+
+
+def test_merge_records_endpoint_logs_and_returns_execution_error(monkeypatch, caplog):
+    def raise_database_error(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr("main.merge_record_cluster", raise_database_error)
+
+    response = client.post(
+        "/api/companies/test-merge-company/records/merge",
+        json={"records": [{"record_id": "r1"}]},
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "database unavailable"
+    assert "Failed to merge company records" in caplog.text

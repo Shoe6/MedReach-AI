@@ -1,7 +1,9 @@
 import csv
 import io
+import logging
 import os
 from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -181,6 +183,11 @@ class ExportLogPayload(BaseModel):
     role: str
     records: int
     timestamp: str
+
+
+class MergeRecordsPayload(BaseModel):
+    records: list[dict[str, Any]]
+    master_record_id: str | None = None
 
 
 @app.post("/api/export/log")
@@ -431,7 +438,7 @@ async def get_company_dashboard_metrics(company_id: str):
 
 
 @app.post("/api/companies/{company_id}/records/merge")
-async def merge_company_records(company_id: str, payload: dict):
+async def merge_company_records(company_id: str, payload: MergeRecordsPayload):
     """Merge a duplicate cluster into a master record and archive the rest.
 
     Request body should look like:
@@ -441,25 +448,28 @@ async def merge_company_records(company_id: str, payload: dict):
     }
     """
     try:
-        records = payload.get("records")
-        master_record_id = payload.get("master_record_id")
-
-        if not isinstance(records, list) or not records:
+        if not payload.records:
             raise HTTPException(status_code=400, detail="'records' must be a non-empty list.")
 
-        merged = merge_record_cluster(records, master_record_id=master_record_id)
+        merged = merge_record_cluster(
+            payload.records,
+            master_record_id=payload.master_record_id,
+        )
         master = merged["master_record"]
 
         return {
             "company_id": company_id,
             "merged_record": master,
             "archived_records": merged["archived_records"],
-            "master_record_id": str(master.get("record_id") or master_record_id or ""),
+            "master_record_id": str(master.get("record_id") or payload.master_record_id or ""),
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Unable to merge company records: {exc}") from exc
+        logging.exception("Failed to merge company records for company %s", company_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/companies/{company_id}/export_data")
