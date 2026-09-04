@@ -2038,6 +2038,9 @@ function NullSummaryBar({ tab }: { tab: string }) {
 }
 
 function DataReviewScreen() {
+  const [processedRecords, setProcessedRecords] = useState<Record<string, unknown>[]>([])
+  const [recordsLoading, setRecordsLoading] = useState(true)
+  const [recordsError, setRecordsError] = useState<string | null>(null)
   const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
@@ -2059,6 +2062,34 @@ function DataReviewScreen() {
   const [resolvedDup, setResolvedDup] = useState<Map<string, 'merged' | 'distinct' | 'removed'>>(new Map())
   const [masterSel,   setMasterSel]   = useState<Map<string, 1 | 2>>(new Map())
   const [mergingDup,  setMergingDup]  = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    const loadProcessedRecords = async () => {
+      try {
+        const response = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/export_data')
+        if (!response.ok) throw new Error(`Export request failed (${response.status})`)
+        const contentType = response.headers.get('content-type') || ''
+        const payload = contentType.includes('json') ? await response.json() : await response.text()
+        if (Array.isArray(payload)) {
+          setProcessedRecords(payload)
+        } else if (typeof payload === 'string') {
+          const [headerLine, ...lines] = payload.trim().split(/\r?\n/)
+          const headers = headerLine ? headerLine.split(',') : []
+          setProcessedRecords(lines.filter(Boolean).map(line => {
+            const values = line.split(',')
+            return Object.fromEntries(headers.map((header, index) => [header, values[index] || '']))
+          }))
+        } else if (Array.isArray(payload?.records)) {
+          setProcessedRecords(payload.records)
+        }
+      } catch (error) {
+        setRecordsError(error instanceof Error ? error.message : 'Unable to load processed records')
+      } finally {
+        setRecordsLoading(false)
+      }
+    }
+    loadProcessedRecords()
+  }, [])
 
   const resolveDup = (id: string, action: 'merged' | 'distinct' | 'removed', master?: 1 | 2) => {
     setMergingDup(prev => { const s = new Set(prev); s.add(id); return s })
@@ -2132,7 +2163,13 @@ function DataReviewScreen() {
   // Each category contributes a weighted share. Within each category flags are
   // weighted by severity so resolving High > Medium > Low flags scores more.
   // Base score of 100 is penalised by unresolved flags, then capped 0–100.
-  const TOTAL_ROWS = 10_412
+  const TOTAL_ROWS = processedRecords.length
+  const isTrue = (value: unknown) => value === true || value === -1 || ['true', '1', 'merged'].includes(String(value).toLowerCase())
+  const processedOutliers = processedRecords.filter(record => record.anomaly_flag === -1 || record.anomaly_flag === '-1' || record.is_anomaly === true || record.is_anomaly === 'true').length
+  const processedDuplicates = processedRecords.filter(record => isTrue(record.is_duplicate) || isTrue(record.merged_from_sources) || record.deduplication_status === 'merged').length
+  const processedPII = processedRecords.filter(record => !String(record.email || record.email_address || '').trim() || !String(record.phone || record.phone_number || '').trim()).length
+  const processedNPIValidation = processedRecords.filter(record => !String(record.npi || record.NPI || '').trim() || !String(record.payer_name || record.payerName || '').trim()).length
+  const unresolvedDataFlags = processedOutliers + processedDuplicates + processedPII + processedNPIValidation
 
   const scoreCategory = (
     flags: { severity: string; id: number }[],
@@ -2149,29 +2186,25 @@ function DataReviewScreen() {
   }
 
   // Category weights: NPI (30) > PII (25) > Duplicates (25) > Outliers (20)
-  const npiPoints = scoreCategory(
-    VALIDATION_ERRORS.map(v => ({ severity: v.severity, id: v.id })), resolvedVal, 30)
-  const piiPoints = scoreCategory(
-    PII_FLAGS.map(f => ({ severity: f.severity, id: f.id })), resolvedPII, 25)
-  const dupPoints  = DUPLICATES.length === 0 ? 25
-    : (resolvedDup.size / DUPLICATES.length) * 25
-  const outPoints  = scoreCategory(
-    OUTLIERS.map(o => ({ severity: o.severity, id: o.id })), resolvedOut, 20)
+  const liveRatio = TOTAL_ROWS > 0 ? Math.min(1, unresolvedDataFlags / TOTAL_ROWS) : 0
+  const npiPoints = TOTAL_ROWS > 0 ? 30 * (1 - processedNPIValidation / TOTAL_ROWS) : 0
+  const piiPoints = TOTAL_ROWS > 0 ? 25 * (1 - processedPII / TOTAL_ROWS) : 0
+  const dupPoints = TOTAL_ROWS > 0 ? 25 * (1 - processedDuplicates / TOTAL_ROWS) : 0
+  const outPoints = TOTAL_ROWS > 0 ? 20 * (1 - processedOutliers / TOTAL_ROWS) : 0
 
   // Flag-density penalty: reduce base by up to 5 pts if many flags per 1k rows
-  const totalFlags    = PII_FLAGS.length + DUPLICATES.length + OUTLIERS.length + VALIDATION_ERRORS.length
-  const flagDensity   = totalFlags / (TOTAL_ROWS / 1000)          // flags per 1k rows
-  const densityPenalty = Math.min(5, flagDensity * 0.4)
+  const totalFlags = unresolvedDataFlags
+  const densityPenalty = liveRatio * 100
 
   const quality = Math.min(100, Math.max(0,
-    Math.round(npiPoints + piiPoints + dupPoints + outPoints - densityPenalty)
+    Math.round(100 - densityPenalty)
   ))
 
   const tabs = [
-    { id: 'pii',        label: 'PII / PHI Flags',      count: PII_FLAGS.length - resolvedPII.size },
-    { id: 'duplicates', label: 'Duplicates',            count: DUPLICATES.length - resolvedDup.size },
-    { id: 'outliers',   label: 'Statistical Outliers',  count: OUTLIERS.length - resolvedOut.size },
-    { id: 'validation', label: 'NPI Validation',        count: VALIDATION_ERRORS.length - resolvedVal.size },
+    { id: 'pii',        label: 'PII / PHI Flags',      count: processedPII },
+    { id: 'duplicates', label: 'Duplicates',            count: processedDuplicates },
+    { id: 'outliers',   label: 'Statistical Outliers',  count: processedOutliers },
+    { id: 'validation', label: 'NPI Validation',        count: processedNPIValidation },
   ] as const
 
   return (
@@ -2199,14 +2232,14 @@ function DataReviewScreen() {
       {(() => {
         const scoreColor = quality >= 85 ? C.success : quality >= 65 ? C.corpBlue : quality >= 45 ? C.warning : C.danger
         const scoreLabel = quality >= 85 ? 'Excellent' : quality >= 65 ? 'Good' : quality >= 45 ? 'Fair' : 'Poor'
-        const totalResolved = resolvedPII.size + resolvedDup.size + resolvedOut.size + resolvedVal.size
-        const totalFlags    = PII_FLAGS.length + DUPLICATES.length + OUTLIERS.length + VALIDATION_ERRORS.length
+        const totalResolved = 0
+        const totalFlags = unresolvedDataFlags
 
         const segments = [
-          { label: 'NPI Validation', pts: npiPoints,  max: 30, resolved: resolvedVal.size, total: VALIDATION_ERRORS.length, color: C.navy },
-          { label: 'PII / PHI',      pts: piiPoints,  max: 25, resolved: resolvedPII.size, total: PII_FLAGS.length,         color: C.corpBlue },
-          { label: 'Duplicates',     pts: dupPoints,  max: 25, resolved: resolvedDup.size, total: DUPLICATES.length,        color: C.teal },
-          { label: 'Outliers',       pts: outPoints,  max: 20, resolved: resolvedOut.size, total: OUTLIERS.length,          color: '#5C85C4' },
+          { label: 'NPI Validation', pts: npiPoints,  max: 30, resolved: 0, total: processedNPIValidation, color: C.navy },
+          { label: 'PII / PHI',      pts: piiPoints,  max: 25, resolved: 0, total: processedPII,           color: C.corpBlue },
+          { label: 'Duplicates',     pts: dupPoints,  max: 25, resolved: 0, total: processedDuplicates,   color: C.teal },
+          { label: 'Outliers',       pts: outPoints,  max: 20, resolved: 0, total: processedOutliers,     color: '#5C85C4' },
         ]
 
         return (
@@ -2223,7 +2256,7 @@ function DataReviewScreen() {
               </div>
               <div className="flex items-center gap-4">
                 <span className="text-[11px]" style={{ color: C.midText }}>
-                  {totalResolved}/{totalFlags} flags resolved
+                  {recordsLoading ? 'Loading processed records...' : `${totalResolved}/${totalFlags} flags resolved`}
                   <span className="mx-1.5" style={{ color: C.border }}>·</span>
                   {TOTAL_ROWS.toLocaleString()} rows processed
                 </span>
