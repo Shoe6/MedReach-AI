@@ -1,0 +1,15 @@
+{
+  "name": "companies/demo-test/uploads/25672a3d-cca3-4a40-a02f-1a4451f096d0_sample.csv",
+  "bucket": "demo-medreach-ai.appspot.com",
+  "metageneration": 1,
+  "generation": 1786753849377,
+  "contentType": "text/csv",
+  "storageClass": "STANDARD",
+  "downloadTokens": [],
+  "etag": "7Xpsa1tDwG5e3mabnYQ2iyHQSqQ",
+  "timeCreated": "2026-08-15T00:30:49.378Z",
+  "updated": "2026-08-15T00:30:49.378Z",
+  "size": 57,
+  "md5Hash": "cur+Mh6rb9u3RqSlNQvSOg==",
+  "crc32c": "2215898578"
+}
