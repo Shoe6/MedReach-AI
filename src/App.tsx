@@ -1,0 +1,6207 @@
+import { useState, useRef, useEffect, createContext, useContext, Fragment, type ReactNode } from 'react'
+import { useNavigate, useLocation } from 'react-router-dom'
+import ExecutiveMetricCards from './ExecutiveMetricCards'
+import {
+  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip as RechartTooltip,
+  Cell, CartesianGrid, Legend, PieChart, Pie,
+} from 'recharts'
+
+// ─── TYPES ───────────────────────────────────────────────────────────────────
+
+type Role = 'super-admin' | 'admin' | 'editor' | 'viewer'
+
+const ROLE_META: Record<Role, { label: string; color: string; bg: string; description: string }> = {
+  'super-admin': { label: 'Super Admin', color: '#fff',     bg: '#7B2D8B', description: 'Full platform access across all organizations' },
+  'admin':       { label: 'Admin',       color: '#1B3A6B', bg: '#BEE3F8', description: 'Full access within your organization' },
+  'editor':      { label: 'Editor',      color: '#744210', bg: '#FEEBC8', description: 'Upload, clean, and review data — no export or team mgmt' },
+  'viewer':      { label: 'Viewer',      color: '#1B5E3B', bg: '#C6F6D5', description: 'Read-only access to reports and dashboards' },
+}
+
+// Which nav items each role can see
+const ROLE_NAV: Record<Role, string[]> = {
+  'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings','org-management'],
+  'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings'],
+  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','team','scrubbing-sessions','settings'],
+  'viewer':      ['dashboard','data-review','data-heatmap','query','analytics','team','scrubbing-sessions','settings'],
+}
+
+const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
+  role: 'admin',
+  setRole: () => {},
+})
+const useRole = () => useContext(RoleContext)
+const isAdminRole = (role: Role) => role === 'admin' || role === 'super-admin'
+
+// Shared upload file metadata (written by UploadScreen, read by ColumnMappingScreen + ExportScreen)
+interface UploadMeta { fileName: string; fileSize: number; rowCount: number; fileType: string; uploadedAt: string }
+const UploadContext = createContext<{ meta: UploadMeta | null; setMeta: (m: UploadMeta | null) => void }>({
+  meta: null, setMeta: () => {},
+})
+const useUploadMeta = () => useContext(UploadContext)
+
+// Shared NPI validation resolution state — read by ExportScreen to gate CSV export
+type ValAction = 'removed' | 'override'
+const ValidationContext = createContext<{
+  resolvedVal: Map<number, ValAction>
+  setResolvedVal: (m: Map<number, ValAction>) => void
+}>({ resolvedVal: new Map(), setResolvedVal: () => {} })
+const useValidation = () => useContext(ValidationContext)
+
+// Shared outlier resolution state — read by Analytics + Export
+type OutAction = 'removed' | 'kept' | 'warned'
+const OutlierContext = createContext<{
+  resolvedOut: Map<number, OutAction>
+  setResolvedOut: (m: Map<number, OutAction>) => void
+  warnNotes: Record<number, string>
+  setWarnNotes: (n: Record<number, string>) => void
+}>({ resolvedOut: new Map(), setResolvedOut: () => {}, warnNotes: {}, setWarnNotes: () => {} })
+const useOutliers = () => useContext(OutlierContext)
+
+type Screen =
+  | 'login' | 'register' | 'forgot-password' | 'reset-password' | 'mfa'
+  | 'dashboard' | 'upload' | 'column-mapping'
+  | 'data-review' | 'query' | 'segments' | 'campaign-generator'
+  | 'compliance-review' | 'financial-disclosures' | 'analytics' | 'data-heatmap'
+  | 'export' | 'team' | 'audit-log' | 'scrubbing-sessions' | 'settings' | 'org-management'
+
+type ToastType = 'success' | 'warning' | 'error' | 'info'
+
+interface Toast {
+  id: number
+  type: ToastType
+  message: string
+}
+
+// ─── DESIGN TOKENS ───────────────────────────────────────────────────────────
+
+const C = {
+  navy: '#1B3A6B',
+  corpBlue: '#2E86AB',
+  teal: '#028090',
+  lightTint: '#EBF4FA',
+  success: '#2D6A4F',
+  warning: '#E67E22',
+  danger: '#C0392B',
+  destructiveDark: '#8B1E1E',
+  darkText: '#1A1A2E',
+  midText: '#4A5568',
+  border: '#CBD5E0',
+  white: '#FFFFFF',
+  pageBg: '#F7FAFC',
+}
+
+// ─── ICONS ───────────────────────────────────────────────────────────────────
+
+const Icon = {
+  dashboard: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+    </svg>
+  ),
+  upload: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+  ),
+  shield: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/>
+    </svg>
+  ),
+  chart: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="2" y1="20" x2="22" y2="20"/>
+    </svg>
+  ),
+  users: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/>
+    </svg>
+  ),
+  send: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+    </svg>
+  ),
+  download: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+  ),
+  userPlus: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/>
+    </svg>
+  ),
+  gear: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+    </svg>
+  ),
+  search: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+  ),
+  bell: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/>
+    </svg>
+  ),
+  user: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/>
+    </svg>
+  ),
+  chevronLeft: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="15 18 9 12 15 6"/>
+    </svg>
+  ),
+  chevronRight: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="9 18 15 12 9 6"/>
+    </svg>
+  ),
+  alertTriangle: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+  ),
+  checkCircle: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+    </svg>
+  ),
+  x: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+    </svg>
+  ),
+  fileCheck: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="9 15 11 17 15 13"/>
+    </svg>
+  ),
+  copy: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+    </svg>
+  ),
+  menu: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>
+    </svg>
+  ),
+  query: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8"/><path d="M11 8a3 3 0 110 4m0 2h.01"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+    </svg>
+  ),
+  audit: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+    </svg>
+  ),
+  eye: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+    </svg>
+  ),
+  eyeOff: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>
+    </svg>
+  ),
+  trash: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6m4-6v6"/><path d="M9 6V4h6v2"/>
+    </svg>
+  ),
+  edit: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+    </svg>
+  ),
+  plus: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+  ),
+  spinner: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'spin 1s linear infinite' }}>
+      <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+      <path d="M21 12a9 9 0 11-6.219-8.56"/>
+    </svg>
+  ),
+}
+
+// ─── SHARED UI COMPONENTS ─────────────────────────────────────────────────────
+
+function Btn({
+  variant = 'primary', children, onClick, disabled, size = 'md', icon, className = ''
+}: {
+  variant?: 'primary' | 'secondary' | 'teal' | 'danger' | 'ghost' | 'disabled'
+  children: ReactNode, onClick?: () => void, disabled?: boolean
+  size?: 'sm' | 'md', icon?: ReactNode, className?: string
+}) {
+  const base = 'inline-flex items-center gap-[7px] font-bold cursor-pointer border-none transition-all rounded-[6px] select-none'
+  const sizes = { sm: 'text-[11px] px-3 py-[6px]', md: 'text-[13px] px-[18px] py-[9px]' }
+  const variants: Record<string, string> = {
+    primary: 'bg-[#1B3A6B] text-white hover:bg-[#142d55]',
+    secondary: 'bg-white text-[#1B3A6B] border border-[#1B3A6B] hover:bg-[#EBF4FA]',
+    teal: 'bg-[#028090] text-white hover:bg-[#016d7b]',
+    danger: 'bg-[#C0392B] text-white hover:bg-[#a93226]',
+    ghost: 'bg-transparent text-[#4A5568] border border-[#CBD5E0] hover:bg-[#F7FAFC]',
+    disabled: 'bg-[#E2E8F0] text-[#A0AEC0] cursor-not-allowed',
+  }
+  const v = disabled ? 'disabled' : variant
+  return (
+    <button
+      className={`${base} ${sizes[size]} ${variants[v]} ${className}`}
+      onClick={disabled ? undefined : onClick}
+      style={{ fontFamily: 'Inter, Arial, sans-serif' }}
+    >
+      {icon && <span className="w-[14px] h-[14px] flex items-center justify-center">{icon}</span>}
+      {children}
+    </button>
+  )
+}
+
+function Badge({
+  tier = 1, color = 'info', children, className = ''
+}: {
+  tier?: 1 | 2, color?: 'success' | 'warning' | 'danger' | 'info' | 'neutral' | 'approve' | 'block'
+  children: ReactNode, className?: string
+}) {
+  if (tier === 1) {
+    const styles: Record<string, { bg: string; text: string }> = {
+      success: { bg: '#E8F5EF', text: '#1B5E3B' },
+      warning: { bg: '#FEF3C7', text: '#92400E' },
+      danger: { bg: '#FEE2E2', text: '#991B1B' },
+      info: { bg: '#EBF4FA', text: '#1B3A6B' },
+      neutral: { bg: '#F1F5F9', text: '#334155' },
+      approve: { bg: '#E8F5EF', text: '#1B5E3B' },
+      block: { bg: '#FEE2E2', text: '#991B1B' },
+    }
+    const s = styles[color] || styles.info
+    return (
+      <span className={`inline-flex items-center text-[11px] font-semibold px-[10px] py-[3px] rounded-[20px] ${className}`}
+        style={{ background: s.bg, color: s.text, fontFamily: 'Inter, Arial, sans-serif' }}>
+        {children}
+      </span>
+    )
+  }
+  const styles2: Record<string, { bg: string; text: string }> = {
+    approve: { bg: '#2D6A4F', text: '#FFFFFF' },
+    warning: { bg: '#E67E22', text: '#FFFFFF' },
+    block: { bg: '#C0392B', text: '#FFFFFF' },
+    danger: { bg: '#C0392B', text: '#FFFFFF' },
+    success: { bg: '#2D6A4F', text: '#FFFFFF' },
+    info: { bg: '#1B3A6B', text: '#FFFFFF' },
+    neutral: { bg: '#4A5568', text: '#FFFFFF' },
+  }
+  const s2 = styles2[color] || styles2.info
+  return (
+    <span className={`inline-flex items-center text-[11px] font-bold px-3 py-1 rounded-[6px] ${className}`}
+      style={{ background: s2.bg, color: s2.text, fontFamily: 'Inter, Arial, sans-serif' }}>
+      {children}
+    </span>
+  )
+}
+
+function Card({ children, className = '', onClick }: { children: ReactNode; className?: string; onClick?: () => void }) {
+  return (
+    <div
+      className={`bg-white rounded-[8px] border border-[#CBD5E0] p-4 ${onClick ? 'cursor-pointer card-hover' : ''} ${className}`}
+      onClick={onClick}
+    >
+      {children}
+    </div>
+  )
+}
+
+function Input({
+  label, placeholder, type = 'text', value, onChange, error, hint, required, id
+}: {
+  label?: string; placeholder?: string; type?: string; value: string
+  onChange: (v: string) => void; error?: string; hint?: string; required?: boolean; id?: string
+}) {
+  const [show, setShow] = useState(false)
+  const isPassword = type === 'password'
+  return (
+    <div className="flex flex-col gap-1">
+      {label && (
+        <label htmlFor={id} className="text-[13px] font-semibold" style={{ color: C.darkText }}>
+          {label}{required && <span className="text-red-500 ml-0.5">*</span>}
+        </label>
+      )}
+      <div className="relative">
+        <input
+          id={id}
+          type={isPassword && show ? 'text' : type}
+          placeholder={placeholder}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          className={`input-field w-full border rounded-[7px] text-[13px] px-[13px] py-[8px] bg-white transition-all ${error ? 'input-field-error' : 'border-[#CBD5E0]'}`}
+          style={{ color: C.darkText, fontFamily: 'Inter, Arial, sans-serif', height: '40px' }}
+        />
+        {isPassword && (
+          <button
+            type="button"
+            onClick={() => setShow(!show)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-[#4A5568] hover:text-[#1A1A2E]"
+          >
+            {show ? Icon.eyeOff : Icon.eye}
+          </button>
+        )}
+      </div>
+      {error && <p className="text-[11px] text-[#C0392B]">{error}</p>}
+      {hint && !error && <p className="text-[11px] text-[#4A5568]">{hint}</p>}
+    </div>
+  )
+}
+
+function ProgressBar({ value, color = 'info', label }: { value: number; color?: 'success' | 'info' | 'warning'; label?: string }) {
+  const colors = { success: '#2D6A4F', info: '#2E86AB', warning: '#E67E22' }
+  return (
+    <div className="flex flex-col gap-1">
+      {label && (
+        <div className="flex justify-between items-center">
+          <span className="text-[11px]" style={{ color: C.midText }}>{label}</span>
+          <span className="text-[11px] font-bold" style={{ color: colors[color] }}>{value}%</span>
+        </div>
+      )}
+      <div className="progress-track">
+        <div className="progress-fill" style={{ width: `${value}%`, background: colors[color], transition: 'width 0.5s cubic-bezier(0.4,0,0.2,1)' }} />
+      </div>
+    </div>
+  )
+}
+
+function SectionHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
+  return (
+    <div className="flex items-start justify-between mb-6">
+      <div>
+        <h1 className="text-[28px] font-bold leading-tight" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>{title}</h1>
+        {subtitle && <p className="text-[13px] mt-1" style={{ color: C.midText }}>{subtitle}</p>}
+      </div>
+      {actions && <div className="flex items-center gap-3">{actions}</div>}
+    </div>
+  )
+}
+
+function EmptyState({ icon, title, subtitle, action }: { icon?: ReactNode; title: string; subtitle?: string; action?: ReactNode }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-center">
+      {icon && <div className="mb-4 opacity-40" style={{ color: C.navy }}>{icon}</div>}
+      <p className="text-[15px] font-semibold" style={{ color: C.midText }}>{title}</p>
+      {subtitle && <p className="text-[13px] mt-1" style={{ color: C.midText }}>{subtitle}</p>}
+      {action && <div className="mt-4">{action}</div>}
+    </div>
+  )
+}
+
+function Banner({ type, children, onClose }: { type: 'error' | 'warning' | 'info' | 'success'; children: ReactNode; onClose?: () => void }) {
+  const styles = {
+    error: { bg: '#FEE2E2', border: '#C0392B', text: '#991B1B', icon: Icon.alertTriangle },
+    warning: { bg: '#FEF3C7', border: '#E67E22', text: '#92400E', icon: Icon.alertTriangle },
+    info: { bg: '#EBF4FA', border: '#2E86AB', text: '#1B3A6B', icon: Icon.alertTriangle },
+    success: { bg: '#E8F5EF', border: '#2D6A4F', text: '#1B5E3B', icon: Icon.checkCircle },
+  }
+  const s = styles[type]
+  return (
+    <div className="flex items-start gap-3 p-3 rounded-[6px] mb-4 border-l-4 text-[13px]"
+      style={{ background: s.bg, borderLeftColor: s.border, color: s.text }}>
+      <span className="mt-0.5 shrink-0">{s.icon}</span>
+      <span className="flex-1">{children}</span>
+      {onClose && <button onClick={onClose} className="shrink-0 opacity-60 hover:opacity-100">{Icon.x}</button>}
+    </div>
+  )
+}
+
+function Modal({ title, children, onClose, width = 480 }: { title: string; children: ReactNode; onClose: () => void; width?: number }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(26,26,46,0.45)' }}>
+      <div className="bg-white rounded-[8px] shadow-2xl border border-[#CBD5E0]" style={{ width: `${width}px`, maxHeight: '90vh', overflow: 'auto' }}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#EDF2F7]">
+          <h2 className="text-[16px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>{title}</h2>
+          <button onClick={onClose} className="text-[#718096] hover:text-[#1A1A2E]">{Icon.x}</button>
+        </div>
+        <div className="px-6 py-5">{children}</div>
+      </div>
+    </div>
+  )
+}
+
+// ─── SIDEBAR ─────────────────────────────────────────────────────────────────
+
+const ALL_NAV_ITEMS = [
+  { id: 'dashboard',          label: 'Dashboard',      icon: Icon.dashboard },
+  { id: 'upload',             label: 'Upload Data',    icon: Icon.upload },
+  { id: 'data-review',        label: 'Data Review',    icon: Icon.shield, badge: 12 },
+  { id: 'data-heatmap',       label: 'Data Heatmap',   icon: Icon.chart },
+  { id: 'query',              label: 'Query',          icon: Icon.query },
+  { id: 'segments',           label: 'Segments',       icon: Icon.users },
+  { id: 'campaign-generator',    label: 'Campaigns',       icon: Icon.send },
+  { id: 'financial-disclosures', label: 'Disclosures',     icon: Icon.fileCheck },
+  { id: 'analytics',             label: 'Analytics',       icon: Icon.chart },
+  { id: 'export',             label: 'Export',         icon: Icon.download },
+  { id: 'team',               label: 'Team',           icon: Icon.userPlus },
+  { id: 'audit-log',          label: 'Audit Log',      icon: Icon.audit },
+  { id: 'scrubbing-sessions', label: 'Scrub Sessions',  icon: Icon.shield },
+  { id: 'settings',           label: 'Settings',        icon: Icon.gear },
+  // Super-admin only
+  { id: 'org-management',     label: 'Organizations',  icon: Icon.shield },
+]
+
+const DEMO_USERS: Record<Role, { name: string; initials: string; org: string }> = {
+  'super-admin': { name: 'Collin (Owner)',  initials: 'CO', org: 'MedReach AI' },
+  'admin':       { name: 'Jane Doe',        initials: 'JD', org: 'Acme Pharma' },
+  'editor':      { name: 'Mark Chen',       initials: 'MC', org: 'Acme Pharma' },
+  'viewer':      { name: 'Sarah Kim',       initials: 'SK', org: 'Acme Pharma' },
+}
+
+function Sidebar({ current, onNavigate, collapsed, onToggle }: {
+  current: Screen; onNavigate: (s: Screen) => void; collapsed: boolean; onToggle: () => void
+}) {
+  const { role } = useRole()
+  const allowed = ROLE_NAV[role]
+  const navItems = ALL_NAV_ITEMS.filter(i => allowed.includes(i.id))
+  const user = DEMO_USERS[role]
+  const meta = ROLE_META[role]
+  const isSuperAdmin = role === 'super-admin'
+
+  return (
+    <div
+      className="sidebar-scroll flex flex-col h-screen shrink-0 transition-all duration-200"
+      style={{ width: collapsed ? 60 : 220, background: isSuperAdmin ? '#3B0764' : C.navy, color: 'white', position: 'sticky', top: 0 }}
+    >
+      {/* Logo */}
+      <div className="flex items-center gap-3 px-4 py-5 border-b border-white/10">
+        <div className="w-7 h-7 rounded-[6px] flex items-center justify-center shrink-0" style={{ background: isSuperAdmin ? '#9333EA' : C.teal }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+          </svg>
+        </div>
+        {!collapsed && (
+          <div>
+            <span className="text-[13px] font-bold tracking-wide">MedReach AI</span>
+            {isSuperAdmin && <p className="text-[9px] font-bold tracking-widest" style={{ color: '#C084FC' }}>PLATFORM ADMIN</p>}
+          </div>
+        )}
+      </div>
+
+      {/* Nav items */}
+      <nav className="flex-1 py-3 px-2 flex flex-col gap-0.5">
+        {navItems.map(item => {
+          const active = current === item.id
+          return (
+            <button
+              key={item.id}
+              onClick={() => onNavigate(item.id as Screen)}
+              className={`nav-item flex items-center gap-3 rounded-[6px] w-full transition-all text-left relative ${collapsed ? 'justify-center px-2 py-2.5' : 'px-3 py-2.5'}`}
+              style={{
+                background: active ? 'rgba(255,255,255,0.15)' : 'transparent',
+                color: active ? 'white' : 'rgba(255,255,255,0.65)',
+                fontFamily: 'Inter, Arial, sans-serif',
+                fontSize: 11,
+                fontWeight: active ? 700 : 500,
+              }}
+            >
+              <span className="shrink-0">{item.icon}</span>
+              {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
+              {'badge' in item && item.badge && !collapsed && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: C.danger, color: 'white' }}>
+                  {item.badge}
+                </span>
+              )}
+              {'badge' in item && item.badge && collapsed && (
+                <span className="absolute top-1 right-1 w-2 h-2 rounded-full" style={{ background: C.danger }} />
+              )}
+            </button>
+          )
+        })}
+      </nav>
+
+      {/* User + role chip + collapse */}
+      <div className="border-t border-white/10 p-3">
+        {!collapsed && (
+          <div className="flex items-center gap-2 mb-2 px-1">
+            <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
+              style={{ background: isSuperAdmin ? '#9333EA' : C.teal }}>{user.initials}</div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] font-semibold text-white truncate">{user.name}</p>
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                style={{ background: meta.bg, color: meta.color }}>{meta.label}</span>
+            </div>
+          </div>
+        )}
+        {!collapsed && (
+          <p className="text-[9px] px-1 mb-2 truncate" style={{ color: 'rgba(255,255,255,0.4)' }}>{user.org}</p>
+        )}
+        <button
+          onClick={onToggle}
+          className="nav-item w-full flex items-center justify-center rounded-[6px] py-1.5 text-white/60 hover:text-white"
+        >
+          {collapsed ? Icon.chevronRight : Icon.chevronLeft}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── TOP BAR ─────────────────────────────────────────────────────────────────
+
+function TopBar({ title }: { title: string }) {
+  return (
+    <div className="h-12 flex items-center justify-between px-8 border-b border-[#EDF2F7] bg-white shrink-0">
+      <span className="text-[13px] font-semibold" style={{ color: C.darkText }}>{title}</span>
+      <div className="flex items-center gap-4" style={{ color: C.navy }}>
+        {Icon.search}
+        <div className="relative">
+          {Icon.bell}
+          <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px] font-bold text-white" style={{ background: C.danger }}>3</span>
+        </div>
+        {Icon.user}
+      </div>
+    </div>
+  )
+}
+
+// ─── TOAST SYSTEM ─────────────────────────────────────────────────────────────
+
+function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: number) => void }) {
+  const styles: Record<string, { bg: string; border: string; text: string }> = {
+    success: { bg: '#E8F5EF', border: '#2D6A4F', text: '#1B5E3B' },
+    warning: { bg: '#FEF3C7', border: '#E67E22', text: '#92400E' },
+    error: { bg: '#FEE2E2', border: '#C0392B', text: '#991B1B' },
+    info: { bg: '#EBF4FA', border: '#2E86AB', text: '#1B3A6B' },
+  }
+  return (
+    <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2" style={{ maxWidth: 360 }}>
+      {toasts.map(t => {
+        const s = styles[t.type]
+        return (
+          <div key={t.id} className="toast-enter flex items-center gap-3 px-4 py-3 rounded-[8px] shadow-lg border-l-4 text-[13px]"
+            style={{ background: s.bg, borderLeftColor: s.border, color: s.text }}>
+            <span className="flex-1">{t.message}</span>
+            <button onClick={() => onRemove(t.id)} className="opacity-50 hover:opacity-100">{Icon.x}</button>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ─── AUTH SCREENS ─────────────────────────────────────────────────────────────
+
+function LoginScreen({ onLogin, onNavigate }: { onLogin: (role: Role) => void; onNavigate: (s: Screen) => void }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [emailError, setEmailError] = useState('')
+  const [selectedRole, setSelectedRole] = useState<Role>('admin')
+
+  const submit = () => {
+    setError('')
+    setEmailError('')
+    if (!email.includes('@')) {
+      setEmailError('Enter a valid email address')
+      return
+    }
+    if (password === 'wrong') {
+      setError('Invalid email or password')
+      return
+    }
+    setLoading(true)
+    setTimeout(() => { setLoading(false); onLogin(selectedRole) }, 1200)
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center" style={{ background: selectedRole === 'super-admin' ? '#3B0764' : C.navy }}>
+      <div className="bg-white rounded-[12px] shadow-2xl p-10 w-[460px]">
+        <div className="text-center mb-6">
+          <div className="w-12 h-12 rounded-[10px] flex items-center justify-center mx-auto mb-4"
+            style={{ background: selectedRole === 'super-admin' ? '#9333EA' : C.teal }}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+            </svg>
+          </div>
+          <h1 className="text-[28px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>MedReach AI</h1>
+          <p className="text-[13px] mt-1" style={{ color: C.midText }}>Sign in to your account</p>
+        </div>
+
+        {/* ── ROLE PICKER (demo) ── */}
+        <div className="mb-5 p-3 rounded-[8px]" style={{ background: '#F7F9FB', border: '1px solid #EDF2F7' }}>
+          <p className="text-[10px] font-bold mb-2" style={{ color: C.midText }}>DEMO: Select role to preview</p>
+          <div className="grid grid-cols-2 gap-2">
+            {(Object.entries(ROLE_META) as [Role, typeof ROLE_META[Role]][]).map(([r, m]) => (
+              <button
+                key={r}
+                onClick={() => setSelectedRole(r)}
+                className="flex flex-col items-start p-2.5 rounded-[6px] border-2 text-left transition-all"
+                style={{
+                  borderColor: selectedRole === r ? (r === 'super-admin' ? '#9333EA' : C.corpBlue) : '#EDF2F7',
+                  background: selectedRole === r ? (r === 'super-admin' ? '#F5F3FF' : '#EBF4FA') : 'white',
+                }}
+              >
+                <div className="flex items-center gap-1.5 mb-0.5">
+                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: m.bg, color: m.color }}>{m.label}</span>
+                </div>
+                <p className="text-[9px]" style={{ color: C.midText }}>{m.description}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {error && <Banner type="error" onClose={() => setError('')}>{error}</Banner>}
+
+        <div className="flex flex-col gap-4">
+          <Input label="Email address" type="email" placeholder="you@company.com" value={email} onChange={setEmail} error={emailError} required id="email" />
+          <Input label="Password" type="password" placeholder="Enter your password" value={password} onChange={setPassword} required id="password" />
+
+          <Btn variant="primary" onClick={submit} disabled={loading} icon={loading ? Icon.spinner : undefined} className="w-full justify-center">
+            {loading ? 'Signing in...' : `Sign In as ${ROLE_META[selectedRole].label}`}
+          </Btn>
+
+          <div className="flex items-center justify-between text-[12px]">
+            <button onClick={() => onNavigate('forgot-password')} className="hover:underline" style={{ color: C.corpBlue }}>
+              Forgot password?
+            </button>
+            <button onClick={() => onNavigate('register')} className="hover:underline" style={{ color: C.corpBlue }}>
+              Create account
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RegisterScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [company, setCompany] = useState('')
+  const [strength, setStrength] = useState(0)
+
+  const checkStrength = (p: string) => {
+    let s = 0
+    if (p.length >= 8) s++
+    if (/[A-Z]/.test(p)) s++
+    if (/[0-9]/.test(p)) s++
+    if (/[^A-Za-z0-9]/.test(p)) s++
+    setStrength(s)
+  }
+
+  const strengthColors = ['#C0392B', '#E67E22', '#E67E22', '#2D6A4F']
+  const strengthLabels = ['', 'Weak', 'Medium', 'Medium', 'Strong']
+
+  return (
+    <div className="min-h-screen flex items-center justify-center" style={{ background: C.navy }}>
+      <div className="bg-white rounded-[12px] shadow-2xl p-10 w-[440px]">
+        <div className="text-center mb-6">
+          <h1 className="text-[24px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Create Account</h1>
+          <p className="text-[13px] mt-1" style={{ color: C.midText }}>Join MedReach AI</p>
+        </div>
+        <div className="flex flex-col gap-4">
+          <Input label="Work email" type="email" placeholder="you@company.com" value={email} onChange={setEmail} required />
+          <div>
+            <Input label="Password" type="password" placeholder="Min 8 characters" value={password} onChange={p => { setPassword(p); checkStrength(p) }} required />
+            {password && (
+              <div className="mt-2">
+                <div className="flex gap-1 mb-1">
+                  {[1,2,3,4].map(i => (
+                    <div key={i} className="flex-1 h-1 rounded-full transition-all"
+                      style={{ background: i <= strength ? strengthColors[strength-1] : '#E2E8F0' }} />
+                  ))}
+                </div>
+                <p className="text-[11px]" style={{ color: strength >= 3 ? C.success : C.warning }}>{strengthLabels[strength]}</p>
+              </div>
+            )}
+          </div>
+          <Input label="Confirm password" type="password" placeholder="Repeat password" value={confirm} onChange={setConfirm}
+            error={confirm && confirm !== password ? 'Passwords do not match' : undefined} required />
+          <Input label="Company name" placeholder="Acme Pharma" value={company} onChange={setCompany} required />
+          <div>
+            <label className="text-[13px] font-semibold block mb-1" style={{ color: C.darkText }}>Industry</label>
+            <select className="w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2 bg-white" style={{ height: 40, color: C.darkText }}>
+              <option>Pharmaceutical</option>
+              <option>Medical Device</option>
+            </select>
+          </div>
+          <Btn variant="primary" className="w-full justify-center" onClick={() => onNavigate('login')}>Create Account</Btn>
+          <p className="text-center text-[12px]" style={{ color: C.midText }}>
+            Already have an account?{' '}
+            <button className="hover:underline font-semibold" style={{ color: C.corpBlue }} onClick={() => onNavigate('login')}>Sign in</button>
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ForgotPasswordScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const [email, setEmail] = useState('')
+  const [sent, setSent] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  const send = () => {
+    setLoading(true)
+    setTimeout(() => { setLoading(false); setSent(true) }, 1000)
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center" style={{ background: C.navy }}>
+      <div className="bg-white rounded-[12px] shadow-2xl p-10 w-[420px]">
+        {sent ? (
+          <div className="text-center">
+            <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4" style={{ background: '#E8F5EF' }}>
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#2D6A4F" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+              </svg>
+            </div>
+            <h2 className="text-[20px] font-bold mb-2" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Check your email</h2>
+            <p className="text-[13px] mb-6" style={{ color: C.midText }}>A reset link has been sent. It will expire in 30 minutes.</p>
+            <Btn variant="ghost" onClick={() => onNavigate('login')} className="w-full justify-center">Back to Login</Btn>
+          </div>
+        ) : (
+          <>
+            <h1 className="text-[24px] font-bold mb-1" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Forgot password?</h1>
+            <p className="text-[13px] mb-6" style={{ color: C.midText }}>Enter your email and we'll send you a reset link.</p>
+            <div className="flex flex-col gap-4">
+              <Input label="Email address" type="email" placeholder="you@company.com" value={email} onChange={setEmail} />
+              <Btn variant="primary" onClick={send} disabled={loading} icon={loading ? Icon.spinner : undefined} className="w-full justify-center">
+                {loading ? 'Sending...' : 'Send Reset Link'}
+              </Btn>
+              <button className="text-[12px] hover:underline text-center" style={{ color: C.corpBlue }} onClick={() => onNavigate('login')}>Back to Login</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── DASHBOARD ───────────────────────────────────────────────────────────────
+
+// ─── DASHBOARD STATS HOOK ───────────────────────────────────────────────────
+
+interface DashboardStats {
+  total_hcps: number
+  records_this_week: number
+  health_score: number
+  unresolved_flags: { pii: number; duplicates: number; outliers: number; npi_validation: number; total: number }
+  last_upload: string | null
+  source: string
+}
+
+function useDashboardStats() {
+  const [data,    setData]    = useState<DashboardStats | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState<string | null>(null)
+  const [lastFetched, setLastFetched] = useState<Date | null>(null)
+
+  const fetch_ = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetch('http://localhost:8000/api/dashboard/summary')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json: DashboardStats = await res.json()
+      setData(json)
+      setLastFetched(new Date())
+    } catch (e) {
+      // Use demo-seed fallback so the UI is never blank
+      setData({
+        total_hcps: 10412,
+        records_this_week: 847,
+        health_score: 84,
+        unresolved_flags: { pii: 6, duplicates: 3, outliers: 4, npi_validation: 4, total: 17 },
+        last_upload: null,
+        source: 'demo_seed',
+      })
+      setError('Backend offline — showing cached demo data')
+      setLastFetched(new Date())
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { fetch_() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  return { data, loading, error, refresh: fetch_, lastFetched }
+}
+
+// Skeleton shimmer block used while stats are loading
+function StatSkeleton() {
+  return (
+    <div className="animate-pulse flex flex-col gap-2">
+      <div className="h-3 rounded w-24" style={{ background: '#E2E8F0' }} />
+      <div className="h-9 rounded w-20" style={{ background: '#E2E8F0' }} />
+      <div className="h-2.5 rounded w-32" style={{ background: '#EDF2F7' }} />
+    </div>
+  )
+}
+
+const RECENT_ACTIVITY = [
+  { time: '2 min ago', actor: 'Jane Doe', action: 'Resolved PII flag', resource: 'Record #4821' },
+  { time: '18 min ago', actor: 'Mark Chen', action: 'Exported Clean HCP CSV', resource: '10,412 records' },
+  { time: '1 hr ago', actor: 'Jane Doe', action: 'Uploaded dataset', resource: 'Q2_HCP_List.csv' },
+  { time: '2 hr ago', actor: 'Admin', action: 'Invited team member', resource: 'sarah@acmepharma.com' },
+  { time: 'Yesterday', actor: 'Mark Chen', action: 'Ran segmentation', resource: '6 segments generated' },
+]
+
+type WalkthroughSource = 'api' | 'demo'
+
+interface WalkthroughValidationError {
+  severity: string
+  reason: string
+}
+
+interface WalkthroughSunshine {
+  totalAmountUsd: number | null
+  companies: string[]
+  transactionCount: number | null
+}
+
+interface ProviderWalkthroughRecord {
+  id: string
+  providerName: string
+  npi: string
+  specialty: string
+  anomalyExplanation: string | null
+  anomalyScore: number | null
+  npiStatus: string | null
+  validationError: WalkthroughValidationError | null
+  sunshineFlag: boolean
+  sunshineMetadata: WalkthroughSunshine | null
+  softDeletedDuplicate: boolean
+  duplicateClusterId: string | null
+}
+
+const DEMO_PROVIDER_WALKTHROUGH: ProviderWalkthroughRecord[] = [
+  {
+    id: 'prov-4490',
+    providerName: 'Dr. James Williams',
+    npi: '9988776655',
+    specialty: 'Cardiology',
+    anomalyExplanation: 'Billing volume is 5.0x above the Cardiology average',
+    anomalyScore: 0.91,
+    npiStatus: 'Deactivated',
+    validationError: {
+      severity: 'High',
+      reason: 'NPI status classified as Deactivated by CMS NPI Registry',
+    },
+    sunshineFlag: true,
+    sunshineMetadata: {
+      totalAmountUsd: 18750,
+      companies: ['AstraZeneca'],
+      transactionCount: 3,
+    },
+    softDeletedDuplicate: true,
+    duplicateClusterId: 'dup-003',
+  },
+  {
+    id: 'prov-5512',
+    providerName: 'Dr. Marcus Okonkwo',
+    npi: '5566778899',
+    specialty: 'Neurology',
+    anomalyExplanation: 'Prescribing pattern spans 14 states — geographically implausible',
+    anomalyScore: 0.78,
+    npiStatus: 'Active',
+    validationError: null,
+    sunshineFlag: true,
+    sunshineMetadata: {
+      totalAmountUsd: 3200,
+      companies: ['Johnson & Johnson'],
+      transactionCount: 1,
+    },
+    softDeletedDuplicate: false,
+    duplicateClusterId: null,
+  },
+  {
+    id: 'prov-6630',
+    providerName: 'Dr. Maria Santos',
+    npi: '4455667788',
+    specialty: 'Oncology',
+    anomalyExplanation: 'NPI check digit invalid; record confidence reduced by validation pipeline',
+    anomalyScore: 0.68,
+    npiStatus: 'Unvalidated',
+    validationError: {
+      severity: 'High',
+      reason: 'NPI status classified as Unvalidated because no matching NPI registry record was returned',
+    },
+    sunshineFlag: false,
+    sunshineMetadata: null,
+    softDeletedDuplicate: false,
+    duplicateClusterId: null,
+  },
+]
+
+function safeText(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const cleaned = value.trim()
+  return cleaned.length > 0 ? cleaned : null
+}
+
+function safeNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(item => {
+      if (typeof item === 'string') return item.trim()
+      if (item && typeof item === 'object' && 'payer_name' in item) {
+        return safeText((item as { payer_name?: unknown }).payer_name) ?? ''
+      }
+      return ''
+    })
+    .filter(Boolean)
+}
+
+function normalizeWalkthroughRecord(raw: Record<string, unknown>, index: number): ProviderWalkthroughRecord {
+  const metadata = raw.metadata && typeof raw.metadata === 'object'
+    ? raw.metadata as Record<string, unknown>
+    : {}
+
+  const validationRaw = (
+    raw.validation_error_flag
+    ?? raw.validationError
+    ?? metadata.validation_error_flag
+    ?? metadata.validationError
+  ) as Record<string, unknown> | undefined
+
+  const validationSeverity = safeText(validationRaw?.severity)
+  const validationReason = safeText(validationRaw?.reason)
+
+  const sunshineRaw = (
+    raw.sunshine_metadata
+    ?? raw.sunshineMetadata
+    ?? metadata.sunshine_metadata
+    ?? metadata.sunshineMetadata
+  ) as Record<string, unknown> | undefined
+
+  const sunshineCompanies = [
+    ...toStringArray(sunshineRaw?.companies),
+    ...toStringArray(sunshineRaw?.company_names),
+    ...toStringArray(sunshineRaw?.payer_names),
+    ...toStringArray(sunshineRaw?.top_payers),
+  ]
+
+  const totalAmountUsd =
+    safeNumber(sunshineRaw?.total_amount_usd)
+    ?? safeNumber(sunshineRaw?.total_amount)
+    ?? safeNumber(sunshineRaw?.totalAmount)
+
+  const transactionCount =
+    safeNumber(sunshineRaw?.transaction_count)
+    ?? safeNumber(sunshineRaw?.count)
+    ?? safeNumber(sunshineRaw?.payments_count)
+
+  const providerName =
+    safeText(raw.provider_name)
+    ?? safeText(raw.providerName)
+    ?? safeText(raw.name)
+    ?? `Provider ${index + 1}`
+
+  const anomalyExplanation =
+    safeText(raw.anomaly_explanation)
+    ?? safeText(raw.anomalyExplanation)
+    ?? safeText(metadata.anomaly_explanation)
+
+  const npiStatus =
+    safeText(raw.npi_status)
+    ?? safeText(raw.validation_status)
+    ?? safeText(metadata.npi_status)
+
+  const softDeletedDuplicate = Boolean(
+    raw.soft_deleted
+    ?? raw.is_soft_deleted
+    ?? raw.duplicate_soft_deleted
+    ?? raw.is_duplicate_archived
+    ?? metadata.soft_deleted_duplicate
+  )
+
+  return {
+    id: safeText(raw.record_id) ?? safeText(raw.id) ?? `${providerName}-${index}`,
+    providerName,
+    npi: safeText(raw.npi) ?? 'Unknown',
+    specialty: safeText(raw.specialty) ?? 'Unknown',
+    anomalyExplanation,
+    anomalyScore: safeNumber(raw.anomaly_score) ?? safeNumber(raw.anomalyScore),
+    npiStatus,
+    validationError: validationSeverity || validationReason
+      ? {
+          severity: validationSeverity ?? 'Unknown',
+          reason: validationReason ?? 'No reason provided by pipeline',
+        }
+      : null,
+    sunshineFlag: Boolean(raw.sunshine_act_flag ?? raw.sunshineFlag),
+    sunshineMetadata: (totalAmountUsd !== null || sunshineCompanies.length > 0 || transactionCount !== null)
+      ? {
+          totalAmountUsd,
+          companies: [...new Set(sunshineCompanies)],
+          transactionCount,
+        }
+      : null,
+    softDeletedDuplicate,
+    duplicateClusterId: safeText(raw.duplicate_cluster_id) ?? safeText(metadata.duplicate_cluster_id),
+  }
+}
+
+function extractWalkthroughArray(payload: unknown): Record<string, unknown>[] {
+  if (Array.isArray(payload)) return payload as Record<string, unknown>[]
+  if (!payload || typeof payload !== 'object') return []
+
+  const wrapper = payload as Record<string, unknown>
+  const candidates = [wrapper.records, wrapper.providers, wrapper.data]
+  for (const maybe of candidates) {
+    if (Array.isArray(maybe)) return maybe as Record<string, unknown>[]
+  }
+  return []
+}
+
+function useProviderWalkthrough(companyId: string) {
+  const [records, setRecords] = useState<ProviderWalkthroughRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [source, setSource] = useState<WalkthroughSource>('demo')
+
+  useEffect(() => {
+    let ignore = false
+
+    const fetchWalkthrough = async () => {
+      setLoading(true)
+      setError(null)
+
+      const endpoints = [
+        `http://localhost:8000/api/companies/${encodeURIComponent(companyId)}/provider_walkthrough`,
+        `http://localhost:8000/api/companies/${encodeURIComponent(companyId)}/records`,
+      ]
+
+      for (const endpoint of endpoints) {
+        try {
+          const response = await fetch(endpoint)
+          if (!response.ok) continue
+
+          const payload = await response.json()
+          const normalized = extractWalkthroughArray(payload)
+            .map((entry, index) => normalizeWalkthroughRecord(entry, index))
+            .filter(record => (
+              record.anomalyExplanation
+              || record.validationError
+              || record.sunshineFlag
+              || record.sunshineMetadata
+              || record.softDeletedDuplicate
+            ))
+
+          if (normalized.length > 0) {
+            if (!ignore) {
+              setRecords(normalized)
+              setSource('api')
+              setLoading(false)
+            }
+            return
+          }
+        } catch {
+          // Try the next endpoint.
+        }
+      }
+
+      if (!ignore) {
+        setRecords(DEMO_PROVIDER_WALKTHROUGH)
+        setSource('demo')
+        setError('Record walkthrough API unavailable — showing demo pipeline snapshots')
+        setLoading(false)
+      }
+    }
+
+    fetchWalkthrough()
+    return () => { ignore = true }
+  }, [companyId])
+
+  return { records, loading, error, source }
+}
+
+function formatUsd(value: number | null): string {
+  if (value === null) return 'N/A'
+  return value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
+}
+
+function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { data: stats, loading, error, refresh, lastFetched } = useDashboardStats()
+  const walkthrough = useProviderWalkthrough('acme')
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
+  // If user has been in Data Review this session, blend in the live score
+  const { resolvedOut } = useOutliers()
+  const { resolvedVal }  = useValidation()
+
+  // Derive live flag open counts (blend Firestore + any in-session resolutions)
+  const liveFlags = stats ? {
+    pii:            Math.max(0, stats.unresolved_flags.pii            - 0), // PII not yet in context
+    duplicates:     Math.max(0, stats.unresolved_flags.duplicates),
+    outliers:       Math.max(0, stats.unresolved_flags.outliers       - resolvedOut.size),
+    npi_validation: Math.max(0, stats.unresolved_flags.npi_validation - resolvedVal.size),
+  } : null
+  const liveFlagTotal = liveFlags ? Object.values(liveFlags).reduce((a, b) => a + b, 0) : 0
+  const selectedRecord = walkthrough.records.find(record => record.id === selectedRecordId) ?? walkthrough.records[0] ?? null
+
+  useEffect(() => {
+    if (walkthrough.records.length === 0) {
+      setSelectedRecordId(null)
+      return
+    }
+    const exists = walkthrough.records.some(record => record.id === selectedRecordId)
+    if (!exists) {
+      setSelectedRecordId(walkthrough.records[0].id)
+    }
+  }, [walkthrough.records, selectedRecordId])
+
+  const hasHighSeverityNpiIssue = selectedRecord?.validationError
+    ? selectedRecord.validationError.severity.toLowerCase() === 'high'
+      && /deactivated|unvalidated/.test(`${selectedRecord.npiStatus ?? ''} ${selectedRecord.validationError.reason}`.toLowerCase())
+    : false
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Dashboard"
+        subtitle="Overview of your HCP data platform"
+        actions={
+          <div className="flex items-center gap-3">
+            {lastFetched && (
+              <span className="text-[10px]" style={{ color: C.midText }}>
+                Updated {lastFetched.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                {stats?.source === 'demo_seed' && ' · demo data'}
+              </span>
+            )}
+            <Btn variant="ghost" size="sm" onClick={refresh} icon={loading ? Icon.spinner : undefined}>
+              {loading ? 'Refreshing…' : 'Refresh'}
+            </Btn>
+            <Btn variant="primary" onClick={() => onNavigate('upload')} icon={Icon.upload}>Upload Data</Btn>
+          </div>
+        }
+      />
+
+      <ExecutiveMetricCards companyId="acme" />
+
+      <div className="grid grid-cols-3 gap-6 mb-8">
+        {/* Quality trend */}
+        <Card className="col-span-2">
+          <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Quality — Last 5 Uploads</h3>
+          <div className="flex items-end gap-3 h-32">
+            {[
+              { label: 'Dec 10', score: 58 }, { label: 'Jan 4', score: 72 }, { label: 'Feb 17', score: 69 },
+              { label: 'Mar 8', score: 80 }, { label: 'Today', score: 84 },
+            ].map((b, i) => (
+              <div key={b.label} className="flex flex-col items-center gap-1 flex-1">
+                <span className="text-[10px] font-bold" style={{ color: i === 4 ? C.success : C.corpBlue }}>{b.score}%</span>
+                <div className="w-full rounded-t-[4px] transition-all" style={{
+                  height: `${b.score}%`,
+                  background: i === 4 ? C.success : C.corpBlue,
+                  opacity: i === 4 ? 1 : 0.7,
+                }} />
+                <span className="text-[9px]" style={{ color: C.midText }}>{b.label}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        {/* Specialty distribution */}
+        <Card>
+          <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Specialty Distribution</h3>
+          <div className="flex flex-col gap-2.5">
+            {[
+              { name: 'Cardiology', pct: 28, color: C.navy },
+              { name: 'Oncology', pct: 22, color: C.corpBlue },
+              { name: 'Neurology', pct: 17, color: C.teal },
+              { name: 'Orthopedics', pct: 14, color: '#5C85C4' },
+              { name: 'Other', pct: 19, color: '#CBD5E0' },
+            ].map(s => (
+              <div key={s.name} className="flex items-center gap-2">
+                <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: s.color }} />
+                <span className="flex-1 text-[11px]" style={{ color: C.darkText }}>{s.name}</span>
+                <span className="text-[11px] font-semibold" style={{ color: C.midText }}>{s.pct}%</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      {/* Data quality score */}
+      <Card className="mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Current Upload Quality</h3>
+          <Btn variant="secondary" size="sm" onClick={() => onNavigate('data-review')}>Resolve Flags</Btn>
+        </div>
+        {loading ? (
+          <div className="animate-pulse h-4 rounded w-full" style={{ background: '#E2E8F0' }} />
+        ) : (
+          <ProgressBar value={stats?.health_score ?? 84} color={(stats?.health_score ?? 84) >= 80 ? 'success' : 'warning'} label="Overall Quality Score" />
+        )}
+      </Card>
+
+      <Card className="mb-6">
+        <div className="flex items-start justify-between mb-4 gap-4">
+          <div>
+            <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Flagged Provider Walkthrough</h3>
+            <p className="text-[12px] mt-1" style={{ color: C.midText }}>
+              Click a provider to inspect pipeline outputs: anomaly explanation, NPI validation status, Sunshine Act metadata, and duplicate soft-delete state.
+            </p>
+          </div>
+          <Badge tier={1} color={walkthrough.source === 'api' ? 'success' : 'warning'}>
+            {walkthrough.source === 'api' ? 'Live pipeline data' : 'Demo pipeline snapshot'}
+          </Badge>
+        </div>
+
+        {walkthrough.error && (
+          <div className="mb-4 p-3 rounded-[7px] border" style={{ borderColor: '#FBD38D', background: '#FFFAF0' }}>
+            <p className="text-[12px]" style={{ color: '#975A16' }}>{walkthrough.error}</p>
+          </div>
+        )}
+
+        {walkthrough.loading ? (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="animate-pulse h-56 rounded-[8px]" style={{ background: '#EDF2F7' }} />
+            <div className="animate-pulse h-56 rounded-[8px]" style={{ background: '#EDF2F7' }} />
+          </div>
+        ) : walkthrough.records.length === 0 ? (
+          <EmptyState title="No flagged providers returned" subtitle="Upload and process records to view provider-level walkthrough details." />
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="border rounded-[8px] overflow-hidden" style={{ borderColor: C.border }}>
+              <div className="px-3 py-2 text-[10px] font-bold uppercase tracking-widest" style={{ background: C.lightTint, color: C.navy }}>
+                Providers requiring review
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {walkthrough.records.map(record => {
+                  const isActive = selectedRecord?.id === record.id
+                  return (
+                    <button
+                      key={record.id}
+                      onClick={() => setSelectedRecordId(record.id)}
+                      className="w-full text-left px-3 py-3 border-b transition-colors"
+                      style={{
+                        borderColor: '#EDF2F7',
+                        background: isActive ? '#EBF4FA' : '#FFFFFF',
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-2 mb-1">
+                        <span className="text-[12px] font-bold" style={{ color: C.darkText }}>{record.providerName}</span>
+                        {record.softDeletedDuplicate && <Badge tier={1} color="danger">Soft-deleted duplicate</Badge>}
+                      </div>
+                      <p className="text-[11px] mono mb-1" style={{ color: C.midText }}>NPI: {record.npi}</p>
+                      <p className="text-[11px]" style={{ color: C.midText }}>{record.specialty}</p>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                        {record.anomalyExplanation && <Badge tier={1} color="warning">Anomaly</Badge>}
+                        {record.validationError && <Badge tier={1} color={record.validationError.severity.toLowerCase() === 'high' ? 'danger' : 'warning'}>NPI validation</Badge>}
+                        {(record.sunshineFlag || record.sunshineMetadata) && <Badge tier={1} color="info">Sunshine Act</Badge>}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            {selectedRecord && (
+              <div className="border rounded-[8px] p-4" style={{ borderColor: C.border }}>
+                <div className="flex items-start justify-between gap-2 mb-3">
+                  <div>
+                    <h4 className="text-[16px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>{selectedRecord.providerName}</h4>
+                    <p className="text-[11px] mono" style={{ color: C.midText }}>NPI: {selectedRecord.npi}</p>
+                  </div>
+                  {selectedRecord.anomalyScore !== null && (
+                    <Badge tier={2} color={selectedRecord.anomalyScore >= 0.85 ? 'danger' : 'warning'}>
+                      Score {selectedRecord.anomalyScore.toFixed(2)}
+                    </Badge>
+                  )}
+                </div>
+
+                <div className="mb-4 p-3 rounded-[7px]" style={{ background: '#F8FAFC', border: '1px solid #E2E8F0' }}>
+                  <p className="text-[10px] font-bold uppercase tracking-widest mb-1" style={{ color: C.midText }}>Plain-text anomaly explanation</p>
+                  <p className="text-[12px] leading-relaxed whitespace-pre-wrap" style={{ color: C.darkText }}>
+                    {selectedRecord.anomalyExplanation ?? 'No anomaly explanation returned for this record.'}
+                  </p>
+                </div>
+
+                {selectedRecord.validationError && (
+                  <div
+                    className="mb-4 p-3 rounded-[7px] border"
+                    style={{
+                      background: hasHighSeverityNpiIssue ? '#FEE2E2' : '#FFFBEB',
+                      borderColor: hasHighSeverityNpiIssue ? '#FCA5A5' : '#FBD38D',
+                    }}
+                  >
+                    <div className="flex items-start gap-2">
+                      <span style={{ color: hasHighSeverityNpiIssue ? C.danger : C.warning }}>{Icon.alertTriangle}</span>
+                      <div>
+                        <p className="text-[12px] font-bold" style={{ color: hasHighSeverityNpiIssue ? '#991B1B' : '#92400E' }}>
+                          {hasHighSeverityNpiIssue
+                            ? 'High-severity NPI validation error'
+                            : `${selectedRecord.validationError.severity} NPI validation warning`}
+                        </p>
+                        <p className="text-[12px]" style={{ color: hasHighSeverityNpiIssue ? '#991B1B' : '#744210' }}>
+                          {selectedRecord.validationError.reason}
+                        </p>
+                        {selectedRecord.npiStatus && (
+                          <p className="text-[11px] mt-1" style={{ color: hasHighSeverityNpiIssue ? '#7F1D1D' : '#975A16' }}>
+                            Registry status: {selectedRecord.npiStatus}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="mb-4 p-3 rounded-[7px]" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
+                  <p className="text-[10px] font-bold uppercase tracking-widest mb-1" style={{ color: '#1E40AF' }}>Sunshine Act metadata</p>
+                  {(selectedRecord.sunshineFlag || selectedRecord.sunshineMetadata) ? (
+                    <>
+                      <p className="text-[12px]" style={{ color: '#1E3A8A' }}>
+                        Total reported value: <span className="font-bold">{formatUsd(selectedRecord.sunshineMetadata?.totalAmountUsd ?? null)}</span>
+                      </p>
+                      <p className="text-[12px] mt-1" style={{ color: '#1E3A8A' }}>
+                        Pharmaceutical companies: {(selectedRecord.sunshineMetadata?.companies.length ?? 0) > 0
+                          ? selectedRecord.sunshineMetadata?.companies.join(', ')
+                          : 'None returned'}
+                      </p>
+                      {selectedRecord.sunshineMetadata?.transactionCount !== null && selectedRecord.sunshineMetadata?.transactionCount !== undefined && (
+                        <p className="text-[11px] mt-1" style={{ color: '#1D4ED8' }}>
+                          Transactions: {selectedRecord.sunshineMetadata.transactionCount}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-[12px]" style={{ color: '#1E3A8A' }}>
+                      No Sunshine Act threshold breach metadata attached.
+                    </p>
+                  )}
+                </div>
+
+                <div className="p-3 rounded-[7px]" style={{
+                  background: selectedRecord.softDeletedDuplicate ? '#FEE2E2' : '#F0FFF4',
+                  border: `1px solid ${selectedRecord.softDeletedDuplicate ? '#FECACA' : '#9AE6B4'}`,
+                }}>
+                  <p className="text-[10px] font-bold uppercase tracking-widest mb-1" style={{ color: selectedRecord.softDeletedDuplicate ? '#991B1B' : '#1B5E3B' }}>
+                    Duplicate resolution state
+                  </p>
+                  <p className="text-[12px]" style={{ color: selectedRecord.softDeletedDuplicate ? '#991B1B' : '#1B5E3B' }}>
+                    {selectedRecord.softDeletedDuplicate
+                      ? 'This record is soft-deleted as a duplicate and excluded from clean export outputs.'
+                      : 'This record remains active and has not been soft-deleted as a duplicate.'}
+                  </p>
+                  {selectedRecord.duplicateClusterId && (
+                    <p className="text-[11px] mt-1" style={{ color: selectedRecord.softDeletedDuplicate ? '#7F1D1D' : '#276749' }}>
+                      Duplicate cluster: {selectedRecord.duplicateClusterId}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      {/* Activity feed */}
+      <Card>
+        <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Recent Activity</h3>
+        <div className="flex flex-col divide-y divide-[#EDF2F7]">
+          {RECENT_ACTIVITY.map((a, i) => (
+            <div key={i} className="flex items-center gap-4 py-2.5">
+              <div className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-white shrink-0" style={{ background: C.navy }}>
+                {a.actor.split(' ').map(n => n[0]).join('')}
+              </div>
+              <div className="flex-1">
+                <span className="text-[12px] font-semibold" style={{ color: C.darkText }}>{a.actor}</span>
+                <span className="text-[12px]" style={{ color: C.midText }}> · {a.action} · </span>
+                <span className="text-[12px] font-medium" style={{ color: C.corpBlue }}>{a.resource}</span>
+              </div>
+              <span className="text-[11px]" style={{ color: C.midText }}>{a.time}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+// ─── UPLOAD ──────────────────────────────────────────────────────────────────
+
+// Upload states drive a single unified state machine so every error/progress
+// state is an explicit value rather than tangled boolean flags.
+type UploadState =
+  | 'idle'
+  | 'dragging'
+  | 'uploading'
+  | 'processing'   // server-side parse / column detection
+  | 'done'
+  | 'error-type'   // wrong file extension
+  | 'error-size'   // > 50 MB
+  | 'error-parse'  // malformed CSV (row-level error)
+  | 'error-network' // connection dropped mid-upload
+
+// Simulated chunked upload — tracks chunk index and total chunks
+const CHUNK_SIZE_MB = 5
+const MAX_FILE_MB = 50
+
+interface ParseError {
+  row: number
+  col: string
+  detail: string
+}
+
+const MOCK_PARSE_ERRORS: ParseError[] = [
+  { row: 47,  col: 'email_addr', detail: 'Unclosed quote in field value' },
+  { row: 112, col: 'provider_id', detail: 'Non-numeric characters in NPI field' },
+  { row: 203, col: 'phone_num',   detail: 'Field contains 15 characters — exceeds 14-char phone max' },
+]
+
+function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { role } = useRole()
+  const canDeleteDatasets = isAdminRole(role)
+  const deleteDatasetTooltip = 'Only Admin users can delete datasets.'
+  const { setMeta } = useUploadMeta()
+  const [uploadState, setUploadState] = useState<UploadState>('idle')
+  const [fileName,    setFileName]    = useState('')
+  const [fileSize,    setFileSize]    = useState(0)   // bytes
+  const [chunksDone,  setChunksDone]  = useState(0)
+  const [chunksTotal, setChunksTotal] = useState(0)
+  const [retryCount,  setRetryCount]  = useState(0)
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const totalPct = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0
+
+  // ── core upload simulator ──────────────────────────────────────────────────
+  const runUpload = (name: string, sizeMB: number, rowCount = 10412, fileType = 'CSV') => {
+    const total = Math.max(1, Math.ceil(sizeMB / CHUNK_SIZE_MB))
+    setFileName(name)
+    setFileSize(sizeMB)
+    setChunksDone(0)
+    setChunksTotal(total)
+    setUploadState('uploading')
+    setMeta({ fileName: name, fileSize: sizeMB, rowCount, fileType, uploadedAt: new Date().toLocaleString() })
+
+    let done = 0
+    intervalRef.current = setInterval(() => {
+      done += 1
+      setChunksDone(done)
+      if (done >= total) {
+        clearInterval(intervalRef.current!)
+        setUploadState('processing')
+        // simulate server-side column detection (~1.5s)
+        setTimeout(() => onNavigate('column-mapping'), 1600)
+      }
+    }, 300)
+  }
+
+  const cancelUpload = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    clearInterval(intervalRef.current!)
+    setUploadState('idle')
+    setChunksDone(0)
+    setChunksTotal(0)
+  }
+
+  const retryUpload = () => {
+    setRetryCount(r => r + 1)
+    runUpload(fileName, fileSize)
+  }
+
+  // ── file validation ────────────────────────────────────────────────────────
+  const validateAndUpload = (name: string, sizeMB: number) => {
+    if (!name.endsWith('.csv') && !name.endsWith('.xlsx')) {
+      setFileName(name)
+      setUploadState('error-type')
+      return
+    }
+    if (sizeMB > MAX_FILE_MB) {
+      setFileName(name)
+      setFileSize(sizeMB)
+      setUploadState('error-size')
+      return
+    }
+    runUpload(name, sizeMB)
+  }
+
+  // ── demo triggers — click zone picks one of several scenarios ─────────────
+  const triggerNormal  = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; runUpload('Q2_HCP_Oncology.csv', 12) }
+  const triggerBadType  = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; setFileName('BadFormat_HCP_List.pdf'); setUploadState('error-type') }
+  const triggerTooLarge = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; setFileName('Massive_NPI_Export_2026.csv'); setFileSize(67); setUploadState('error-size') }
+  const triggerParse    = () => {
+    if (uploadState === 'uploading' || uploadState === 'processing') return
+    runUpload('Corrupted_HCP_March.csv', 8)
+    setTimeout(() => { clearInterval(intervalRef.current!); setUploadState('error-parse') }, 8 * 300 + 200)
+  }
+
+  // Hidden file input — opened when user clicks the drop zone
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  const handleZoneClick = () => {
+    if (uploadState === 'uploading' || uploadState === 'processing') return
+    fileInputRef.current?.click()
+  }
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const sizeMB = file.size / (1024 * 1024)
+    const ext = file.name.split('.').pop()?.toUpperCase() || 'CSV'
+    if (!file.name.endsWith('.csv') && !file.name.endsWith('.xlsx')) {
+      setFileName(file.name); setUploadState('error-type'); e.currentTarget.value = ''; return
+    }
+    if (sizeMB > MAX_FILE_MB) {
+      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); e.currentTarget.value = ''; return
+    }
+    runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
+    e.currentTarget.value = ''
+  }
+
+  // Immediate drag-over validation — checks type and size while the file
+  // is still hovering so the error banner appears before the user drops.
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    if (uploadState === 'uploading' || uploadState === 'processing') return
+    const dt = e.dataTransfer
+    // DataTransferItem gives us filename+size during dragover in most browsers
+    let name = ''
+    let sizeMB = 0
+    try {
+      if (dt.items && dt.items.length > 0) {
+        const item = dt.items[0]
+        const f = item.kind === 'file' ? (item as unknown as { getAsFile(): File | null }).getAsFile?.() : null
+        if (f) { name = f.name; sizeMB = f.size / (1024 * 1024) }
+      }
+      if (!name && dt.files && dt.files.length > 0) {
+        name = dt.files[0].name
+        sizeMB = dt.files[0].size / (1024 * 1024)
+      }
+    } catch { /* browser may restrict file access during dragover */ }
+
+    if (name) {
+      const lname = name.toLowerCase()
+      if (!lname.endsWith('.csv') && !lname.endsWith('.xlsx')) {
+        setFileName(name)
+        setUploadState('error-type')
+        return
+      }
+      if (sizeMB > MAX_FILE_MB) {
+        setFileName(name)
+        setFileSize(sizeMB)
+        setUploadState('error-size')
+        return
+      }
+    }
+    setUploadState('dragging')
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    const file = e.dataTransfer.files[0]
+    if (!file) { setUploadState('idle'); return }
+    const sizeMB = file.size / (1024 * 1024)
+    const ext = file.name.split('.').pop()?.toUpperCase() || 'CSV'
+    if (!file.name.toLowerCase().endsWith('.csv') && !file.name.toLowerCase().endsWith('.xlsx')) {
+      setFileName(file.name); setUploadState('error-type'); return
+    }
+    if (sizeMB > MAX_FILE_MB) {
+      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); return
+    }
+    runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
+  }
+
+  // ── demo: trigger network error manually ──────────────────────────────────
+  const triggerNetworkError = () => {
+    clearInterval(intervalRef.current!)
+    setUploadState('error-network')
+  }
+
+  const UPLOADS = [
+    { name: 'Q1_HCP_Cardiology.csv',       size: '3.2 MB',  date: 'Mar 8, 2026',  records: 4217, quality: 84, status: 'complete' },
+    { name: 'National_NPI_Jan2026.xlsx',    size: '8.7 MB',  date: 'Jan 4, 2026',  records: 6195, quality: 72, status: 'complete' },
+    { name: 'Legacy_Reps_Dec2025.csv',      size: '1.1 MB',  date: 'Dec 10, 2025', records: 948,  quality: 58, status: 'complete' },
+  ]
+
+  // ── chunk label helper ─────────────────────────────────────────────────────
+  const chunkLabel = () => {
+    if (chunksTotal <= 1) return null
+    return `Chunk ${chunksDone} of ${chunksTotal} · ${CHUNK_SIZE_MB} MB each`
+  }
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Upload Data"
+        subtitle="Import HCP datasets for cleaning and analysis"
+        actions={
+          <span className="text-[11px] px-3 py-1 rounded-[6px]" style={{ background: C.lightTint, color: C.navy }}>
+            Max file size: 50 MB · CSV or XLSX
+          </span>
+        }
+      />
+
+      {/* ── DEMO SCENARIO BUTTONS ─────────────────────────────────────────── */}
+      <div className="mb-5 p-4 rounded-[8px] border flex flex-wrap items-center gap-3" style={{ background: '#F0F4FF', borderColor: C.corpBlue }}>
+        <span className="text-[11px] font-bold" style={{ color: C.navy }}>Test scenarios:</span>
+        <button onClick={triggerNormal}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.success,  color: 'white', borderColor: C.success  }}>✓ Normal upload</button>
+        <button onClick={triggerBadType}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.danger,   color: 'white', borderColor: C.danger   }}>✕ Wrong file type (.pdf)</button>
+        <button onClick={triggerTooLarge} className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.danger,   color: 'white', borderColor: C.danger   }}>✕ File too large (67 MB)</button>
+        <button onClick={triggerParse}    className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.warning,  color: 'white', borderColor: C.warning  }}>⚠ Parse error (corrupt CSV)</button>
+        <button onClick={triggerNetworkError} className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: '#6B7280', color: 'white', borderColor: '#6B7280'  }}>⚡ Network drop</button>
+      </div>
+
+      {/* ── DROP ZONE ──────────────────────────────────────────────────────── */}
+      <Card className="mb-6">
+        <div
+          className={`border-2 border-dashed rounded-[6px] transition-all cursor-pointer select-none`}
+          style={{
+            borderColor: uploadState === 'dragging' ? C.corpBlue
+              : (uploadState === 'error-type' || uploadState === 'error-size' || uploadState === 'error-parse' || uploadState === 'error-network') ? C.danger
+              : uploadState === 'done' ? C.success
+              : C.border,
+            background: uploadState === 'dragging' ? 'rgba(46,134,171,0.04)'
+              : (uploadState === 'error-type' || uploadState === 'error-size') ? 'rgba(192,57,43,0.03)'
+              : 'transparent',
+            padding: '48px 32px',
+          }}
+          onDragOver={handleDragOver}
+          onDragLeave={() => { if (uploadState === 'dragging') setUploadState('idle') }}
+          onDrop={handleDrop}
+          onClick={handleZoneClick}
+        >
+          {/* Hidden file input — triggered by click on the zone */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
+
+          {/* ── STATE: idle / dragging ───────────────────────────────────── */}
+          {(uploadState === 'idle' || uploadState === 'dragging') && (
+            <div className="text-center">
+              <div className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5 transition-all"
+                style={{ background: uploadState === 'dragging' ? C.corpBlue : C.lightTint, color: uploadState === 'dragging' ? 'white' : C.navy }}>
+                {Icon.upload}
+              </div>
+              <p className="text-[15px] font-semibold mb-1" style={{ color: uploadState === 'dragging' ? C.corpBlue : C.navy }}>
+                {uploadState === 'dragging' ? 'Drop to upload' : 'Drag CSV or XLSX here, or click to browse'}
+              </p>
+              <p className="text-[12px]" style={{ color: C.midText }}>Supports CSV, XLSX · Max 50 MB · Up to 1 M rows</p>
+              {uploadState === 'dragging' && (
+                <Badge tier={1} color="info" className="mt-3">Release to begin upload</Badge>
+              )}
+            </div>
+          )}
+
+          {/* ── STATE: uploading (chunked) ───────────────────────────────── */}
+          {uploadState === 'uploading' && (
+            <div className="max-w-sm mx-auto text-center">
+              <div className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ background: C.lightTint, color: C.corpBlue }}>
+                {Icon.spinner}
+              </div>
+              <p className="text-[14px] font-semibold mb-0.5" style={{ color: C.navy }}>{fileName}</p>
+              <p className="text-[11px] mb-1" style={{ color: C.midText }}>
+                {fileSize > 0 ? `${fileSize.toFixed(1)} MB` : ''}
+                {chunkLabel() && <> · {chunkLabel()}</>}
+              </p>
+              <p className="text-[13px] font-bold mb-3" style={{ color: C.corpBlue }}>{totalPct}% uploaded</p>
+
+              {/* Chunked progress track */}
+              <div className="mb-1">
+                <div className="progress-track" style={{ height: 10 }}>
+                  <div className="progress-fill" style={{ width: `${totalPct}%`, background: C.corpBlue }} />
+                </div>
+              </div>
+
+              {/* Chunk indicators */}
+              {chunksTotal > 1 && (
+                <div className="flex gap-1 mt-2 mb-4 justify-center flex-wrap">
+                  {Array.from({ length: chunksTotal }).map((_, i) => (
+                    <div key={i} className="rounded-[2px] transition-all"
+                      style={{
+                        width: Math.max(8, Math.min(24, 120 / chunksTotal)),
+                        height: 6,
+                        background: i < chunksDone ? C.corpBlue : i === chunksDone ? C.warning : '#E2E8F0',
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+
+              <div className="flex gap-2 justify-center">
+                <button className="text-[12px] font-semibold hover:underline" style={{ color: C.danger }}
+                  onClick={cancelUpload}>
+                  Cancel
+                </button>
+                <span style={{ color: C.border }}>·</span>
+                <button className="text-[12px] hover:underline" style={{ color: C.midText }}
+                  onClick={triggerNetworkError}>
+                  Simulate network drop ↗
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── STATE: processing (server-side parse) ───────────────────── */}
+          {uploadState === 'processing' && (
+            <div className="max-w-sm mx-auto text-center">
+              <div className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ background: '#EBF4FA', color: C.teal }}>
+                {Icon.spinner}
+              </div>
+              <p className="text-[14px] font-semibold mb-1" style={{ color: C.navy }}>Analyzing columns…</p>
+              <p className="text-[12px]" style={{ color: C.midText }}>
+                AI is detecting column types and validating schema. This usually takes a few seconds.
+              </p>
+              <div className="mt-4 flex items-center justify-center gap-6 text-[11px]" style={{ color: C.midText }}>
+                {['Parsing rows', 'Detecting PII fields', 'Mapping columns'].map((step, i) => (
+                  <div key={step} className="flex items-center gap-1">
+                    <span style={{ color: i === 1 ? C.corpBlue : C.success }}>{i === 1 ? Icon.spinner : Icon.checkCircle}</span>
+                    {step}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── STATE: error — wrong file type ──────────────────────────── */}
+          {uploadState === 'error-type' && (
+            <div className="max-w-sm mx-auto text-center">
+              <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ background: '#FEE2E2', color: C.danger }}>
+                {Icon.alertTriangle}
+              </div>
+              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>Unsupported file type</p>
+              <p className="text-[13px] mb-1" style={{ color: C.darkText }}>
+                <span className="mono font-semibold">{fileName}</span>
+              </p>
+              <p className="text-[12px] mb-5" style={{ color: C.midText }}>
+                MedReach AI only accepts <strong>.csv</strong> and <strong>.xlsx</strong> files. PDF, TXT, and other formats cannot be processed.
+              </p>
+              <div className="flex gap-2 justify-center" onClick={e => e.stopPropagation()}>
+                <Btn variant="primary" size="sm" onClick={() => setUploadState('idle')}>
+                  Try a different file
+                </Btn>
+              </div>
+            </div>
+          )}
+
+          {/* ── STATE: error — file too large ───────────────────────────── */}
+          {uploadState === 'error-size' && (
+            <div className="max-w-sm mx-auto text-center">
+              <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ background: '#FEE2E2', color: C.danger }}>
+                {Icon.alertTriangle}
+              </div>
+              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>File exceeds 50 MB limit</p>
+              <p className="text-[13px] mb-1" style={{ color: C.darkText }}>
+                <span className="mono font-semibold">{fileName}</span>
+                <span className="ml-2 text-[11px] font-semibold px-2 py-0.5 rounded-[4px]"
+                  style={{ background: '#FEE2E2', color: C.danger }}>
+                  {fileSize.toFixed(1)} MB
+                </span>
+              </p>
+              <p className="text-[12px] mb-2" style={{ color: C.midText }}>
+                Your file is <strong>{(fileSize - MAX_FILE_MB).toFixed(1)} MB over the limit</strong>. Split the file into chunks under 50 MB and upload each separately, or contact support to request a limit increase.
+              </p>
+              {/* Visual size indicator */}
+              <div className="mt-3 mb-5 px-8">
+                <div className="progress-track" style={{ height: 8 }}>
+                  <div className="progress-fill" style={{ width: '100%', background: C.danger }} />
+                </div>
+                <div className="flex justify-between text-[10px] mt-1" style={{ color: C.midText }}>
+                  <span>0 MB</span>
+                  <span style={{ color: C.danger, fontWeight: 700 }}>Limit: 50 MB</span>
+                  <span style={{ color: C.danger }}>{fileSize.toFixed(1)} MB</span>
+                </div>
+              </div>
+              <div className="flex gap-2 justify-center" onClick={e => e.stopPropagation()}>
+                <Btn variant="primary" size="sm" onClick={() => setUploadState('idle')}>
+                  Upload a different file
+                </Btn>
+              </div>
+            </div>
+          )}
+
+          {/* ── STATE: error — malformed CSV / parse error ───────────────── */}
+          {uploadState === 'error-parse' && (
+            <div className="max-w-lg mx-auto" onClick={e => e.stopPropagation()}>
+              <div className="flex items-start gap-4 mb-5">
+                <div className="w-12 h-12 rounded-full flex items-center justify-center shrink-0"
+                  style={{ background: '#FEE2E2', color: C.danger }}>
+                  {Icon.alertTriangle}
+                </div>
+                <div>
+                  <p className="text-[15px] font-bold mb-0.5" style={{ color: C.danger }}>Parse error — file could not be read</p>
+                  <p className="text-[12px]" style={{ color: C.midText }}>
+                    <span className="mono font-semibold">{fileName}</span> — uploaded successfully but {MOCK_PARSE_ERRORS.length} row-level errors were found during schema detection. The file cannot proceed to column mapping until these are resolved.
+                  </p>
+                </div>
+              </div>
+
+              {/* Error table */}
+              <div className="rounded-[6px] border border-[#FECACA] overflow-hidden mb-4">
+                <table className="w-full text-[11px] border-collapse">
+                  <thead>
+                    <tr style={{ background: C.danger }}>
+                      <th className="text-left px-3 py-2 text-white font-semibold">Row</th>
+                      <th className="text-left px-3 py-2 text-white font-semibold">Column</th>
+                      <th className="text-left px-3 py-2 text-white font-semibold">Error detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {MOCK_PARSE_ERRORS.map((err, i) => (
+                      <tr key={i} style={{ background: i % 2 === 0 ? '#FFF5F5' : 'white' }}>
+                        <td className="px-3 py-2 mono font-bold" style={{ color: C.danger }}>Row {err.row}</td>
+                        <td className="px-3 py-2 mono" style={{ color: C.darkText }}>{err.col}</td>
+                        <td className="px-3 py-2" style={{ color: C.darkText }}>{err.detail}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex gap-2">
+                <Btn variant="danger" size="sm" icon={Icon.download}>
+                  Download error log (.txt)
+                </Btn>
+                <Btn variant="ghost" size="sm" onClick={() => setUploadState('idle')}>
+                  Upload corrected file
+                </Btn>
+              </div>
+            </div>
+          )}
+
+          {/* ── STATE: error — network failure mid-upload ────────────────── */}
+          {uploadState === 'error-network' && (
+            <div className="max-w-sm mx-auto text-center">
+              <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ background: '#FEF3C7', color: C.warning }}>
+                {Icon.alertTriangle}
+              </div>
+              <p className="text-[15px] font-bold mb-1" style={{ color: C.warning }}>Upload interrupted</p>
+              <p className="text-[13px] mb-1" style={{ color: C.darkText }}>
+                <span className="mono font-semibold">{fileName}</span>
+              </p>
+              <p className="text-[12px] mb-2" style={{ color: C.midText }}>
+                Connection was lost at chunk {chunksDone} of {chunksTotal} ({totalPct}% complete). Your progress has been saved. Click Retry to resume from where the upload stopped.
+              </p>
+              {/* Partial progress bar */}
+              <div className="progress-track mb-4 mx-8" style={{ height: 8 }}>
+                <div className="progress-fill" style={{ width: `${totalPct}%`, background: C.warning }} />
+              </div>
+              {retryCount > 0 && (
+                <p className="text-[11px] mb-3" style={{ color: C.midText }}>Retry attempt {retryCount}</p>
+              )}
+              <div className="flex gap-2 justify-center" onClick={e => e.stopPropagation()}>
+                <Btn variant="primary" size="sm" onClick={() => retryUpload()}>
+                  Retry upload
+                </Btn>
+                <Btn variant="ghost" size="sm" onClick={() => setUploadState('idle')}>
+                  Cancel
+                </Btn>
+              </div>
+            </div>
+          )}
+
+        </div>
+
+        {/* File format note below drop zone */}
+        {(uploadState === 'idle' || uploadState === 'dragging') && (
+          <div className="mt-3 flex items-center gap-6 justify-center">
+            {[
+              { fmt: 'CSV', note: 'Comma-separated values' },
+              { fmt: 'XLSX', note: 'Excel workbook' },
+            ].map(f => (
+              <div key={f.fmt} className="flex items-center gap-2 text-[11px]" style={{ color: C.midText }}>
+                <span className="px-1.5 py-0.5 rounded-[3px] font-bold mono" style={{ background: C.lightTint, color: C.navy }}>{f.fmt}</span>
+                {f.note}
+              </div>
+            ))}
+            <div className="flex items-center gap-2 text-[11px]" style={{ color: C.midText }}>
+              <span className="px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.lightTint, color: C.navy }}>50 MB</span>
+              Max file size
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* ── UPLOAD HISTORY ─────────────────────────────────────────────────── */}
+      <Card>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-[15px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Upload History</h3>
+          <span className="text-[11px]" style={{ color: C.midText }}>{UPLOADS.length} uploads · last 90 days</span>
+        </div>
+        <table className="data-table w-full border-collapse">
+          <thead>
+            <tr>
+              <th>File name</th><th>Size</th><th>Date</th><th>Records</th><th>Quality</th><th>Status</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {UPLOADS.map(u => (
+              <tr key={u.name}>
+                <td>
+                  <div className="flex items-center gap-2">
+                    <span style={{ color: C.teal }}>{Icon.fileCheck}</span>
+                    <span className="font-medium" style={{ color: C.corpBlue }}>{u.name}</span>
+                  </div>
+                </td>
+                <td>{u.size}</td>
+                <td>{u.date}</td>
+                <td className="mono">{u.records.toLocaleString()}</td>
+                <td>
+                  <div className="flex items-center gap-2">
+                    <div className="progress-track" style={{ minWidth: 60 }}>
+                      <div className="progress-fill" style={{ width: `${u.quality}%`, background: u.quality >= 80 ? C.success : u.quality >= 65 ? C.warning : C.danger }} />
+                    </div>
+                    <span className="text-[11px] font-semibold" style={{ color: u.quality >= 80 ? C.success : u.quality >= 65 ? C.warning : C.danger }}>{u.quality}%</span>
+                  </div>
+                </td>
+                <td><Badge tier={1} color={u.status === 'complete' ? 'success' : 'warning'}>{u.status === 'complete' ? 'Complete' : 'Processing'}</Badge></td>
+                <td>
+                  <button className="text-[11px] font-semibold hover:underline mr-3" style={{ color: C.corpBlue }}>View</button>
+                  <span title={canDeleteDatasets ? '' : deleteDatasetTooltip}>
+                    <button
+                      disabled={!canDeleteDatasets}
+                      className={`text-[11px] font-semibold ${canDeleteDatasets ? 'hover:underline' : 'cursor-not-allowed'}`}
+                      style={{ color: canDeleteDatasets ? C.danger : '#A0AEC0' }}
+                    >
+                      Delete
+                    </button>
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  )
+}
+
+// ─── COLUMN MAPPING ────────────────────────────────────────────────────────────
+
+const COLUMN_TYPES = ['NPI', 'First Name', 'Last Name', 'Specialty', 'State', 'Email', 'Phone', 'ZIP Code', 'DEA Number', 'Address', 'City', 'Country', 'Notes', 'Ignore']
+
+// These three fields MUST be mapped before scrubbing is allowed
+const REQUIRED_FIELDS = ['NPI', 'First Name', 'Last Name']
+
+// Each column has an AI-suggested type plus a confidence score (0–1)
+const INITIAL_MAPPINGS: { raw: string; suggested: string; confidence: number; required: boolean }[] = [
+  { raw: 'provider_id',   suggested: 'NPI',        confidence: 0.97, required: true  },
+  { raw: 'first_nm',      suggested: 'First Name',  confidence: 0.95, required: true  },
+  { raw: 'last_nm',       suggested: 'Last Name',   confidence: 0.95, required: true  },
+  { raw: 'specialty_cd',  suggested: 'Specialty',   confidence: 0.88, required: false },
+  { raw: 'state_abbr',    suggested: 'State',       confidence: 0.91, required: false },
+  { raw: 'email_addr',    suggested: 'Email',       confidence: 0.93, required: false },
+  { raw: 'phone_num',     suggested: 'Phone',       confidence: 0.89, required: false },
+  { raw: 'zip',           suggested: 'ZIP Code',    confidence: 0.85, required: false },
+  { raw: 'dea_no',        suggested: 'DEA Number',  confidence: 0.72, required: false },
+  { raw: 'misc_notes',    suggested: 'Ignore',      confidence: 0.61, required: false },
+]
+
+const PREVIEW_DATA = [
+  ['1234567890', 'James',  'Morrison', 'Cardiology', 'FL', 'j.morrison@floridahealth.com', '(813) 555-0147', '33602', 'BX1234567', ''],
+  ['9876543210', 'Sarah',  'Chen',     'Oncology',   'NY', 'schen@nyoncology.org',         '(212) 555-0388', '10001', 'AX9876543', 'High-value target'],
+  ['5544332211', 'Robert', 'Patel',    'Neurology',  'CA', 'rpatel@stanford.edu',           '(650) 555-0219', '94305', '',          ''],
+]
+
+function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { meta } = useUploadMeta()
+  const [mappings, setMappings] = useState<string[]>(INITIAL_MAPPINGS.map(m => m.suggested))
+  const [overridden, setOverridden] = useState<Set<number>>(new Set())
+  const [showConfidence, setShowConfidence] = useState(true)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+
+  const required = REQUIRED_FIELDS
+
+  // A required column is satisfied if its label appears exactly once in mappings
+  const missingRequired = REQUIRED_FIELDS.filter(r => mappings.filter(m => m === r).length === 0)
+  const duplicateMappings = COLUMN_TYPES.filter(t =>
+    t !== 'Ignore' && mappings.filter(m => m === t).length > 1
+  )
+  const canProceed = missingRequired.length === 0 && duplicateMappings.length === 0
+
+  const setMapping = (i: number, val: string) => {
+    const m = [...mappings]
+    m[i] = val
+    setMappings(m)
+    const ov = new Set(overridden)
+    if (val !== INITIAL_MAPPINGS[i].suggested) { ov.add(i) } else { ov.delete(i) }
+    setOverridden(ov)
+  }
+
+  const resetColumn = (i: number) => {
+    setMapping(i, INITIAL_MAPPINGS[i].suggested)
+  }
+
+  const confidenceColor = (c: number) =>
+    c >= 0.90 ? C.success : c >= 0.75 ? C.warning : C.danger
+
+  const confidenceLabel = (c: number) =>
+    c >= 0.90 ? 'High confidence' : c >= 0.75 ? 'Medium confidence' : 'Low confidence'
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Schema Mapping"
+        subtitle="Review AI-suggested column assignments before cleaning begins"
+        actions={
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-2 cursor-pointer text-[12px]" style={{ color: C.midText }}>
+              <input type="checkbox" checked={showConfidence} onChange={e => setShowConfidence(e.target.checked)} />
+              Show AI confidence
+            </label>
+          </div>
+        }
+      />
+
+      {/* AI mapping info banner */}
+      <Banner type="info">
+        <strong>AI pre-mapped {INITIAL_MAPPINGS.filter(m => m.confidence >= 0.80).length} of {INITIAL_MAPPINGS.length} columns</strong> with high confidence.
+        {' '}Columns marked <span style={{ color: C.warning, fontWeight: 700 }}>Low confidence</span> or <Badge tier={1} color="warning" className="mx-1">Override</Badge> require your review before proceeding.
+      </Banner>
+
+      {/* Validation errors */}
+      {missingRequired.length > 0 && (
+        <Banner type="error">
+          <strong>Missing required columns:</strong> {missingRequired.join(', ')} — these must be mapped before cleaning can begin. Every HCP record requires an NPI, First Name, and Last Name.
+        </Banner>
+      )}
+      {duplicateMappings.length > 0 && (
+        <Banner type="warning">
+          <strong>Duplicate mappings detected:</strong> {duplicateMappings.join(', ')} — each column type may only be assigned once.
+        </Banner>
+      )}
+
+      {/* Legend */}
+      <div className="flex items-center gap-5 mb-4">
+        <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Confidence legend:</span>
+        {[
+          { label: '≥ 90% — High', color: C.success },
+          { label: '75–89% — Medium', color: C.warning },
+          { label: '< 75% — Low', color: C.danger },
+        ].map(l => (
+          <div key={l.label} className="flex items-center gap-1.5 text-[11px]" style={{ color: l.color }}>
+            <div className="w-2.5 h-2.5 rounded-full" style={{ background: l.color }} />
+            {l.label}
+          </div>
+        ))}
+        <span className="text-[11px]" style={{ color: C.midText }}>
+          · <strong style={{ color: C.corpBlue }}>{overridden.size}</strong> column{overridden.size !== 1 ? 's' : ''} overridden by user
+        </span>
+      </div>
+
+      {/* Mapping table */}
+      <Card className="mb-5 overflow-x-auto">
+        <table className="w-full border-collapse" style={{ minWidth: 900 }}>
+          <thead>
+            <tr style={{ borderBottom: `2px solid #EDF2F7` }}>
+              <th className="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wider" style={{ color: C.midText, width: 160 }}>Raw column name</th>
+              <th className="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wider" style={{ color: C.midText, width: 200 }}>Map to HCP field</th>
+              {showConfidence && (
+                <th className="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wider" style={{ color: C.midText, width: 180 }}>AI confidence</th>
+              )}
+              <th className="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wider" style={{ color: C.midText }}>Sample values (first 3 rows)</th>
+              <th className="px-3 py-2" style={{ width: 60 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {INITIAL_MAPPINGS.map((col, i) => {
+              const isOverridden = overridden.has(i)
+              const isMissing = required.includes(col.suggested) && !mappings.includes(col.suggested) && col.required
+              const isDuplicate = COLUMN_TYPES.filter(t => t !== 'Ignore').includes(mappings[i]) && mappings.filter(m => m === mappings[i]).length > 1
+              const rowBg = isMissing ? '#FFF5F5' : isDuplicate ? '#FFFBEB' : i % 2 === 0 ? 'white' : '#FAFBFC'
+
+              return (
+                <tr key={col.raw} style={{ background: rowBg, borderBottom: '0.5px solid #EDF2F7' }}>
+                  {/* Raw column name */}
+                  <td className="px-3 py-3">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="mono text-[12px] font-semibold" style={{ color: C.navy }}>{col.raw}</span>
+                      {col.required && <Badge tier={1} color="warning" className="w-fit">Required</Badge>}
+                    </div>
+                  </td>
+
+                  {/* Dropdown */}
+                  <td className="px-3 py-3">
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={mappings[i]}
+                        onChange={e => setMapping(i, e.target.value)}
+                        className="border rounded-[6px] text-[12px] px-2 py-1.5 w-full transition-all"
+                        style={{
+                          borderColor: isMissing ? C.danger : isDuplicate ? C.warning : isOverridden ? C.corpBlue : '#CBD5E0',
+                          color: C.darkText,
+                          boxShadow: isOverridden ? `0 0 0 2px rgba(46,134,171,0.15)` : 'none',
+                          height: 34,
+                        }}
+                      >
+                        {COLUMN_TYPES.map(t => <option key={t}>{t}</option>)}
+                      </select>
+                      {isOverridden && (
+                        <Badge tier={1} color="info">Override</Badge>
+                      )}
+                    </div>
+                    {isDuplicate && (
+                      <p className="text-[10px] mt-1" style={{ color: C.warning }}>⚠ Duplicate — already mapped above</p>
+                    )}
+                  </td>
+
+                  {/* AI Confidence */}
+                  {showConfidence && (
+                    <td className="px-3 py-3">
+                      {isOverridden ? (
+                        <span className="text-[11px]" style={{ color: C.corpBlue }}>User override</span>
+                      ) : (
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-2">
+                            <div className="progress-track flex-1" style={{ minWidth: 80 }}>
+                              <div className="progress-fill" style={{
+                                width: `${col.confidence * 100}%`,
+                                background: confidenceColor(col.confidence),
+                              }} />
+                            </div>
+                            <span className="text-[11px] font-bold mono" style={{ color: confidenceColor(col.confidence) }}>
+                              {Math.round(col.confidence * 100)}%
+                            </span>
+                          </div>
+                          <span className="text-[10px]" style={{ color: confidenceColor(col.confidence) }}>
+                            {confidenceLabel(col.confidence)}
+                          </span>
+                        </div>
+                      )}
+                    </td>
+                  )}
+
+                  {/* Sample values */}
+                  <td className="px-3 py-3">
+                    <div className="flex gap-2 flex-wrap">
+                      {PREVIEW_DATA.map((row, ri) => (
+                        row[i] ? (
+                          <span key={ri} className="mono text-[10px] px-1.5 py-0.5 rounded-[3px]"
+                            style={{ background: C.lightTint, color: C.darkText, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block' }}>
+                            {row[i]}
+                          </span>
+                        ) : (
+                          <span key={ri} className="text-[10px] italic" style={{ color: C.border }}>empty</span>
+                        )
+                      ))}
+                    </div>
+                  </td>
+
+                  {/* Reset button */}
+                  <td className="px-3 py-3 text-center">
+                    {isOverridden && (
+                      <button title="Reset to AI suggestion" className="text-[11px] hover:underline" style={{ color: C.midText }}
+                        onClick={() => resetColumn(i)}>
+                        Reset
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </Card>
+
+      {/* Data preview — scrollable, with inline column type dropdowns in header */}
+      <Card className="mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-[13px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>
+            Data Preview — First {PREVIEW_DATA.length} rows of 10,412
+          </h3>
+          <span className="text-[11px]" style={{ color: C.midText }}>← scroll horizontally to review all columns →</span>
+        </div>
+        <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 340, border: '1px solid #EDF2F7', borderRadius: 6 }}>
+          <table className="border-collapse" style={{ minWidth: 1000, width: '100%' }}>
+            <thead style={{ position: 'sticky', top: 0, zIndex: 5 }}>
+              {/* Row 1: column type dropdown (editable) */}
+              <tr style={{ background: C.navy }}>
+                {mappings.map((m, i) => (
+                  <th key={i} className="px-2 py-1.5" style={{ minWidth: 120 }}>
+                    <select
+                      value={m}
+                      onChange={e => setMapping(i, e.target.value)}
+                      title={`Change mapping for ${INITIAL_MAPPINGS[i].raw}`}
+                      className="w-full rounded-[4px] text-[10px] px-1 py-0.5 font-semibold"
+                      style={{
+                        background: m === 'Ignore' ? '#4A5568' : missingRequired.includes(m) ? '#7F1D1D' :
+                          REQUIRED_FIELDS.includes(m) ? C.teal : '#2D4A7A',
+                        color: 'white',
+                        border: 'none',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {COLUMN_TYPES.map(t => <option key={t} style={{ background: '#1B3A6B', color: 'white' }}>{t}</option>)}
+                    </select>
+                  </th>
+                ))}
+              </tr>
+              {/* Row 2: raw column names */}
+              <tr style={{ background: '#2D4A7A' }}>
+                {INITIAL_MAPPINGS.map((col, i) => (
+                  <th key={i} className="px-2 py-1 text-left" style={{ minWidth: 120 }}>
+                    <span className="mono text-[9px]" style={{ color: 'rgba(255,255,255,0.6)' }}>{col.raw}</span>
+                    {col.required && <span className="ml-1 text-[8px] font-bold" style={{ color: C.warning }}>*</span>}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {PREVIEW_DATA.map((row, ri) => (
+                <tr key={ri} style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC', borderBottom: '1px solid #EDF2F7' }}>
+                  {row.map((cell, ci) => (
+                    <td key={ci} className="px-2 py-2 text-[11px] mono"
+                      style={{
+                        color: mappings[ci] === 'Ignore' ? '#A0AEC0' : C.darkText,
+                        fontStyle: mappings[ci] === 'Ignore' ? 'italic' : 'normal',
+                        background: mappings[ci] === 'Ignore' ? '#F7FAFC' : undefined,
+                        maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>
+                      {cell || <span style={{ color: '#CBD5E0' }}>—</span>}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {/* Gating status strip below the preview */}
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          {meta && (
+            <div className="flex items-center gap-2 mr-3 px-3 py-1 rounded-[6px] text-[11px]" style={{ background: C.lightTint, color: C.navy }}>
+              <span style={{ color: C.teal }}>{Icon.fileCheck}</span>
+              <span className="font-semibold mono">{meta.fileName}</span>
+              <span style={{ color: C.midText }}>·</span>
+              <span style={{ color: C.midText }}>~{meta.rowCount.toLocaleString()} rows</span>
+              <span style={{ color: C.midText }}>·</span>
+              <span className="font-bold" style={{ color: C.corpBlue }}>{meta.fileType}</span>
+            </div>
+          )}
+          {REQUIRED_FIELDS.map(rf => {
+            const mapped = mappings.includes(rf)
+            return (
+              <div key={rf} className="flex items-center gap-1.5 text-[11px]">
+                <span style={{ color: mapped ? C.success : C.danger }}>{mapped ? '✓' : '✕'}</span>
+                <span style={{ color: mapped ? C.success : C.danger, fontWeight: 600 }}>{rf}</span>
+                <span style={{ color: C.midText }}>required</span>
+              </div>
+            )
+          })}
+          {missingRequired.length === 0 && duplicateMappings.length === 0 && (
+            <span className="ml-auto text-[11px] font-bold" style={{ color: C.success }}>✓ All required fields mapped — ready to scrub</span>
+          )}
+          {(missingRequired.length > 0 || duplicateMappings.length > 0) && (
+            <span className="ml-auto text-[11px] font-bold" style={{ color: C.danger }}>Begin Scrubbing is disabled until all required fields are mapped</span>
+          )}
+        </div>
+      </Card>
+
+      {/* Action bar */}
+      <div className="flex items-center gap-3">
+        <Btn
+          variant={canProceed ? 'primary' : 'disabled'}
+          disabled={!canProceed}
+          onClick={() => setConfirmOpen(true)}
+          icon={canProceed ? Icon.checkCircle : undefined}
+        >
+          Begin Scrubbing
+        </Btn>
+        <Btn variant="ghost" onClick={() => onNavigate('upload')}>← Back to Upload</Btn>
+        {!canProceed && (
+          <span className="text-[12px]" style={{ color: C.danger }}>
+            {missingRequired.length > 0
+              ? `Map required: ${missingRequired.join(', ')}`
+              : `Fix duplicate mappings: ${duplicateMappings.join(', ')}`}
+          </span>
+        )}
+        {canProceed && overridden.size > 0 && (
+          <span className="text-[12px]" style={{ color: C.midText }}>
+            {overridden.size} AI suggestion{overridden.size !== 1 ? 's' : ''} overridden — your choices will be saved to this upload.
+          </span>
+        )}
+      </div>
+
+      {/* Confirm modal */}
+      {confirmOpen && (
+        <Modal title="Confirm mapping &amp; begin scrubbing" onClose={() => setConfirmOpen(false)} width={520}>
+          <p className="text-[13px] mb-4" style={{ color: C.darkText }}>
+            You are about to begin the data cleaning pipeline on <strong>10,412 records</strong> using the column assignments below.
+            {overridden.size > 0 && (
+              <> You have overridden <strong>{overridden.size} AI suggestion{overridden.size !== 1 ? 's' : ''}</strong>.</>
+            )}
+          </p>
+          <div className="rounded-[6px] border border-[#EDF2F7] overflow-hidden mb-5">
+            <table className="w-full text-[12px] border-collapse">
+              <thead>
+                <tr style={{ background: C.navy }}>
+                  <th className="text-left px-3 py-2 text-white font-semibold">Raw column</th>
+                  <th className="text-left px-3 py-2 text-white font-semibold">Mapped as</th>
+                  <th className="px-3 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {INITIAL_MAPPINGS.map((col, i) => (
+                  <tr key={col.raw} style={{ background: i % 2 === 0 ? 'white' : C.lightTint, borderBottom: '0.5px solid #EDF2F7' }}>
+                    <td className="px-3 py-2 mono" style={{ color: C.midText }}>{col.raw}</td>
+                    <td className="px-3 py-2 font-semibold" style={{ color: C.navy }}>{mappings[i]}</td>
+                    <td className="px-3 py-2">
+                      {overridden.has(i) && <Badge tier={1} color="info">Override</Badge>}
+                      {col.required && !overridden.has(i) && <Badge tier={1} color="success">Required ✓</Badge>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex gap-3">
+            <Btn variant="primary" onClick={() => onNavigate('data-review')}>Confirm & Begin Cleaning</Btn>
+            <Btn variant="ghost" onClick={() => setConfirmOpen(false)}>Go back</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+// ─── DATA REVIEW ──────────────────────────────────────────────────────────────
+
+// ── Data Review data ─────────────────────────────────────────────────────────
+
+const PII_FLAGS = [
+  { id: 0, record: 'James Morrison #4821',  field: 'SSN',           type: 'Social Security Number', severity: 'High',   nullPct: 2  },
+  { id: 1, record: 'Sarah Chen #2204',      field: 'DOB',           type: 'Date of Birth',           severity: 'Medium', nullPct: 8  },
+  { id: 2, record: 'Robert Patel #8812',    field: 'Personal Email',type: 'Personal Identifier',     severity: 'Low',    nullPct: 14 },
+  { id: 3, record: 'Linda Torres #3391',    field: 'Home Address',  type: 'Physical Address',        severity: 'High',   nullPct: 5  },
+  { id: 4, record: 'Michael Brennan #7741', field: 'SSN',           type: 'Social Security Number',  severity: 'High',   nullPct: 2  },
+  { id: 5, record: 'Yuki Tanaka #0293',     field: 'Credit Card',   type: 'Financial Identifier',    severity: 'High',   nullPct: 0  },
+]
+
+interface DupRecord {
+  npi: string; firstName: string; lastName: string; spec: string
+  state: string; email: string; phone: string; address: string; source: string
+}
+interface DupCluster {
+  id: string; similarity: number
+  rec1: DupRecord; rec2: DupRecord
+}
+const DUPLICATES: DupCluster[] = [
+  {
+    id: 'A', similarity: 97,
+    rec1: { npi: '1234567890', firstName: 'James',  lastName: 'Morrison',   spec: 'Cardiology', state: 'FL', email: 'j.morrison@floridahealth.com',  phone: '(305) 882-4411', address: '101 Medical Dr, Miami FL',              source: 'Q1_Upload' },
+    rec2: { npi: '1234567890', firstName: 'Jim',    lastName: 'Morrison',   spec: 'Cardiology', state: 'FL', email: 'jmorrison@baptisthealth.net',   phone: '(305) 882-4411', address: '101 Medical Dr, Miami, FL 33101',       source: 'Q2_Upload' },
+  },
+  {
+    id: 'B', similarity: 91,
+    rec1: { npi: '5544332211', firstName: 'Robert', lastName: 'Patel',      spec: 'Neurology',  state: 'CA', email: 'rpatel@ucsf.edu',               phone: '(415) 476-0001', address: '505 Parnassus Ave, San Francisco CA',   source: 'Q1_Upload' },
+    rec2: { npi: '5544332211', firstName: 'Rob',    lastName: 'Patel MD',   spec: 'Neurology',  state: 'CA', email: 'robert.patel@ucsf.edu',         phone: '(415) 476-0001', address: '505 Parnassus Ave, San Francisco CA 94143', source: 'Q1_Upload' },
+  },
+  {
+    id: 'C', similarity: 84,
+    rec1: { npi: '9988221100', firstName: 'Angela', lastName: 'Ruiz',       spec: 'Oncology',   state: 'TX', email: 'aruiz@mdanderson.org',          phone: '(713) 792-2121', address: '1515 Holcombe Blvd, Houston TX',        source: 'Q1_Upload' },
+    rec2: { npi: '9988221100', firstName: 'Angela', lastName: 'M. Ruiz',    spec: 'Oncology',   state: 'TX', email: 'a.m.ruiz@mdanderson.org',       phone: '(713) 792-9999', address: '1515 Holcombe Blvd, Houston TX 77030',  source: 'Q2_Upload' },
+  },
+]
+
+const OUTLIERS = [
+  { id: 0, record: 'Dr. Chen #1192',    specialty: 'Oncology',    reason: 'NPI claims volume 10x above oncology specialty average',              severity: 'High',   anomalyScore: 0.94, nullPct: 3  },
+  { id: 1, record: 'Dr. Williams #4490',specialty: 'Cardiology',  reason: 'Prescribing pattern spans 14 states — geographically implausible',   severity: 'Medium', anomalyScore: 0.78, nullPct: 7  },
+  { id: 2, record: 'Dr. Kim #7723',     specialty: 'Dermatology', reason: 'License expiry date 22 years in the future',                          severity: 'Low',    anomalyScore: 0.61, nullPct: 11 },
+  { id: 3, record: 'Dr. Okonkwo #5512', specialty: 'Neurology',   reason: 'Email domain does not match registered practice location',           severity: 'Medium', anomalyScore: 0.71, nullPct: 0  },
+]
+
+const VALIDATION_ERRORS = [
+  { id: 0, record: 'Thomas Nguyen #5501', npi: '0000000001', specialty: 'Internal Medicine', state: 'CA', issue: 'NPI not found in NPPES registry',                              issueType: 'Not Found',  severity: 'High',   nullPct: 6  },
+  { id: 1, record: 'Carol Davis #3320',   npi: '9988776655', specialty: 'Cardiology',        state: 'NY', issue: 'NPI is inactive since 2019',                                    issueType: 'Inactive',   severity: 'Medium', nullPct: 2  },
+  { id: 2, record: 'Steven Park #8811',   npi: '1122334455', specialty: 'Surgery',           state: 'TX', issue: 'NPI specialty mismatch — registered as GP, uploaded as Surgeon', issueType: 'Mismatch',   severity: 'Medium', nullPct: 9  },
+  { id: 3, record: 'Maria Santos #6630',  npi: '4455667788', specialty: 'Oncology',          state: 'FL', issue: 'NPI check digit invalid',                                       issueType: 'Invalid',    severity: 'High',   nullPct: 4  },
+]
+
+// ── Field-level null completeness summary (shown above each table) ────────────
+const NULL_SUMMARIES: Record<string, { field: string; nullPct: number }[]> = {
+  pii: [
+    { field: 'SSN',            nullPct: 2  },
+    { field: 'Email (personal)',nullPct: 14 },
+    { field: 'Home Address',   nullPct: 5  },
+    { field: 'Date of Birth',  nullPct: 8  },
+  ],
+  outliers: [
+    { field: 'Claims Volume',  nullPct: 3  },
+    { field: 'License Expiry', nullPct: 11 },
+    { field: 'Practice State', nullPct: 7  },
+  ],
+  validation: [
+    { field: 'NPI Number',     nullPct: 6  },
+    { field: 'Specialty Code', nullPct: 9  },
+    { field: 'State',          nullPct: 2  },
+  ],
+}
+
+// ── Shared sortable column header ─────────────────────────────────────────────
+type SortDir = 'asc' | 'desc' | null
+function SortTh({ label, sortKey, current, dir, onSort }: {
+  label: string; sortKey: string
+  current: string | null; dir: SortDir
+  onSort: (k: string) => void
+}) {
+  const active = current === sortKey
+  return (
+    <th
+      className="cursor-pointer select-none"
+      onClick={() => onSort(sortKey)}
+      style={{ whiteSpace: 'nowrap' }}
+    >
+      <span className="flex items-center gap-1">
+        {label}
+        <span style={{ opacity: active ? 1 : 0.3, fontSize: 10 }}>
+          {active && dir === 'asc' ? '↑' : active && dir === 'desc' ? '↓' : '↕'}
+        </span>
+      </span>
+    </th>
+  )
+}
+
+// ── Null % indicator pill ─────────────────────────────────────────────────────
+function NullPctBadge({ pct }: { pct: number }) {
+  const color = pct === 0 ? C.success : pct <= 5 ? C.warning : C.danger
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-[4px]"
+      style={{ background: pct === 0 ? '#E8F5EF' : pct <= 5 ? '#FEF3C7' : '#FEE2E2', color }}>
+      {pct}% null
+    </span>
+  )
+}
+
+// ── Null completeness summary bar ─────────────────────────────────────────────
+function NullSummaryBar({ tab }: { tab: string }) {
+  const fields = NULL_SUMMARIES[tab]
+  if (!fields) return null
+  return (
+    <div className="flex flex-wrap gap-4 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
+      <span className="text-[11px] font-semibold self-center" style={{ color: C.navy }}>Field completeness:</span>
+      {fields.map(f => (
+        <div key={f.field} className="flex flex-col gap-0.5" style={{ minWidth: 90 }}>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px]" style={{ color: C.midText }}>{f.field}</span>
+            <NullPctBadge pct={f.nullPct} />
+          </div>
+          <div className="progress-track" style={{ height: 4 }}>
+            <div className="progress-fill" style={{
+              width: `${100 - f.nullPct}%`,
+              background: f.nullPct === 0 ? C.success : f.nullPct <= 5 ? C.warning : C.danger,
+            }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function DataReviewScreen() {
+  const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
+  // Map of PII id -> action ('anonymized'|'removed'|'override')
+  const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override'>>(new Map())
+  // NPI validation resolution — lifted into ValidationContext so ExportScreen can gate export
+  const { resolvedVal, setResolvedVal } = useValidation()
+  // Outlier resolution — lifted into OutlierContext so Analytics + Export can read tagged records
+  const { resolvedOut, setResolvedOut, warnNotes, setWarnNotes } = useOutliers()
+  // Set of outlier ids with the tag-note drawer open
+  const [tagOpen, setTagOpen] = useState<Set<number>>(new Set())
+  // Override justification text (keyed by VALIDATION_ERRORS id)
+  const [valJustifications, setValJustifications] = useState<Record<number, string>>({})
+  // Set of validation error ids with override drawer open
+  const [overrideOpen, setOverrideOpen] = useState<Set<number>>(new Set())
+  // Set of validation error ids currently re-validating (spinner)
+  const [revalidating, setRevalidating] = useState<Set<number>>(new Set())
+  // Duplicate cluster resolution
+  const [resolvedDup, setResolvedDup] = useState<Map<string, 'merged' | 'distinct' | 'removed'>>(new Map())
+  const [masterSel,   setMasterSel]   = useState<Map<string, 1 | 2>>(new Map())
+  const [mergingDup,  setMergingDup]  = useState<Set<string>>(new Set())
+
+  const resolveDup = (id: string, action: 'merged' | 'distinct' | 'removed', master?: 1 | 2) => {
+    setMergingDup(prev => { const s = new Set(prev); s.add(id); return s })
+    // Simulate backend merge/distinct endpoint (~900 ms)
+    setTimeout(() => {
+      setMergingDup(prev => { const s = new Set(prev); s.delete(id); return s })
+      setResolvedDup(prev => { const m = new Map(prev); m.set(id, action); return m })
+      if (master) setMasterSel(prev => { const m = new Map(prev); m.set(id, master); return m })
+    }, 900)
+  }
+
+  // ── sort state ───────────────────────────────────────────────────────────
+  const [piiSort,  setPiiSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'severity', dir: 'desc' })
+  const [outSort,  setOutSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'anomalyScore', dir: 'desc' })
+  const [valSort,  setValSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'severity', dir: 'desc' })
+  const [dupSort,  setDupSort]  = useState<{ key: string | null; dir: SortDir }>({ key: 'similarity', dir: 'desc' })
+
+  const cycleSort = (
+    current: { key: string | null; dir: SortDir },
+    set: (v: { key: string | null; dir: SortDir }) => void,
+    key: string
+  ) => {
+    if (current.key !== key) { set({ key, dir: 'asc' }); return }
+    if (current.dir === 'asc') { set({ key, dir: 'desc' }); return }
+    set({ key: null, dir: null })
+  }
+
+  const severityRank = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
+
+  // ── sorted data ──────────────────────────────────────────────────────────
+  const sortedPII = [...PII_FLAGS].sort((a, b) => {
+    if (!piiSort.key) return 0
+    const dir = piiSort.dir === 'asc' ? 1 : -1
+    if (piiSort.key === 'severity') return (severityRank(a.severity) - severityRank(b.severity)) * dir
+    if (piiSort.key === 'nullPct')  return (a.nullPct - b.nullPct) * dir
+    if (piiSort.key === 'field')    return a.field.localeCompare(b.field) * dir
+    if (piiSort.key === 'record')   return a.record.localeCompare(b.record) * dir
+    return 0
+  })
+
+  const sortedOut = [...OUTLIERS].sort((a, b) => {
+    if (!outSort.key) return 0
+    const dir = outSort.dir === 'asc' ? 1 : -1
+    if (outSort.key === 'severity')     return (severityRank(a.severity) - severityRank(b.severity)) * dir
+    if (outSort.key === 'anomalyScore') return (a.anomalyScore - b.anomalyScore) * dir
+    if (outSort.key === 'nullPct')      return (a.nullPct - b.nullPct) * dir
+    if (outSort.key === 'record')       return a.record.localeCompare(b.record) * dir
+    return 0
+  })
+
+  const sortedVal = [...VALIDATION_ERRORS].sort((a, b) => {
+    if (!valSort.key) return 0
+    const dir = valSort.dir === 'asc' ? 1 : -1
+    if (valSort.key === 'severity')  return (severityRank(a.severity) - severityRank(b.severity)) * dir
+    if (valSort.key === 'issueType') return a.issueType.localeCompare(b.issueType) * dir
+    if (valSort.key === 'nullPct')   return (a.nullPct - b.nullPct) * dir
+    if (valSort.key === 'npi')       return a.npi.localeCompare(b.npi) * dir
+    if (valSort.key === 'record')    return a.record.localeCompare(b.record) * dir
+    return 0
+  })
+
+  const sortedDup = [...DUPLICATES].sort((a, b) => {
+    if (!dupSort.key) return 0
+    const dir = dupSort.dir === 'asc' ? 1 : -1
+    if (dupSort.key === 'similarity') return (a.similarity - b.similarity) * dir
+    if (dupSort.key === 'name')       return `${a.rec1.lastName} ${a.rec1.firstName}`.localeCompare(`${b.rec1.lastName} ${b.rec1.firstName}`) * dir
+    return 0
+  })
+
+  // ── Data Health Score (0–100) ───────────────────────────────────────────
+  // Each category contributes a weighted share. Within each category flags are
+  // weighted by severity so resolving High > Medium > Low flags scores more.
+  // Base score of 100 is penalised by unresolved flags, then capped 0–100.
+  const TOTAL_ROWS = 10_412
+
+  const scoreCategory = (
+    flags: { severity: string; id: number }[],
+    resolved: Map<number, unknown>,
+    weight: number               // max points this category can contribute
+  ) => {
+    if (flags.length === 0) return weight
+    const sev = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
+    const totalWeight  = flags.reduce((a, f) => a + sev(f.severity), 0)
+    const earnedWeight = flags
+      .filter(f => resolved.has(f.id))
+      .reduce((a, f) => a + sev(f.severity), 0)
+    return (earnedWeight / totalWeight) * weight
+  }
+
+  // Category weights: NPI (30) > PII (25) > Duplicates (25) > Outliers (20)
+  const npiPoints = scoreCategory(
+    VALIDATION_ERRORS.map(v => ({ severity: v.severity, id: v.id })), resolvedVal, 30)
+  const piiPoints = scoreCategory(
+    PII_FLAGS.map(f => ({ severity: f.severity, id: f.id })), resolvedPII, 25)
+  const dupPoints  = DUPLICATES.length === 0 ? 25
+    : (resolvedDup.size / DUPLICATES.length) * 25
+  const outPoints  = scoreCategory(
+    OUTLIERS.map(o => ({ severity: o.severity, id: o.id })), resolvedOut, 20)
+
+  // Flag-density penalty: reduce base by up to 5 pts if many flags per 1k rows
+  const totalFlags    = PII_FLAGS.length + DUPLICATES.length + OUTLIERS.length + VALIDATION_ERRORS.length
+  const flagDensity   = totalFlags / (TOTAL_ROWS / 1000)          // flags per 1k rows
+  const densityPenalty = Math.min(5, flagDensity * 0.4)
+
+  const quality = Math.min(100, Math.max(0,
+    Math.round(npiPoints + piiPoints + dupPoints + outPoints - densityPenalty)
+  ))
+
+  const tabs = [
+    { id: 'pii',        label: 'PII / PHI Flags',      count: PII_FLAGS.length - resolvedPII.size },
+    { id: 'duplicates', label: 'Duplicates',            count: DUPLICATES.length - resolvedDup.size },
+    { id: 'outliers',   label: 'Statistical Outliers',  count: OUTLIERS.length - resolvedOut.size },
+    { id: 'validation', label: 'NPI Validation',        count: VALIDATION_ERRORS.length - resolvedVal.size },
+  ] as const
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Data Review"
+        subtitle="Resolve all flags to improve your data quality score and unlock export"
+        actions={
+          <div className="flex items-center gap-3">
+            <span className="text-[13px] font-bold px-3 py-1 rounded-full"
+              style={{
+                background: quality >= 85 ? '#E8F5EF' : quality >= 65 ? '#EBF4FA' : quality >= 45 ? '#FEF3C7' : '#FEE2E2',
+                color:      quality >= 85 ? C.success  : quality >= 65 ? C.corpBlue : quality >= 45 ? C.warning : C.danger,
+              }}>
+              {quality}/100
+            </span>
+            <Btn variant="secondary" size="sm">Export Report</Btn>
+          </div>
+        }
+      />
+
+      {/* ── Data Health Score bar ── */}
+      {(() => {
+        const scoreColor = quality >= 85 ? C.success : quality >= 65 ? C.corpBlue : quality >= 45 ? C.warning : C.danger
+        const scoreLabel = quality >= 85 ? 'Excellent' : quality >= 65 ? 'Good' : quality >= 45 ? 'Fair' : 'Poor'
+        const totalResolved = resolvedPII.size + resolvedDup.size + resolvedOut.size + resolvedVal.size
+        const totalFlags    = PII_FLAGS.length + DUPLICATES.length + OUTLIERS.length + VALIDATION_ERRORS.length
+
+        const segments = [
+          { label: 'NPI Validation', pts: npiPoints,  max: 30, resolved: resolvedVal.size, total: VALIDATION_ERRORS.length, color: C.navy },
+          { label: 'PII / PHI',      pts: piiPoints,  max: 25, resolved: resolvedPII.size, total: PII_FLAGS.length,         color: C.corpBlue },
+          { label: 'Duplicates',     pts: dupPoints,  max: 25, resolved: resolvedDup.size, total: DUPLICATES.length,        color: C.teal },
+          { label: 'Outliers',       pts: outPoints,  max: 20, resolved: resolvedOut.size, total: OUTLIERS.length,          color: '#5C85C4' },
+        ]
+
+        return (
+          <Card className="mb-6">
+            {/* Header row */}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <span className="text-[13px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Health Score</span>
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                  style={{ background: quality >= 85 ? '#E8F5EF' : quality >= 65 ? '#EBF4FA' : quality >= 45 ? '#FEF3C7' : '#FEE2E2',
+                           color: scoreColor }}>
+                  {scoreLabel}
+                </span>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-[11px]" style={{ color: C.midText }}>
+                  {totalResolved}/{totalFlags} flags resolved
+                  <span className="mx-1.5" style={{ color: C.border }}>·</span>
+                  {TOTAL_ROWS.toLocaleString()} rows processed
+                </span>
+                <span className="text-[28px] font-bold leading-none" style={{ fontFamily: 'Calibri, Georgia, serif', color: scoreColor }}>
+                  {quality}
+                  <span className="text-[14px] font-semibold">/ 100</span>
+                </span>
+              </div>
+            </div>
+
+            {/* Master bar with zone markers */}
+            <div className="relative mb-1">
+              <div className="progress-track" style={{ height: 14, borderRadius: 8 }}>
+                <div style={{
+                  height: '100%', borderRadius: 8,
+                  width: `${quality}%`,
+                  background: `linear-gradient(90deg, ${C.danger} 0%, ${C.warning} 30%, ${C.corpBlue} 60%, ${C.success} 85%)`,
+                  transition: 'width 0.6s cubic-bezier(0.4,0,0.2,1)',
+                  backgroundSize: '100% 100%',
+                  backgroundAttachment: 'fixed',
+                }} />
+                {/* Zone threshold tick marks */}
+                {[45, 65, 85].map(t => (
+                  <div key={t} style={{
+                    position: 'absolute', top: 0, bottom: 0,
+                    left: `${t}%`, width: 1,
+                    background: 'rgba(255,255,255,0.6)',
+                    pointerEvents: 'none',
+                  }} />
+                ))}
+              </div>
+              {/* Zone labels below bar */}
+              <div className="flex justify-between mt-1" style={{ fontSize: 9, color: C.midText }}>
+                <span style={{ width: '45%', textAlign: 'left' }}>Poor</span>
+                <span style={{ width: '20%', textAlign: 'center' }}>Fair</span>
+                <span style={{ width: '20%', textAlign: 'center' }}>Good</span>
+                <span style={{ width: '15%', textAlign: 'right' }}>Excellent</span>
+              </div>
+            </div>
+
+            {/* Per-category sub-bars */}
+            <div className="grid grid-cols-4 gap-3 mt-4 pt-4 border-t border-[#EDF2F7]">
+              {segments.map(seg => {
+                const pct = Math.round((seg.pts / seg.max) * 100)
+                return (
+                  <div key={seg.label}>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-[10px] font-semibold" style={{ color: C.midText }}>{seg.label}</span>
+                      <span className="text-[10px] font-bold mono" style={{ color: seg.color }}>
+                        {Math.round(seg.pts * 10) / 10}<span style={{ color: C.midText, fontWeight: 400 }}>/{seg.max}</span>
+                      </span>
+                    </div>
+                    <div className="progress-track" style={{ height: 6 }}>
+                      <div style={{
+                        height: '100%', borderRadius: 4,
+                        width: `${pct}%`,
+                        background: seg.color,
+                        transition: 'width 0.5s cubic-bezier(0.4,0,0.2,1)',
+                      }} />
+                    </div>
+                    <p className="text-[10px] mt-1" style={{ color: C.midText }}>
+                      <span className="font-semibold" style={{ color: seg.resolved === seg.total ? C.success : C.navy }}>
+                        {seg.resolved}/{seg.total}
+                      </span> resolved
+                    </p>
+                  </div>
+                )
+              })}
+            </div>
+          </Card>
+        )
+      })()}
+
+      {/* Tabs */}
+      <div className="border-b-2 border-[#EDF2F7] mb-6 flex gap-1">
+        {tabs.map(t => (
+          <button
+            key={t.id}
+            onClick={() => { setTab(t.id); setSelected(new Set()) }}
+            className="px-4 py-3 transition-all"
+            style={{
+              fontSize: 12,
+              fontWeight: tab === t.id ? 700 : 500,
+              color: tab === t.id ? C.navy : '#718096',
+              borderBottom: tab === t.id ? `2px solid ${C.navy}` : '2px solid transparent',
+              marginBottom: -2,
+              fontFamily: 'Inter, Arial, sans-serif',
+            }}
+          >
+            {t.label}
+            <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold"
+              style={{ background: t.count > 0 ? C.danger : C.success, color: 'white' }}>
+              {t.count}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {/* ── PII / PHI FLAGS TAB ──────────────────────────────────────────────── */}
+      {tab === 'pii' && (
+        <Card>
+          <NullSummaryBar tab="pii" />
+
+          {selected.size > 0 && (
+            <div className="flex items-center gap-3 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
+              <span className="text-[12px] font-semibold" style={{ color: C.navy }}>{selected.size} records selected</span>
+              <Btn size="sm" variant="primary" onClick={() => {
+                setResolvedPII(prev => {
+                  const m = new Map(prev)
+                  selected.forEach(id => m.set(id, 'anonymized'))
+                  return m
+                })
+                setSelected(new Set())
+              }}>Anonymize {selected.size} selected</Btn>
+              <Btn size="sm" variant="danger" onClick={() => {
+                setResolvedPII(prev => {
+                  const m = new Map(prev)
+                  selected.forEach(id => m.set(id, 'removed'))
+                  return m
+                })
+                setSelected(new Set())
+              }}>Remove {selected.size} selected</Btn>
+              <button className="text-[11px] hover:underline ml-auto" style={{ color: C.midText }}
+                onClick={() => setSelected(new Set())}>Clear selection</button>
+            </div>
+          )}
+
+          <table className="data-table w-full border-collapse">
+            <thead>
+              <tr>
+                <th style={{ width: 32 }}>
+                  <input type="checkbox"
+                    checked={selected.size === sortedPII.filter(f => !resolvedPII.has(f.id)).length && selected.size > 0}
+                    onChange={e => setSelected(e.target.checked
+                      ? new Set(sortedPII.map(f => f.id).filter(id => !resolvedPII.has(id)))
+                      : new Set()
+                    )} />
+                </th>
+                <SortTh label="Record"   sortKey="record"   current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                <SortTh label="Field"    sortKey="field"    current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                <th>PII / PHI Type</th>
+                <SortTh label="Severity" sortKey="severity" current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                <SortTh label="Null %"   sortKey="nullPct"  current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedPII.map((f) => {
+                const resolved = resolvedPII.has(f.id)
+                const action = resolvedPII.get(f.id)
+                return (
+                  <tr key={f.id} style={{ opacity: resolved ? 0.45 : 1, background: f.severity === 'High' && !resolved ? '#FFF9F9' : undefined }}>
+                    <td>
+                      <input type="checkbox" disabled={resolved} checked={selected.has(f.id)}
+                        onChange={e => {
+                          const s = new Set(selected)
+                          e.target.checked ? s.add(f.id) : s.delete(f.id)
+                          setSelected(s)
+                        }} />
+                    </td>
+                    <td className="font-medium">{f.record}</td>
+                    <td className="mono">{f.field}</td>
+                    <td>{f.type}</td>
+                    <td>
+                      <Badge tier={2} color={f.severity === 'High' ? 'block' : f.severity === 'Medium' ? 'warning' : 'info'}>
+                        {f.severity}
+                      </Badge>
+                    </td>
+                    <td><NullPctBadge pct={f.nullPct} /></td>
+                    <td>
+                      {resolved ? (
+                        action === 'anonymized' ? <Badge tier={1} color="success">Anonymized</Badge>
+                        : action === 'removed' ? <Badge tier={1} color="danger">Removed</Badge>
+                        : <Badge tier={1} color="info">Overridden</Badge>
+                      ) : (
+                        <div className="flex gap-1">
+                          <Btn size="sm" variant="primary" onClick={() => setResolvedPII(prev => { const m = new Map(prev); m.set(f.id, 'anonymized'); return m })}>Anonymize</Btn>
+                          <Btn size="sm" variant="danger"  onClick={() => setResolvedPII(prev => { const m = new Map(prev); m.set(f.id, 'removed'); return m })}>Remove</Btn>
+                          <Btn size="sm" variant="ghost"   onClick={() => setResolvedPII(prev => { const m = new Map(prev); m.set(f.id, 'override'); return m })}>Override</Btn>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {/* ── DUPLICATES TAB ───────────────────────────────────────────────────── */}
+      {tab === 'duplicates' && (
+        <div className="flex flex-col gap-4">
+
+          {/* Sort + summary bar */}
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Sort by:</span>
+            {[
+              { label: 'Similarity', key: 'similarity' },
+              { label: 'Name',       key: 'name' },
+            ].map(opt => (
+              <button key={opt.key}
+                className="text-[11px] px-2 py-1 rounded-[4px] border transition-all"
+                style={{
+                  borderColor: dupSort.key === opt.key ? C.corpBlue : C.border,
+                  background:  dupSort.key === opt.key ? C.lightTint : 'white',
+                  color:       dupSort.key === opt.key ? C.corpBlue : C.midText,
+                  fontWeight:  dupSort.key === opt.key ? 700 : 400,
+                }}
+                onClick={() => cycleSort(dupSort, setDupSort, opt.key)}>
+                {opt.label} {dupSort.key === opt.key ? (dupSort.dir === 'asc' ? '↑' : '↓') : '↕'}
+              </button>
+            ))}
+            <span className="text-[11px] ml-auto" style={{ color: C.midText }}>
+              {DUPLICATES.length - resolvedDup.size} of {DUPLICATES.length} cluster{DUPLICATES.length !== 1 ? 's' : ''} pending
+            </span>
+          </div>
+
+          {/* Empty state */}
+          {resolvedDup.size === DUPLICATES.length && (
+            <Card>
+              <EmptyState
+                icon={Icon.checkCircle}
+                title="All duplicate clusters resolved"
+                subtitle="No further deduplication required. Your dataset is clean."
+              />
+            </Card>
+          )}
+
+          {sortedDup.map(d => {
+            const isResolved = resolvedDup.has(d.id)
+            const isMerging  = mergingDup.has(d.id)
+            const resolution = resolvedDup.get(d.id)
+            const master     = masterSel.get(d.id)
+            const hasMaster  = masterSel.has(d.id)
+
+            // Compare field-by-field to find diffs
+            const COMPARE_FIELDS: { label: string; key: keyof DupRecord }[] = [
+              { label: 'NPI',        key: 'npi'       },
+              { label: 'First Name', key: 'firstName' },
+              { label: 'Last Name',  key: 'lastName'  },
+              { label: 'Specialty',  key: 'spec'      },
+              { label: 'State',      key: 'state'     },
+              { label: 'Email',      key: 'email'     },
+              { label: 'Phone',      key: 'phone'     },
+              { label: 'Address',    key: 'address'   },
+              { label: 'Source',     key: 'source'    },
+            ]
+
+            return (
+              <Card key={d.id} className={isResolved ? 'opacity-50' : ''}>
+                {/* ── Cluster header ── */}
+                <div className="flex items-center gap-2 mb-3">
+                  <span style={{ color: C.warning }}>{Icon.copy}</span>
+                  <span className="text-[13px] font-bold" style={{ color: C.darkText }}>Duplicate cluster detected</span>
+                  <Badge tier={1} color={d.rec1.source !== d.rec2.source ? 'warning' : 'info'}>
+                    {d.rec1.source !== d.rec2.source ? 'Cross-upload' : 'Same upload'}
+                  </Badge>
+                  <span className="ml-auto flex items-center gap-2">
+                    <span className="text-[11px]" style={{ color: C.midText }}>Similarity</span>
+                    <span className="font-bold mono text-[13px]" style={{ color: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue }}>
+                      {d.similarity}%
+                    </span>
+                    {isResolved && (
+                      <Badge tier={2}
+                        color={resolution === 'merged' ? 'approve' : resolution === 'distinct' ? 'info' : 'block'}>
+                        {resolution === 'merged' ? `✓ Merged → Record ${master}` : resolution === 'distinct' ? 'Distinct entities' : 'Duplicate removed'}
+                      </Badge>
+                    )}
+                  </span>
+                </div>
+
+                {/* ── Similarity bar ── */}
+                <div className="progress-track mb-4" style={{ height: 5 }}>
+                  <div className="progress-fill" style={{
+                    width: `${d.similarity}%`,
+                    background: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue,
+                  }} />
+                </div>
+
+                {/* ── Side-by-side comparison table ── */}
+                <div className="rounded-[6px] border border-[#EDF2F7] overflow-hidden mb-4">
+                  {/* Column headers with master-select */}
+                  <div className="grid" style={{ gridTemplateColumns: '130px 1fr 1fr' }}>
+                    <div className="px-3 py-2 border-b border-r border-[#EDF2F7] text-[10px] font-semibold uppercase tracking-wider" style={{ background: '#F7FAFC', color: C.midText }}>Field</div>
+                    {[1, 2].map(idx => {
+                      const rec  = idx === 1 ? d.rec1 : d.rec2
+                      const isMaster = master === idx
+                      return (
+                        <div key={idx}
+                          className="px-3 py-2 border-b border-[#EDF2F7] flex items-center justify-between"
+                          style={{ borderLeft: '1px solid #EDF2F7', background: isMaster ? '#F0FDF4' : '#F7FAFC' }}>
+                          <div>
+                            <p className="text-[11px] font-bold" style={{ color: isMaster ? C.success : C.navy }}>Record {idx}</p>
+                            <p className="text-[10px]" style={{ color: C.midText }}>{rec.source}</p>
+                          </div>
+                          {!isResolved && (
+                            <button
+                              onClick={() => setMasterSel(prev => {
+                                const m = new Map(prev)
+                                m.set(d.id, idx as 1 | 2)
+                                return m
+                              })}
+                              className="text-[10px] font-bold px-2 py-1 rounded-[4px] border transition-all"
+                              style={{
+                                borderColor: isMaster ? C.success : C.border,
+                                background:  isMaster ? '#E8F5EF' : 'white',
+                                color:       isMaster ? C.success : C.midText,
+                              }}>
+                              {isMaster ? '★ Master' : '☆ Set as Master'}
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {/* Field-by-field rows */}
+                  {COMPARE_FIELDS.map((f, fi) => {
+                    const v1   = d.rec1[f.key]
+                    const v2   = d.rec2[f.key]
+                    const diff = v1 !== v2
+                    return (
+                      <div key={f.key}
+                        className="grid"
+                        style={{
+                          gridTemplateColumns: '130px 1fr 1fr',
+                          background: fi % 2 === 0 ? 'white' : '#FAFBFC',
+                          borderTop: '1px solid #EDF2F7',
+                        }}>
+                        <div className="px-3 py-2 border-r border-[#EDF2F7] text-[11px] font-semibold flex items-center" style={{ color: C.midText }}>
+                          {f.label}
+                          {diff && <span className="ml-1.5 text-[9px] font-bold px-1 py-0.5 rounded" style={{ background: '#FEF3C7', color: '#92400E' }}>DIFF</span>}
+                        </div>
+                        {[1, 2].map(idx => {
+                          const val      = idx === 1 ? v1 : v2
+                          const isMasterCol = master === idx
+                          return (
+                            <div key={idx}
+                              className="px-3 py-2 mono text-[11px] flex items-center"
+                              style={{
+                                borderLeft: '1px solid #EDF2F7',
+                                color:      diff ? (isMasterCol ? C.success : C.danger) : C.darkText,
+                                fontWeight: diff && isMasterCol ? 700 : 400,
+                                background: diff && isMasterCol ? '#F0FDF4' : diff && !isMasterCol ? '#FFF9F9' : 'transparent',
+                              }}>
+                              {val || <span style={{ color: C.border }}>—</span>}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* ── Action bar ── */}
+                {!isResolved && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <Btn
+                      variant={hasMaster ? 'primary' : 'disabled'}
+                      disabled={!hasMaster || isMerging}
+                      size="sm"
+                      icon={isMerging ? Icon.spinner : Icon.checkCircle}
+                      onClick={() => resolveDup(d.id, 'merged', master)}
+                    >
+                      {isMerging ? 'Merging…' : `Confirm Merge → keep Record ${master ?? '?'}`}
+                    </Btn>
+                    {!hasMaster && (
+                      <span className="text-[11px]" style={{ color: C.midText }}>Select a master record above to enable merge</span>
+                    )}
+                    <div className="ml-auto flex gap-2">
+                      <Btn size="sm" variant="ghost"
+                        disabled={isMerging}
+                        onClick={() => resolveDup(d.id, 'distinct')}>
+                        Mark as Distinct Entities
+                      </Btn>
+                      <Btn size="sm" variant="danger"
+                        disabled={isMerging}
+                        onClick={() => resolveDup(d.id, 'removed')}>
+                        Remove Duplicate
+                      </Btn>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            )
+          })}
+        </div>
+      )}
+
+      {/* ── STATISTICAL OUTLIERS TAB ─────────────────────────────────────────── */}
+      {tab === 'outliers' && (
+        <Card>
+          <NullSummaryBar tab="outliers" />
+
+          {/* Tagged-records summary strip */}
+          {(() => {
+            const tagged = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
+            if (tagged.length === 0) return null
+            return (
+              <div className="mb-4 p-3 rounded-[6px] border-l-4 flex items-start gap-3"
+                style={{ background: '#FEF3C7', borderLeftColor: C.warning }}>
+                <span style={{ color: C.warning, marginTop: 1 }}>{Icon.alertTriangle}</span>
+                <div className="flex-1">
+                  <p className="text-[12px] font-semibold" style={{ color: '#92400E' }}>
+                    {tagged.length} record{tagged.length > 1 ? 's' : ''} tagged as Data Quality Warning — retained in dataset, flagged on all analytical exports
+                  </p>
+                  <div className="flex flex-wrap gap-2 mt-1">
+                    {tagged.map(o => (
+                      <span key={o.id} className="text-[10px] font-semibold px-2 py-0.5 rounded-[4px]"
+                        style={{ background: '#FDE68A', color: '#92400E' }}>
+                        {o.record}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )
+          })()}
+
+          <table className="data-table w-full border-collapse">
+            <thead>
+              <tr>
+                <SortTh label="Record"        sortKey="record"       current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <th>Specialty</th>
+                <th>Outlier Reason</th>
+                <SortTh label="Anomaly Score" sortKey="anomalyScore" current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Severity"      sortKey="severity"     current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Null %"        sortKey="nullPct"      current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedOut.map((o) => {
+                const action    = resolvedOut.get(o.id)
+                const resolved  = action !== undefined
+                const isTagOpen = tagOpen.has(o.id)
+                return (
+                  <Fragment key={o.id}>
+                    <tr style={{
+                      opacity:    resolved && action !== 'warned' ? 0.45 : 1,
+                      background: action === 'warned' ? '#FFFBEB'
+                                : o.severity === 'High' && !resolved ? '#FFF9F9'
+                                : undefined,
+                      borderLeft: action === 'warned' ? `3px solid ${C.warning}`
+                                : o.severity === 'High' && !resolved ? `3px solid ${C.danger}`
+                                : '3px solid transparent',
+                    }}>
+                      <td className="font-medium">
+                        {action === 'warned' && (
+                          <span className="inline-block mr-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded"
+                            style={{ background: '#FDE68A', color: '#92400E' }}>⚠ DQ WARNING</span>
+                        )}
+                        {o.record}
+                      </td>
+                      <td><Badge tier={1} color="neutral">{o.specialty}</Badge></td>
+                      <td>
+                        <div>
+                          <p className="text-[11px]">{o.reason}</p>
+                          <button className="text-[10px] mt-0.5 hover:underline" style={{ color: C.corpBlue }}
+                            onClick={() => setExpandedOutlier(expandedOutlier === o.id ? null : o.id)}>
+                            {expandedOutlier === o.id ? '▲ Hide reasoning' : '▼ Why flagged?'}
+                          </button>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="flex items-center gap-2">
+                          <div className="progress-track" style={{ minWidth: 50 }}>
+                            <div className="progress-fill" style={{
+                              width: `${o.anomalyScore * 100}%`,
+                              background: o.anomalyScore >= 0.85 ? C.danger : o.anomalyScore >= 0.7 ? C.warning : C.success,
+                            }} />
+                          </div>
+                          <span className="mono text-[11px] font-bold" style={{
+                            color: o.anomalyScore >= 0.85 ? C.danger : o.anomalyScore >= 0.7 ? C.warning : C.success,
+                          }}>{o.anomalyScore.toFixed(2)}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <Badge tier={2} color={o.severity === 'High' ? 'block' : o.severity === 'Medium' ? 'warning' : 'info'}>
+                          {o.severity}
+                        </Badge>
+                      </td>
+                      <td><NullPctBadge pct={o.nullPct} /></td>
+                      <td>
+                        {resolved ? (
+                          <div className="flex flex-col gap-0.5">
+                            {action === 'removed' && <Badge tier={1} color="danger">Removed</Badge>}
+                            {action === 'kept'    && <Badge tier={1} color="success">Kept</Badge>}
+                            {action === 'warned'  && (
+                              <>
+                                <Badge tier={1} color="warning">Data Quality Warning</Badge>
+                                {warnNotes[o.id] && (
+                                  <span className="text-[10px] italic" style={{ color: C.midText }}>
+                                    "{warnNotes[o.id].slice(0, 40)}{warnNotes[o.id].length > 40 ? '…' : ''}"
+                                  </span>
+                                )}
+                              </>
+                            )}
+                            <button className="text-[10px] hover:underline mt-0.5" style={{ color: C.corpBlue }}
+                              onClick={() => { const m = new Map(resolvedOut); m.delete(o.id); setResolvedOut(m) }}>
+                              Undo
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex gap-1 flex-wrap">
+                            <Btn size="sm" variant="danger"
+                              onClick={() => { const m = new Map(resolvedOut); m.set(o.id, 'removed'); setResolvedOut(m) }}>
+                              Remove
+                            </Btn>
+                            <Btn size="sm" variant="secondary"
+                              onClick={() => { const m = new Map(resolvedOut); m.set(o.id, 'kept'); setResolvedOut(m) }}>
+                              Keep
+                            </Btn>
+                            <Btn size="sm" variant="ghost"
+                              onClick={() => { const s = new Set(tagOpen); s.has(o.id) ? s.delete(o.id) : s.add(o.id); setTagOpen(s) }}>
+                              {isTagOpen ? '✕ Cancel' : '⚠ Tag Warning'}
+                            </Btn>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+
+                    {/* Statistical reasoning drawer */}
+                    {expandedOutlier === o.id && (
+                      <tr style={{ background: C.lightTint, borderLeft: '3px solid transparent' }}>
+                        <td colSpan={7} className="px-4 py-3">
+                          <p className="text-[12px] font-semibold mb-1" style={{ color: C.navy }}>Statistical reasoning</p>
+                          <p className="text-[12px]" style={{ color: C.darkText }}>
+                            The average monthly claims volume for this specialty is 142 claims/month. This provider submitted 1,847 claims last month — 13× above the 99th percentile (anomaly score {o.anomalyScore.toFixed(2)}). This pattern is consistent with high-volume billing irregularity or a data entry error in the source file.
+                          </p>
+                        </td>
+                      </tr>
+                    )}
+
+                    {/* Tag: Data Quality Warning drawer */}
+                    {isTagOpen && !resolved && (
+                      <tr style={{ background: '#FFFBEB', borderLeft: `3px solid ${C.warning}` }}>
+                        <td colSpan={7} className="px-4 py-3">
+                          <p className="text-[12px] font-semibold mb-1" style={{ color: '#92400E' }}>
+                            ⚠ Tag as Data Quality Warning — record stays in the database but is highlighted in red on all analytical exports and reports
+                          </p>
+                          <div className="flex gap-3 items-start">
+                            <textarea
+                              className="flex-1 border rounded-[6px] text-[12px] px-2 py-1.5"
+                              style={{ borderColor: C.warning, minHeight: 56, fontFamily: 'Inter, Arial, sans-serif' }}
+                              rows={2}
+                              placeholder="Optional: describe why this record is flagged for downstream consumers…"
+                              value={warnNotes[o.id] || ''}
+                              onChange={e => setWarnNotes({ ...warnNotes, [o.id]: e.target.value })}
+                            />
+                            <div className="flex flex-col gap-1 items-center shrink-0">
+                              <Btn size="sm" variant="primary"
+                                onClick={() => {
+                                  const m = new Map(resolvedOut); m.set(o.id, 'warned'); setResolvedOut(m)
+                                  const s = new Set(tagOpen); s.delete(o.id); setTagOpen(s)
+                                }}>
+                                Confirm Tag
+                              </Btn>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                )
+              })}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {/* ── NPI VALIDATION TAB ───────────────────────────────────────────────── */}
+      {tab === 'validation' && (
+        <Card>
+          {/* High-severity export interlock banner */}
+          {(() => {
+            const openHigh = VALIDATION_ERRORS.filter(v => v.severity === 'High' && !resolvedVal.has(v.id))
+            if (openHigh.length > 0) return (
+              <Banner type="error">
+                <strong>Export blocked:</strong> {openHigh.length} High-severity NPI error{openHigh.length > 1 ? 's' : ''} ({openHigh.map(v => v.issueType).join(', ')}) must be resolved before dataset export is permitted. Remove the record or submit an Override with justification.
+              </Banner>
+            )
+            if (resolvedVal.size === VALIDATION_ERRORS.length) return (
+              <Banner type="success">All NPI validation errors resolved — dataset export is unlocked.</Banner>
+            )
+            return (
+              <Banner type="warning">All High-severity errors resolved. {VALIDATION_ERRORS.length - resolvedVal.size} lower-severity issue{VALIDATION_ERRORS.length - resolvedVal.size !== 1 ? 's' : ''} remaining.</Banner>
+            )
+          })()}
+
+          <Banner type="warning">NPI Registry is temporarily unavailable. 847 records marked pending. Will auto-retry in 5 minutes.</Banner>
+          <NullSummaryBar tab="validation" />
+
+          <table className="data-table w-full border-collapse">
+            <thead>
+              <tr>
+                <SortTh label="Record"     sortKey="record"    current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <SortTh label="NPI"        sortKey="npi"       current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <th>Specialty</th>
+                <th>State</th>
+                <SortTh label="Issue Type" sortKey="issueType" current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <SortTh label="Severity"   sortKey="severity"  current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <th>Issue Detail</th>
+                <SortTh label="Null %"     sortKey="nullPct"   current={valSort.key} dir={valSort.dir} onSort={k => cycleSort(valSort, setValSort, k)} />
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedVal.map((v) => {
+                const resolved = resolvedVal.has(v.id)
+                const action   = resolvedVal.get(v.id)
+                const isHigh   = v.severity === 'High'
+                const isOvOpen = overrideOpen.has(v.id)
+                const isReval  = revalidating.has(v.id)
+                return (
+                  <Fragment key={v.id}>
+                    <tr style={{
+                      opacity: resolved ? 0.45 : 1,
+                      background: isHigh && !resolved ? '#FFF5F5' : undefined,
+                      borderLeft: isHigh && !resolved ? `3px solid ${C.danger}` : '3px solid transparent',
+                    }}>
+                      <td className="font-medium">
+                        {isHigh && !resolved && (
+                          <span className="inline-block mr-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded"
+                            style={{ background: '#FEE2E2', color: C.danger }}>HIGH RISK</span>
+                        )}
+                        {v.record}
+                      </td>
+                      <td className="mono">{v.npi}</td>
+                      <td>{v.specialty}</td>
+                      <td>{v.state}</td>
+                      <td>
+                        <Badge tier={2}
+                          color={v.issueType === 'Not Found' || v.issueType === 'Invalid' ? 'block' : v.issueType === 'Inactive' ? 'warning' : 'info'}>
+                          {v.issueType}
+                        </Badge>
+                      </td>
+                      <td>
+                        <Badge tier={2} color={v.severity === 'High' ? 'block' : v.severity === 'Medium' ? 'warning' : 'info'}>
+                          {v.severity}
+                        </Badge>
+                      </td>
+                      <td style={{ color: C.danger, fontSize: 11 }}>{v.issue}</td>
+                      <td><NullPctBadge pct={v.nullPct} /></td>
+                      <td>
+                        {resolved ? (
+                          <div className="flex flex-col gap-0.5">
+                            {action === 'removed'
+                              ? <Badge tier={1} color="danger">Removed</Badge>
+                              : <Badge tier={1} color="info">Overridden</Badge>
+                            }
+                            {action === 'override' && valJustifications[v.id] && (
+                              <span className="text-[10px] italic" style={{ color: C.midText }}>
+                                "{valJustifications[v.id].slice(0, 38)}{valJustifications[v.id].length > 38 ? '…' : ''}"
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex gap-1 flex-wrap">
+                            <Btn size="sm" variant="danger"
+                              disabled={isReval}
+                              onClick={() => { const m = new Map(resolvedVal); m.set(v.id, 'removed'); setResolvedVal(m) }}>
+                              Remove
+                            </Btn>
+                            <Btn size="sm" variant="ghost"
+                              disabled={isReval}
+                              onClick={() => {
+                                const s = new Set(overrideOpen)
+                                s.has(v.id) ? s.delete(v.id) : s.add(v.id)
+                                setOverrideOpen(s)
+                              }}>
+                              {isOvOpen ? '✕ Cancel' : 'Override Flag'}
+                            </Btn>
+                            <Btn size="sm" variant="secondary"
+                              disabled={isReval}
+                              icon={isReval ? Icon.spinner : undefined}
+                              onClick={() => {
+                                setRevalidating(prev => { const s = new Set(prev); s.add(v.id); return s })
+                                setTimeout(() => setRevalidating(prev => { const s = new Set(prev); s.delete(v.id); return s }), 1200)
+                              }}>
+                              {isReval ? 'Checking…' : 'Re-validate'}
+                            </Btn>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+
+                    {/* Override justification drawer */}
+                    {isOvOpen && !resolved && (
+                      <tr style={{ background: '#FFFBEB', borderLeft: `3px solid ${C.warning}` }}>
+                        <td colSpan={9} className="px-4 py-3">
+                          <p className="text-[12px] font-semibold mb-2" style={{ color: C.warning }}>
+                            {isHigh
+                              ? '⚠ High-severity override — justification is mandatory and will be permanently logged to the audit trail'
+                              : 'Justification required — will be logged to the audit trail'}
+                          </p>
+                          <div className="flex gap-3 items-start">
+                            <textarea
+                              className="flex-1 border rounded-[6px] text-[12px] px-2 py-1.5"
+                              style={{ borderColor: C.warning, minHeight: 60, fontFamily: 'Inter, Arial, sans-serif' }}
+                              rows={2}
+                              placeholder="Describe why this NPI validation error should be overridden (min 15 characters)…"
+                              value={valJustifications[v.id] || ''}
+                              onChange={e => setValJustifications(prev => ({ ...prev, [v.id]: e.target.value }))}
+                            />
+                            <div className="flex flex-col gap-1 items-center shrink-0">
+                              <Btn
+                                size="sm"
+                                variant={(valJustifications[v.id]?.length ?? 0) >= 15 ? 'primary' : 'disabled'}
+                                disabled={(valJustifications[v.id]?.length ?? 0) < 15}
+                                onClick={() => {
+                                  const m = new Map(resolvedVal); m.set(v.id, 'override'); setResolvedVal(m)
+                                  const s = new Set(overrideOpen); s.delete(v.id); setOverrideOpen(s)
+                                }}>
+                                Submit Override
+                              </Btn>
+                              <span className="text-[10px]" style={{ color: (valJustifications[v.id]?.length ?? 0) >= 15 ? C.success : C.midText }}>
+                                {valJustifications[v.id]?.length ?? 0}/15 chars
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                )
+              })}
+            </tbody>
+          </table>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+// ─── QUERY INTERFACE ──────────────────────────────────────────────────────────
+
+const SUGGESTED_QUERIES = [
+  'How many cardiologists are in Florida?',
+  'Show me records with invalid emails',
+  'Which specialty has the most providers?',
+  'List all records updated in the last 30 days',
+]
+
+const QUERY_RESULT = [
+  { npi: '1234567890', name: 'James Morrison, MD', specialty: 'Cardiology', state: 'FL', email: 'j.morrison@floridahealth.com', status: 'Active' },
+  { npi: '8847261039', name: 'Patricia Wang, MD', specialty: 'Cardiology', state: 'FL', email: 'pwang@tampacc.org', status: 'Active' },
+  { npi: '3312889401', name: 'David Okafor, DO', specialty: 'Cardiology', state: 'FL', email: 'dokafor@baptist.com', status: 'Pending' },
+]
+
+function QueryScreen() {
+  const [query, setQuery] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [results, setResults] = useState<typeof QUERY_RESULT | null>(null)
+  const [showQuery, setShowQuery] = useState(false)
+
+  const run = (q: string) => {
+    setQuery(q)
+    setLoading(true)
+    setResults(null)
+    setTimeout(() => { setLoading(false); setResults(QUERY_RESULT) }, 1400)
+  }
+
+  return (
+    <div className="p-8">
+      <SectionHeader title="Natural Language Query" subtitle="Ask questions about your dataset in plain English" />
+
+      {/* Search bar */}
+      <Card className="mb-6">
+        <div className="flex gap-3">
+          <div className="flex-1 relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: C.midText }}>{Icon.search}</span>
+            <input
+              className="input-field w-full border border-[#CBD5E0] rounded-[7px] text-[14px] pl-10 pr-4 py-3 bg-white"
+              placeholder="Ask a question about your dataset..."
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && query && run(query)}
+              style={{ color: C.darkText, fontFamily: 'Inter, Arial, sans-serif', height: 48 }}
+            />
+          </div>
+          <Btn variant="primary" onClick={() => query && run(query)}>Run Query</Btn>
+        </div>
+
+        {!results && !loading && (
+          <div className="mt-4">
+            <p className="text-[12px] mb-2 font-semibold" style={{ color: C.midText }}>Try these queries:</p>
+            <div className="flex flex-wrap gap-2">
+              {SUGGESTED_QUERIES.map(q => (
+                <button key={q} onClick={() => run(q)}
+                  className="text-[12px] px-3 py-1.5 rounded-[20px] border hover:border-[#2E86AB] hover:bg-[#EBF4FA] transition-all"
+                  style={{ borderColor: C.border, color: C.corpBlue, fontFamily: 'Inter, Arial, sans-serif' }}>
+                  {q}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {loading && (
+        <Card>
+          <div className="flex items-center gap-3 py-8 justify-center">
+            <span style={{ color: C.corpBlue }}>{Icon.spinner}</span>
+            <span className="text-[13px] pulse" style={{ color: C.midText }}>Running your query against 10,412 records...</span>
+          </div>
+        </Card>
+      )}
+
+      {results && (
+        <Card>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <h3 className="text-[14px] font-bold" style={{ color: C.navy }}>Results</h3>
+              <Badge tier={1} color="info">{results.length} records</Badge>
+              <span className="text-[12px]" style={{ color: C.midText }}>for "{query}"</span>
+            </div>
+            <button onClick={() => setShowQuery(!showQuery)} className="text-[12px] hover:underline" style={{ color: C.corpBlue }}>
+              {showQuery ? 'Hide query ▲' : 'View generated query ▼'}
+            </button>
+          </div>
+
+          {showQuery && (
+            <div className="mb-4 p-3 rounded-[6px] border border-[#EDF2F7]" style={{ background: '#F7FAFC' }}>
+              <p className="text-[11px] font-semibold mb-2" style={{ color: C.midText }}>Generated pandas filter:</p>
+              <pre className="mono text-[11px]" style={{ color: C.darkText }}>
+{`df = df[
+  (df['specialty'] == 'Cardiology') &
+  (df['state'] == 'FL') &
+  (df['npi_status'] == 'Active')
+]`}
+              </pre>
+            </div>
+          )}
+
+          <table className="data-table w-full border-collapse">
+            <thead>
+              <tr><th>NPI</th><th>Name</th><th>Specialty</th><th>State</th><th>Email</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              {results.map(r => (
+                <tr key={r.npi}>
+                  <td className="mono">{r.npi}</td>
+                  <td className="font-medium">{r.name}</td>
+                  <td>{r.specialty}</td>
+                  <td>{r.state}</td>
+                  <td style={{ color: C.corpBlue }}>{r.email}</td>
+                  <td><Badge tier={1} color={r.status === 'Active' ? 'success' : 'warning'}>{r.status}</Badge></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+// ─── SEGMENTATION ─────────────────────────────────────────────────────────────
+
+const SEGMENTS = [
+  { name: 'High-Volume Cardiologists', count: 847, specialty: 'Cardiology', geo: 'Southeast US', desc: 'High-prescribing cardiologists with active NPI status and verified practice addresses in FL, GA, NC, SC.', color: C.navy },
+  { name: 'Oncology Academic Centers', count: 312, specialty: 'Oncology', geo: 'Northeast US', desc: 'Oncologists affiliated with academic medical centers. High Sunshine Act exposure. Ideal for peer-to-peer outreach.', color: C.teal },
+  { name: 'Early-Adopter Neurologists', count: 504, specialty: 'Neurology', geo: 'National', desc: 'Neurologists with early uptake of novel therapeutics in the last 24 months. High campaign responsiveness.', color: C.corpBlue },
+  { name: 'Community Rheumatologists', count: 1203, specialty: 'Rheumatology', geo: 'Midwest US', desc: 'Community-based rheumatologists with high patient panels and access to biologics reimbursement.', color: '#5C85C4' },
+  { name: 'High-Value PCPs', count: 2841, specialty: 'Primary Care', geo: 'National', desc: 'Primary care physicians with high prescribing volume and broad formulary access. Strong campaign reach.', color: '#028090' },
+  { name: 'Surgical Specialists', count: 689, specialty: 'Surgery', geo: 'West US', desc: 'Surgical specialists with high procedure volume. Ideal for device and surgical product campaigns.', color: '#6B4FA0' },
+]
+
+function SegmentsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const [running, setRunning] = useState(false)
+  const [done, setDone] = useState(true)
+  const [detail, setDetail] = useState<typeof SEGMENTS[0] | null>(null)
+
+  const run = () => {
+    setRunning(true)
+    setDone(false)
+    setTimeout(() => { setRunning(false); setDone(true) }, 2000)
+  }
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Segmentation"
+        subtitle="AI-powered HCP clustering by specialty, geography, and prescribing behavior"
+        actions={<Btn variant="teal" onClick={run} icon={running ? Icon.spinner : undefined}>
+          {running ? 'Running...' : 'Run Segmentation'}
+        </Btn>}
+      />
+
+      {running && (
+        <Banner type="info">Clustering records... Generating segment labels... This may take a few moments.</Banner>
+      )}
+
+      {done && (
+        <div className="grid grid-cols-3 gap-5 mb-6">
+          {SEGMENTS.map((s, i) => (
+            <div key={s.name} className="bg-white rounded-[8px] border border-[#CBD5E0] p-4 cursor-pointer card-hover fade-in-up" style={{ animationDelay: `${i * 80}ms` }} onClick={() => setDetail(s)}>
+              <div className="flex items-start justify-between mb-3">
+                <div className="w-3 h-3 rounded-full mt-0.5" style={{ background: s.color }} />
+                <Badge tier={1} color="info">{s.count.toLocaleString()} records</Badge>
+              </div>
+              <h3 className="text-[14px] font-bold mb-1" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>{s.name}</h3>
+              <div className="flex gap-2 mb-2 flex-wrap">
+                <Badge tier={1} color="neutral">{s.specialty}</Badge>
+                <Badge tier={1} color="neutral">{s.geo}</Badge>
+              </div>
+              <p className="text-[12px]" style={{ color: C.midText }}>{s.desc}</p>
+              <div className="mt-3 pt-3 border-t border-[#EDF2F7] flex justify-between items-center">
+                <Badge tier={1} color="success">Segmented</Badge>
+                <button className="text-[12px] hover:underline font-semibold" style={{ color: C.corpBlue }}>View records →</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!done && !running && (
+        <EmptyState icon={Icon.users} title="No segments yet" subtitle="Run segmentation on your cleaned dataset to see segments here." action={<Btn variant="teal" onClick={run}>Run Segmentation</Btn>} />
+      )}
+
+      {/* Detail panel */}
+      {detail && (
+        <Modal title={detail.name} onClose={() => setDetail(null)} width={600}>
+          <div className="flex gap-3 mb-4 flex-wrap">
+            <Badge tier={1} color="info">{detail.count.toLocaleString()} records</Badge>
+            <Badge tier={1} color="neutral">{detail.specialty}</Badge>
+            <Badge tier={1} color="neutral">{detail.geo}</Badge>
+          </div>
+          <p className="text-[13px] mb-4" style={{ color: C.darkText }}>{detail.desc}</p>
+          <div className="border rounded-[6px] overflow-hidden mb-4">
+            <table className="data-table w-full border-collapse">
+              <thead><tr><th>Name</th><th>Specialty</th><th>State</th><th>NPI Status</th></tr></thead>
+              <tbody>
+                {[
+                  { name: 'James Morrison, MD', spec: detail.specialty, state: 'FL', status: 'Active' },
+                  { name: 'Patricia Wang, MD', spec: detail.specialty, state: 'GA', status: 'Active' },
+                  { name: 'Robert Chen, DO', spec: detail.specialty, state: 'NC', status: 'Active' },
+                ].map(r => (
+                  <tr key={r.name}>
+                    <td className="font-medium">{r.name}</td>
+                    <td>{r.spec}</td>
+                    <td>{r.state}</td>
+                    <td><Badge tier={1} color="success">{r.status}</Badge></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="flex gap-3">
+            <Btn variant="teal" onClick={() => setDetail(null)}>Generate Campaign</Btn>
+            <Btn variant="ghost" onClick={() => setDetail(null)}>Close</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+// ─── CAMPAIGN GENERATOR ───────────────────────────────────────────────────────
+
+function CampaignGeneratorScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const [segment, setSegment] = useState('High-Volume Cardiologists')
+  const [goal, setGoal] = useState('')
+  const [channel, setChannel] = useState('Email')
+  const [generating, setGenerating] = useState(false)
+  const [generated, setGenerated] = useState(false)
+  const [subject, setSubject] = useState('Introducing a New Standard of Care in Heart Failure Management')
+  const [body, setBody] = useState(`Dear Dr. [Last Name],
+
+We are pleased to present new Phase III data demonstrating superior outcomes for patients with HFrEF when treated with our novel ARNI therapy versus standard ACE inhibitor therapy.
+
+The PIONEER-HF trial enrolled 1,500 patients across 87 centers. Key findings include:
+• 27% reduction in cardiovascular death or worsening heart failure
+• Significant improvement in KCCQ-OS scores at 8 weeks
+• Well-tolerated safety profile consistent with prior ARNI data
+
+We would welcome the opportunity to discuss these findings and how they may benefit your patients. Your Medical Science Liaison will follow up within the next 5 business days.
+
+Sincerely,
+MedReach Medical Affairs`)
+
+  const generate = () => {
+    if (!goal) return
+    setGenerating(true)
+    setTimeout(() => { setGenerating(false); setGenerated(true) }, 1800)
+  }
+
+  const wordCount = body.split(/\s+/).filter(Boolean).length
+
+  return (
+    <div className="p-8">
+      <SectionHeader title="Campaign Generator" subtitle="AI-assisted HCP campaign content creation" />
+      <div className="grid grid-cols-5 gap-6">
+        {/* Left form */}
+        <Card className="col-span-2 flex flex-col gap-4 h-fit">
+          <h3 className="text-[15px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Campaign Setup</h3>
+          <div>
+            <label className="text-[13px] font-semibold block mb-1" style={{ color: C.darkText }}>Target Segment</label>
+            <select className="w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2 bg-white" value={segment} onChange={e => setSegment(e.target.value)} style={{ height: 40, color: C.darkText }}>
+              {SEGMENTS.map(s => <option key={s.name}>{s.name}</option>)}
+            </select>
+          </div>
+          <Input label="Campaign Goal" placeholder="e.g., Introduce new heart failure therapy data from PIONEER-HF trial" value={goal} onChange={setGoal} />
+          <div>
+            <label className="text-[13px] font-semibold block mb-2" style={{ color: C.darkText }}>Channel</label>
+            <div className="flex gap-2">
+              {['Email', 'Detail Piece', 'SMS'].map(c => (
+                <button key={c} onClick={() => setChannel(c)}
+                  className="flex-1 py-2 rounded-[6px] text-[12px] font-semibold border transition-all"
+                  style={{
+                    background: channel === c ? C.navy : 'white',
+                    color: channel === c ? 'white' : C.navy,
+                    borderColor: channel === c ? C.navy : C.border,
+                  }}>
+                  {c}
+                </button>
+              ))}
+            </div>
+          </div>
+          <Btn variant="teal" onClick={generate} disabled={!goal || generating} icon={generating ? Icon.spinner : undefined} className="w-full justify-center">
+            {generating ? 'Generating...' : 'Generate Content'}
+          </Btn>
+        </Card>
+
+        {/* Right panel */}
+        <Card className="col-span-3">
+          {generating && (
+            <div className="flex flex-col items-center justify-center py-20 gap-3">
+              <span style={{ color: C.corpBlue }}>{Icon.spinner}</span>
+              <p className="text-[13px] pulse" style={{ color: C.midText }}>Generating campaign content for {segment}...</p>
+            </div>
+          )}
+
+          {!generating && !generated && (
+            <EmptyState icon={Icon.send} title="Campaign content will appear here" subtitle="Fill in the setup form and click Generate Content." />
+          )}
+
+          {generated && !generating && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-[15px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Generated Content</h3>
+                <div className="flex gap-2">
+                  <Badge tier={1} color="neutral">{wordCount} words</Badge>
+                  <Badge tier={1} color="success">Grade 10 reading level</Badge>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[12px] font-semibold block mb-1" style={{ color: C.midText }}>Subject Line</label>
+                <input
+                  className="input-field w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2 font-semibold"
+                  value={subject}
+                  onChange={e => setSubject(e.target.value)}
+                  style={{ color: C.darkText, fontFamily: 'Inter, Arial, sans-serif', height: 40 }}
+                />
+              </div>
+
+              <div>
+                <label className="text-[12px] font-semibold block mb-1" style={{ color: C.midText }}>Body Copy</label>
+                <textarea
+                  className="w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2"
+                  rows={12}
+                  value={body}
+                  onChange={e => setBody(e.target.value)}
+                  style={{ color: C.darkText, fontFamily: 'Inter, Arial, sans-serif', resize: 'vertical' }}
+                />
+              </div>
+
+              <div className="flex gap-3">
+                <Btn variant="primary" onClick={onNavigate.bind(null, 'compliance-review')}>Run Compliance Check</Btn>
+                <Btn variant="ghost" onClick={generate}>Regenerate</Btn>
+              </div>
+            </div>
+          )}
+        </Card>
+      </div>
+    </div>
+  )
+}
+
+// ─── COMPLIANCE REVIEW ────────────────────────────────────────────────────────
+
+const COMPLIANCE_FLAGS = [
+  { text: 'superior outcomes', violation: 'Off-Label', severity: 'High', ref: 'FDA 21 CFR 201.57(c)(2)', suggestion: 'statistically significant improvement in primary endpoints', status: 'open' as const },
+  { text: 'novel ARNI therapy', violation: 'Off-Label', severity: 'Medium', ref: 'FDA Guidance: Drug Promotional Labeling', suggestion: 'approved ARNI therapy', status: 'open' as const },
+  { text: 'PIONEER-HF trial', violation: 'Sunshine Act', severity: 'Low', ref: '42 CFR Part 403', suggestion: 'Note: disclosure may be required for materials referencing manufacturer-sponsored trials.', status: 'open' as const },
+  { text: 'new Phase III data', violation: 'State Restriction', severity: 'High', ref: 'CA Health & Safety Code 119402', suggestion: 'Published Phase III data (citation required)', status: 'open' as const },
+]
+
+function ComplianceReviewScreen() {
+  const [flags, setFlags] = useState(COMPLIANCE_FLAGS.map(f => ({ ...f, status: 'open' as 'open' | 'accepted' | 'editing' | 'overridden' })))
+  const [justifications, setJustifications] = useState<Record<number, string>>({})
+
+  const resolve = (i: number, status: 'accepted' | 'editing' | 'overridden') => {
+    setFlags(flags.map((f, fi) => fi === i ? { ...f, status } : f))
+  }
+
+  const highOpen = flags.filter(f => f.severity === 'High' && f.status === 'open').length
+  const resolved = flags.filter(f => f.status !== 'open').length
+  const allHighResolved = flags.filter(f => f.severity === 'High').every(f => f.status !== 'open')
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Compliance Review"
+        subtitle="Review AI-detected compliance flags before export"
+        actions={
+          <div className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: resolved === flags.length ? C.success : C.midText }}>
+            {resolved} of {flags.length} resolved
+          </div>
+        }
+      />
+
+      {!allHighResolved && (
+        <Banner type="error">
+          <strong>Export blocked:</strong> {highOpen} High-severity flag{highOpen > 1 ? 's' : ''} must be resolved before exporting campaign assets.
+        </Banner>
+      )}
+      {allHighResolved && resolved < flags.length && (
+        <Banner type="warning">All critical flags resolved. {flags.length - resolved} lower-severity flag{flags.length - resolved > 1 ? 's' : ''} remaining.</Banner>
+      )}
+      {resolved === flags.length && (
+        <Banner type="success">All compliance flags resolved. Your content is cleared for export.</Banner>
+      )}
+
+      <Card>
+        <table className="w-full border-collapse" style={{ tableLayout: 'fixed' }}>
+          <thead>
+            <tr style={{ background: C.navy }}>
+              {['Flagged Text', 'Violation Type', 'Severity', 'Regulatory Reference', 'Suggested Revision', 'Action'].map(h => (
+                <th key={h} className="text-left text-[10px] font-semibold text-white py-2 px-3 uppercase tracking-wide">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {flags.map((f, i) => (
+              <>
+                <tr key={i} style={{ background: f.status !== 'open' ? '#E8F5EF' : i % 2 === 0 ? 'white' : C.lightTint }}>
+                  <td className="px-3 py-3 text-[12px]">
+                    <span className="flag-text font-semibold">"{f.text}"</span>
+                  </td>
+                  <td className="px-3 py-3">
+                    <Badge tier={1} color={f.violation === 'Sunshine Act' ? 'info' : 'danger'}>{f.violation}</Badge>
+                  </td>
+                  <td className="px-3 py-3">
+                    <Badge tier={2} color={f.severity === 'High' ? 'block' : f.severity === 'Medium' ? 'warning' : 'info'}>{f.severity}</Badge>
+                  </td>
+                  <td className="px-3 py-3 text-[11px] mono" style={{ color: C.midText }}>{f.ref}</td>
+                  <td className="px-3 py-3 text-[12px]" style={{ color: C.darkText }}>{f.suggestion}</td>
+                  <td className="px-3 py-3">
+                    {f.status === 'open' && (
+                      <div className="flex flex-col gap-1">
+                        <button onClick={() => resolve(i, 'accepted')} className="text-[11px] font-semibold text-left hover:underline" style={{ color: C.success }}>✓ Accept Suggestion</button>
+                        <button onClick={() => resolve(i, 'editing')} className="text-[11px] font-semibold text-left hover:underline" style={{ color: C.corpBlue }}>✎ Edit Manually</button>
+                        <button onClick={() => resolve(i, 'overridden')} className="text-[11px] font-semibold text-left hover:underline" style={{ color: C.warning }}>⚠ Override</button>
+                      </div>
+                    )}
+                    {f.status !== 'open' && (
+                      <Badge tier={1} color="success">
+                        {f.status === 'accepted' ? 'Accepted' : f.status === 'editing' ? 'Edited' : 'Overridden'}
+                      </Badge>
+                    )}
+                  </td>
+                </tr>
+                {f.status === 'overridden' && (
+                  <tr key={`just-${i}`} style={{ background: '#FEF3C7' }}>
+                    <td colSpan={6} className="px-4 py-3">
+                      <p className="text-[12px] font-semibold mb-1" style={{ color: C.warning }}>Justification required for override (logged to audit trail)</p>
+                      <div className="flex gap-2 items-start">
+                        <textarea
+                          className="flex-1 border border-[#E67E22] rounded text-[12px] px-2 py-1"
+                          rows={2}
+                          placeholder="Enter justification reason..."
+                          value={justifications[i] || ''}
+                          onChange={e => setJustifications({ ...justifications, [i]: e.target.value })}
+                        />
+                        <Btn size="sm" variant="primary">Submit Override</Btn>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  )
+}
+
+// ─── FINANCIAL DISCLOSURES ────────────────────────────────────────────────────
+
+interface DisclosureRecord {
+  id: number
+  physician: string
+  npi: string
+  specialty: string
+  state: string
+  company: string
+  category: string
+  amount: number
+  date: string
+  status: 'Reported' | 'Pending' | 'Disputed'
+  year: number
+}
+
+const DISCLOSURES: DisclosureRecord[] = [
+  { id:  0, physician: 'Dr. Sarah Chen',       npi: '1234567890', specialty: 'Oncology',          state: 'CA', company: 'Pfizer Inc.',           category: 'Consulting Fee',   amount:  42500, date: '2025-03-15', status: 'Reported', year: 2025 },
+  { id:  1, physician: 'Dr. James Williams',   npi: '9876543210', specialty: 'Cardiology',         state: 'NY', company: 'AstraZeneca',           category: 'Speaking Fee',     amount:  18750, date: '2025-01-22', status: 'Reported', year: 2025 },
+  { id:  2, physician: 'Dr. Priya Patel',      npi: '1122334455', specialty: 'Neurology',          state: 'TX', company: 'Merck & Co.',           category: 'Research Grant',   amount: 125000, date: '2024-11-10', status: 'Reported', year: 2024 },
+  { id:  3, physician: 'Dr. Marcus Okonkwo',   npi: '5566778899', specialty: 'Surgery',            state: 'FL', company: 'Johnson & Johnson',     category: 'Travel & Lodging', amount:   3200, date: '2025-02-08', status: 'Pending',  year: 2025 },
+  { id:  4, physician: 'Dr. Emily Torres',     npi: '6677889900', specialty: 'Internal Medicine',  state: 'IL', company: 'Novartis',              category: 'Food & Beverage',  amount:    890, date: '2025-04-01', status: 'Reported', year: 2025 },
+  { id:  5, physician: 'Dr. Kevin Park',       npi: '7788990011', specialty: 'Dermatology',        state: 'WA', company: 'AbbVie Inc.',           category: 'Consulting Fee',   amount:  31000, date: '2025-05-14', status: 'Disputed', year: 2025 },
+  { id:  6, physician: 'Dr. Maria Santos',     npi: '8899001122', specialty: 'Oncology',           state: 'FL', company: 'Roche',                 category: 'Speaking Fee',     amount:   9500, date: '2024-08-20', status: 'Reported', year: 2024 },
+  { id:  7, physician: 'Dr. Thomas Nguyen',    npi: '9900112233', specialty: 'Cardiology',         state: 'CA', company: 'Sanofi',                category: 'Education',        amount:   4200, date: '2025-06-03', status: 'Reported', year: 2025 },
+  { id:  8, physician: 'Dr. Angela Ruiz',      npi: '0011223344', specialty: 'Oncology',           state: 'TX', company: 'Bristol-Myers Squibb', category: 'Research Grant',   amount:  87000, date: '2024-12-01', status: 'Reported', year: 2024 },
+  { id:  9, physician: 'Dr. Carol Davis',      npi: '1122334456', specialty: 'Orthopedics',        state: 'NY', company: 'Stryker Corp.',         category: 'Consulting Fee',   amount:  22500, date: '2025-03-29', status: 'Pending',  year: 2025 },
+  { id: 10, physician: 'Dr. Steven Park',      npi: '2233445566', specialty: 'Surgery',            state: 'TX', company: 'Medtronic',             category: 'Travel & Lodging', amount:   5800, date: '2025-01-11', status: 'Reported', year: 2025 },
+  { id: 11, physician: 'Dr. Linda Morrison',   npi: '3344556677', specialty: 'Psychiatry',         state: 'MA', company: 'Eli Lilly',             category: 'Speaking Fee',     amount:  14250, date: '2025-04-22', status: 'Reported', year: 2025 },
+  { id: 12, physician: 'Dr. Robert Tanaka',    npi: '4455667789', specialty: 'Dermatology',        state: 'CA', company: 'AbbVie Inc.',           category: 'Consulting Fee',   amount:  58000, date: '2024-09-15', status: 'Disputed', year: 2024 },
+  { id: 13, physician: 'Dr. Jennifer Brown',   npi: '5566778801', specialty: 'Neurology',          state: 'OH', company: 'Biogen',                category: 'Research Grant',   amount: 210000, date: '2024-07-01', status: 'Reported', year: 2024 },
+  { id: 14, physician: 'Dr. David Garcia',     npi: '6677889912', specialty: 'Cardiology',         state: 'GA', company: 'Boehringer Ingelheim',  category: 'Food & Beverage',  amount:   1240, date: '2025-05-30', status: 'Reported', year: 2025 },
+  { id: 15, physician: 'Dr. Susan Martinez',   npi: '7788990023', specialty: 'Oncology',           state: 'PA', company: 'Pfizer Inc.',           category: 'Speaking Fee',     amount:  26750, date: '2025-02-14', status: 'Reported', year: 2025 },
+  { id: 16, physician: 'Dr. Michael Johnson',  npi: '8899001134', specialty: 'Internal Medicine',  state: 'NC', company: 'AstraZeneca',           category: 'Education',        amount:   3100, date: '2024-10-05', status: 'Pending',  year: 2024 },
+  { id: 17, physician: 'Dr. Lisa Wang',        npi: '9900112245', specialty: 'Psychiatry',         state: 'IL', company: 'Janssen',               category: 'Consulting Fee',   amount:  47000, date: '2025-06-18', status: 'Reported', year: 2025 },
+  { id: 18, physician: 'Dr. Andrew Anderson',  npi: '0011223356', specialty: 'Orthopedics',        state: 'WA', company: 'Zimmer Biomet',         category: 'Travel & Lodging', amount:   7800, date: '2025-03-07', status: 'Disputed', year: 2025 },
+  { id: 19, physician: 'Dr. Rachel Kim',       npi: '1122334468', specialty: 'Dermatology',        state: 'NY', company: 'Regeneron',             category: 'Research Grant',   amount:  95000, date: '2024-06-20', status: 'Reported', year: 2024 },
+]
+
+type DisclosureSortKey = 'physician' | 'specialty' | 'company' | 'category' | 'amount' | 'date' | 'status'
+
+function FinancialDisclosureScreen() {
+  const { role } = useRole()
+  const [search, setSearch] = useState('')
+  const [filterCat, setFilterCat] = useState('All')
+  const [filterStatus, setFilterStatus] = useState('All')
+  const [filterYear, setFilterYear] = useState('All')
+  const [sortKey, setSortKey] = useState<DisclosureSortKey>('amount')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [exporting, setExporting] = useState(false)
+
+  const canExport = role === 'super-admin' || role === 'admin'
+
+  const categories = ['All', ...Array.from(new Set(DISCLOSURES.map(d => d.category))).sort()]
+  const statuses   = ['All', 'Reported', 'Pending', 'Disputed']
+  const years      = ['All', '2025', '2024']
+
+  const filtered = DISCLOSURES.filter(d => {
+    const q = search.toLowerCase()
+    if (q && !d.physician.toLowerCase().includes(q) && !d.company.toLowerCase().includes(q) && !d.npi.includes(q)) return false
+    if (filterCat !== 'All' && d.category !== filterCat) return false
+    if (filterStatus !== 'All' && d.status !== filterStatus) return false
+    if (filterYear !== 'All' && d.year !== Number(filterYear)) return false
+    return true
+  })
+
+  const sorted = [...filtered].sort((a, b) => {
+    const av: string | number = a[sortKey]
+    const bv: string | number = b[sortKey]
+    const al = typeof av === 'string' ? av.toLowerCase() : av
+    const bl = typeof bv === 'string' ? bv.toLowerCase() : bv
+    if (al < bl) return sortDir === 'asc' ? -1 : 1
+    if (al > bl) return sortDir === 'asc' ? 1 : -1
+    return 0
+  })
+
+  const toggleSort = (key: DisclosureSortKey) => {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortKey(key); setSortDir('desc') }
+  }
+
+  const totalAmount     = filtered.reduce((s, d) => s + d.amount, 0)
+  const pendingCount    = filtered.filter(d => d.status === 'Pending').length
+  const disputedCount   = filtered.filter(d => d.status === 'Disputed').length
+  const uniquePhysicians = new Set(filtered.map(d => d.physician)).size
+
+  const exportExcel = () => {
+    setExporting(true)
+    const headers = ['Physician', 'NPI', 'Specialty', 'State', 'Company', 'Category', 'Amount (USD)', 'Date', 'Status', 'Year']
+    const rows = sorted.map(d => [
+      d.physician, d.npi, d.specialty, d.state, d.company, d.category,
+      d.amount.toFixed(2), d.date, d.status, String(d.year),
+    ])
+    const htmlTable = [
+      `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">`,
+      `<head><meta charset="UTF-8"><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>`,
+      `<x:Name>Financial Disclosures</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>`,
+      `</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--></head>`,
+      `<body><table border="1" style="border-collapse:collapse">`,
+      `<tr>${headers.map(h => `<th style="background:#1B3A6B;color:white;font-weight:bold;padding:6px 10px;white-space:nowrap">${h}</th>`).join('')}</tr>`,
+      ...rows.map((r, i) => `<tr style="background:${i % 2 === 0 ? '#ffffff' : '#EBF4FA'}">${
+        r.map((c, ci) => `<td style="padding:5px 10px${ci === 6 ? ';text-align:right;font-family:monospace' : ''}">${c}</td>`).join('')
+      }</tr>`),
+      `<tr style="background:#F7FAFC;font-weight:bold;border-top:2px solid #CBD5E0">`,
+      `<td colspan="6" style="padding:6px 10px">Total (${sorted.length} records)</td>`,
+      `<td style="padding:6px 10px;text-align:right;font-family:monospace">$${sorted.reduce((s, d) => s + d.amount, 0).toFixed(2)}</td>`,
+      `<td colspan="3"></td></tr>`,
+      `</table></body></html>`,
+    ].join('\n')
+
+    const blob = new Blob([htmlTable], { type: 'application/vnd.ms-excel' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `Financial_Disclosures_${new Date().toISOString().slice(0, 10)}.xls`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+    setTimeout(() => setExporting(false), 800)
+  }
+
+  const SortBtn = ({ k, label, right = false }: { k: DisclosureSortKey; label: string; right?: boolean }) => (
+    <button
+      className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-white hover:text-[#BEE3F8] transition-colors ${right ? 'ml-auto' : ''}`}
+      onClick={() => toggleSort(k)}>
+      {label}
+      <span className="opacity-70">{sortKey === k ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
+    </button>
+  )
+
+  const catStyle: Record<string, { bg: string; color: string }> = {
+    'Research Grant':   { bg: '#EBF4FA', color: C.corpBlue },
+    'Consulting Fee':   { bg: '#FEF3C7', color: '#92400E' },
+    'Speaking Fee':     { bg: '#F1F5F9', color: '#334155' },
+    'Travel & Lodging': { bg: '#FEE2E2', color: '#991B1B' },
+    'Food & Beverage':  { bg: '#E8F5EF', color: C.success },
+    'Education':        { bg: '#F0FDF4', color: '#166534' },
+  }
+
+  const fmtUSD = (n: number) => n >= 100000 ? `$${(n / 1000).toFixed(0)}k` : n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : `$${n.toLocaleString()}`
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Financial Disclosures"
+        subtitle="Open Payments (Sunshine Act) — physician-manufacturer financial relationships requiring mandatory reporting"
+        actions={
+          <Btn
+            variant={canExport ? 'primary' : 'disabled'}
+            disabled={!canExport || exporting}
+            icon={Icon.download}
+            onClick={exportExcel}>
+            {exporting ? 'Exporting…' : 'Export to Excel'}
+          </Btn>
+        }
+      />
+
+      {!canExport && (
+        <Banner type="warning">
+          <strong>Export restricted.</strong> Only Admin and Super Admin roles may export mandatory reporting logs.
+        </Banner>
+      )}
+
+      {/* Summary cards */}
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        {[
+          { label: 'Total Disclosed',  value: `$${totalAmount.toLocaleString()}`,  color: C.navy,    sub: `${filtered.length} transactions` },
+          { label: 'Physicians',       value: String(uniquePhysicians),             color: C.corpBlue, sub: 'unique in current view' },
+          { label: 'Pending Review',   value: String(pendingCount),                 color: C.warning, sub: pendingCount > 0 ? 'Awaiting submission' : 'All submitted' },
+          { label: 'Disputed',         value: String(disputedCount),                color: C.danger,  sub: disputedCount > 0 ? 'Requires attention' : 'No disputes' },
+        ].map(c => (
+          <Card key={c.label}>
+            <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={{ color: C.midText }}>{c.label}</p>
+            <p className="text-[26px] font-bold leading-tight" style={{ fontFamily: 'Calibri, Georgia, serif', color: c.color }}>{c.value}</p>
+            <p className="text-[10px] mt-0.5" style={{ color: C.midText }}>{c.sub}</p>
+          </Card>
+        ))}
+      </div>
+
+      {/* Filters */}
+      <Card className="mb-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative">
+            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#A0AEC0]">{Icon.search}</span>
+            <input
+              type="text"
+              placeholder="Search physician, company or NPI…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="border rounded-[6px] text-[12px] pl-8 pr-3 py-1.5"
+              style={{ borderColor: C.border, color: C.darkText, width: 260 }}
+            />
+          </div>
+          {([
+            { label: 'Category', value: filterCat,    opts: categories, set: setFilterCat    },
+            { label: 'Status',   value: filterStatus, opts: statuses,   set: setFilterStatus },
+            { label: 'Year',     value: filterYear,   opts: years,      set: setFilterYear   },
+          ] as { label: string; value: string; opts: string[]; set: (v: string) => void }[]).map(f => (
+            <div key={f.label} className="flex items-center gap-1.5">
+              <span className="text-[11px]" style={{ color: C.midText }}>{f.label}:</span>
+              <select
+                className="border rounded-[6px] text-[12px] px-2 py-1.5"
+                style={{ borderColor: C.border, color: C.darkText }}
+                value={f.value}
+                onChange={e => f.set(e.target.value)}>
+                {f.opts.map(o => <option key={o}>{o}</option>)}
+              </select>
+            </div>
+          ))}
+          <span className="ml-auto text-[11px]" style={{ color: C.midText }}>
+            Showing <strong style={{ color: C.navy }}>{sorted.length}</strong> of {DISCLOSURES.length} records
+          </span>
+          {(search || filterCat !== 'All' || filterStatus !== 'All' || filterYear !== 'All') && (
+            <button className="text-[11px] hover:underline" style={{ color: C.corpBlue }}
+              onClick={() => { setSearch(''); setFilterCat('All'); setFilterStatus('All'); setFilterYear('All') }}>
+              Clear all ×
+            </button>
+          )}
+        </div>
+      </Card>
+
+      {/* Table */}
+      <Card className="p-0 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse" style={{ fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: C.navy }}>
+                <th className="px-4 py-3 text-left"><SortBtn k="physician" label="Physician" /></th>
+                <th className="px-3 py-3 text-left"><SortBtn k="specialty" label="Specialty" /></th>
+                <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-white opacity-80">NPI</th>
+                <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-white opacity-80">State</th>
+                <th className="px-3 py-3 text-left"><SortBtn k="company" label="Company" /></th>
+                <th className="px-3 py-3 text-left"><SortBtn k="category" label="Category" /></th>
+                <th className="px-3 py-3"><div className="flex justify-end"><SortBtn k="amount" label="Amount" right /></div></th>
+                <th className="px-3 py-3 text-left"><SortBtn k="date" label="Date" /></th>
+                <th className="px-3 py-3 text-left"><SortBtn k="status" label="Status" /></th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="text-center py-14 text-[13px]" style={{ color: C.midText }}>
+                    No disclosures match the current filters.
+                  </td>
+                </tr>
+              )}
+              {sorted.map((d, i) => {
+                const cs = catStyle[d.category] ?? { bg: '#F1F5F9', color: '#334155' }
+                return (
+                  <tr key={d.id}
+                    style={{ background: i % 2 === 0 ? 'white' : C.lightTint, borderBottom: '1px solid #EDF2F7' }}
+                    className="hover:bg-[#EBF4FA] transition-colors">
+                    <td className="px-4 py-3 font-semibold whitespace-nowrap" style={{ color: C.navy }}>{d.physician}</td>
+                    <td className="px-3 py-3"><Badge tier={1} color="neutral">{d.specialty}</Badge></td>
+                    <td className="px-3 py-3 mono text-[11px]" style={{ color: C.midText }}>{d.npi}</td>
+                    <td className="px-3 py-3"><Badge tier={1} color="info">{d.state}</Badge></td>
+                    <td className="px-3 py-3 whitespace-nowrap" style={{ color: C.darkText }}>{d.company}</td>
+                    <td className="px-3 py-3">
+                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded-[4px] whitespace-nowrap"
+                        style={{ background: cs.bg, color: cs.color }}>{d.category}</span>
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      <span
+                        className="font-bold mono text-[12px]"
+                        title={`$${d.amount.toLocaleString()}`}
+                        style={{ color: d.amount >= 50000 ? C.danger : d.amount >= 10000 ? C.warning : C.success }}>
+                        {fmtUSD(d.amount)}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3 mono text-[11px] whitespace-nowrap" style={{ color: C.midText }}>{d.date}</td>
+                    <td className="px-3 py-3">
+                      <Badge
+                        tier={d.status === 'Reported' ? 1 : 2}
+                        color={d.status === 'Reported' ? 'success' : d.status === 'Pending' ? 'warning' : 'danger'}>
+                        {d.status}
+                      </Badge>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+            {sorted.length > 0 && (
+              <tfoot>
+                <tr style={{ borderTop: '2px solid #EDF2F7', background: '#F7FAFC' }}>
+                  <td colSpan={6} className="px-4 py-3 text-[11px] font-bold" style={{ color: C.midText }}>
+                    Totals — {sorted.length} record{sorted.length !== 1 ? 's' : ''} in current view
+                  </td>
+                  <td className="px-3 py-3 text-right font-bold mono text-[13px]" style={{ color: C.navy }}>
+                    ${sorted.reduce((s, d) => s + d.amount, 0).toLocaleString()}
+                  </td>
+                  <td colSpan={2} />
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+// ─── ANALYTICS ────────────────────────────────────────────────────────────────
+
+function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { resolvedOut, warnNotes } = useOutliers()
+  const taggedOutliers = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
+
+  const states = [
+    { abbr: 'FL', density: 90 }, { abbr: 'CA', density: 85 }, { abbr: 'NY', density: 82 },
+    { abbr: 'TX', density: 78 }, { abbr: 'PA', density: 65 }, { abbr: 'OH', density: 60 },
+    { abbr: 'IL', density: 58 }, { abbr: 'GA', density: 55 }, { abbr: 'NC', density: 52 },
+    { abbr: 'WA', density: 48 }, { abbr: 'AZ', density: 44 }, { abbr: 'MA', density: 72 },
+  ]
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Analytics Dashboard"
+        subtitle="Quality trends, specialty distribution, and geographic coverage"
+        actions={<Btn variant="secondary" size="sm" onClick={() => onNavigate('data-heatmap')}>View Data Heatmap</Btn>}
+      />
+
+      <div className="grid grid-cols-3 gap-6 mb-6">
+        {[
+          { label: 'Total Records', value: '10,412', color: C.navy },
+          { label: 'Average Quality Score', value: '76%', color: C.corpBlue },
+          { label: 'Open Flags', value: '23', color: C.danger },
+        ].map(m => (
+          <Card key={m.label}>
+            <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={{ color: C.midText }}>{m.label}</p>
+            <p className="text-[32px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: m.color }}>{m.value}</p>
+          </Card>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-2 gap-6 mb-6">
+        {/* Quality trend bar chart */}
+        <Card>
+          <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Quality Score by Upload</h3>
+          <div className="flex items-end gap-2 h-40">
+            {[
+              { l: 'Q4 \'24', v: 58 }, { l: 'Jan \'25', v: 64 }, { l: 'Mar \'25', v: 72 },
+              { l: 'Jun \'25', v: 69 }, { l: 'Sep \'25', v: 75 }, { l: 'Q1 \'26', v: 80 }, { l: 'Today', v: 84 },
+            ].map((b, i, arr) => (
+              <div key={b.l} className="flex flex-col items-center gap-1 flex-1">
+                <span className="text-[9px] font-bold" style={{ color: i === arr.length - 1 ? C.success : C.midText }}>{b.v}%</span>
+                <div className="w-full rounded-t transition-all" style={{
+                  height: `${(b.v / 100) * 100}%`,
+                  background: i === arr.length - 1 ? C.success : C.corpBlue,
+                  opacity: 0.7 + (i / arr.length) * 0.3,
+                }} />
+                <span className="text-[9px]" style={{ color: C.midText }}>{b.l}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        {/* Recharts Specialty Pie */}
+        <Card>
+          <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Records by Specialty</h3>
+          {(() => {
+            const TOTAL = 10412
+            const SPEC_DATA = [
+              { name: 'Cardiology',   pct: 28, color: C.navy },
+              { name: 'Oncology',     pct: 22, color: C.corpBlue },
+              { name: 'Neurology',    pct: 17, color: C.teal },
+              { name: 'Orthopedics', pct: 14, color: '#5C85C4' },
+              { name: 'Other',        pct: 19, color: '#CBD5E0' },
+            ].map(d => ({ ...d, count: Math.round(d.pct / 100 * TOTAL) }))
+            const SpecTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof SPEC_DATA[0] }> }) => {
+              if (!active || !payload?.length) return null
+              const d = payload[0].payload
+              return (
+                <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+                  <p className="font-bold mb-1" style={{ color: d.color }}>{d.name}</p>
+                  <p style={{ color: C.darkText }}><strong>{d.count.toLocaleString()}</strong> records</p>
+                  <p style={{ color: C.midText }}>{d.pct}% of total</p>
+                </div>
+              )
+            }
+            return (
+              <div style={{ height: 210 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={SPEC_DATA} dataKey="count" nameKey="name"
+                      cx="40%" cy="50%" innerRadius={48} outerRadius={78}
+                      paddingAngle={2} stroke="none">
+                      {SPEC_DATA.map((s, i) => <Cell key={i} fill={s.color} />)}
+                    </Pie>
+                    <RechartTooltip content={<SpecTooltip />} />
+                    <Legend layout="vertical" align="right" verticalAlign="middle"
+                      iconType="circle" iconSize={8}
+                      formatter={(value: string) => (
+                        <span style={{ fontSize: 11, color: C.darkText }}>{value}</span>
+                      )} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            )
+          })()}
+        </Card>
+      </div>
+
+      {/* Data Quality Warning panel — only shown when records are tagged */}
+      {taggedOutliers.length > 0 && (
+        <div className="mb-6 bg-white rounded-[8px] border-2 p-4" style={{ borderColor: C.warning }}>
+          <div className="flex items-center gap-2 mb-3">
+            <span style={{ color: C.warning }}>{Icon.alertTriangle}</span>
+            <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: '#92400E' }}>
+              Data Quality Warnings — {taggedOutliers.length} record{taggedOutliers.length > 1 ? 's' : ''} flagged
+            </h3>
+            <Badge tier={2} color="warning">Retained in dataset</Badge>
+            <span className="ml-auto text-[11px]" style={{ color: C.midText }}>These records are highlighted in red on all exports</span>
+          </div>
+          <table className="w-full border-collapse" style={{ fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: '#FEF3C7' }}>
+                {['Record', 'Specialty', 'Anomaly Score', 'Outlier Reason', 'Warning Note'].map(h => (
+                  <th key={h} className="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#92400E' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {taggedOutliers.map((o, i) => (
+                <tr key={o.id} style={{ background: i % 2 === 0 ? '#FFFBEB' : '#FEF9EC', borderBottom: '1px solid #FDE68A' }}>
+                  <td className="px-3 py-2 font-semibold" style={{ color: C.danger }}>
+                    <span className="inline-block mr-1.5 text-[9px] font-bold px-1 py-0.5 rounded" style={{ background: '#FEE2E2', color: C.danger }}>⚠</span>
+                    {o.record}
+                  </td>
+                  <td className="px-3 py-2"><Badge tier={1} color="neutral">{o.specialty}</Badge></td>
+                  <td className="px-3 py-2 mono font-bold" style={{ color: o.anomalyScore >= 0.85 ? C.danger : C.warning }}>{o.anomalyScore.toFixed(2)}</td>
+                  <td className="px-3 py-2 text-[11px]" style={{ color: C.darkText }}>{o.reason}</td>
+                  <td className="px-3 py-2 text-[11px] italic" style={{ color: C.midText }}>
+                    {warnNotes[o.id] || <span style={{ color: C.border }}>No note provided</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── OUTLIER DISTRIBUTION CHARTS ───────────────────────────────────── */}
+      <div className="grid grid-cols-2 gap-6 mb-6">
+        {/* Outlier specialty breakdown — pie */}
+        <Card>
+          <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Outlier Distribution by Specialty</h3>
+          {(() => {
+            // Aggregate OUTLIERS + VALIDATION_ERRORS by specialty
+            const allFlagged = [
+              ...OUTLIERS.map(o => o.specialty),
+              ...VALIDATION_ERRORS.map(v => v.specialty),
+            ]
+            const specMap: Record<string, number> = {}
+            for (const s of allFlagged) specMap[s] = (specMap[s] ?? 0) + 1
+            const OUTLIER_SPEC_COLORS: Record<string, string> = {
+              Oncology:           C.danger,
+              Cardiology:         C.corpBlue,
+              Dermatology:        C.teal,
+              Neurology:          '#5C85C4',
+              Surgery:            C.warning,
+              'Internal Medicine': '#A78BFA',
+            }
+            const pieData = Object.entries(specMap)
+              .sort((a, b) => b[1] - a[1])
+              .map(([name, count]) => ({ name, count, color: OUTLIER_SPEC_COLORS[name] ?? '#CBD5E0' }))
+            const total = pieData.reduce((s, d) => s + d.count, 0)
+            const OutlierSpecTip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof pieData[0] }> }) => {
+              if (!active || !payload?.length) return null
+              const d = payload[0].payload
+              return (
+                <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+                  <p className="font-bold mb-1" style={{ color: d.color }}>{d.name}</p>
+                  <p style={{ color: C.darkText }}><strong>{d.count}</strong> flagged records</p>
+                  <p style={{ color: C.midText }}>{Math.round(d.count / total * 100)}% of all outliers</p>
+                </div>
+              )
+            }
+            return (
+              <div style={{ height: 200 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={pieData} dataKey="count" nameKey="name"
+                      cx="42%" cy="50%" innerRadius={44} outerRadius={72}
+                      paddingAngle={3} stroke="none">
+                      {pieData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                    </Pie>
+                    <RechartTooltip content={<OutlierSpecTip />} />
+                    <Legend layout="vertical" align="right" verticalAlign="middle"
+                      iconType="circle" iconSize={8}
+                      formatter={(value: string) => <span style={{ fontSize: 11, color: C.darkText }}>{value}</span>} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            )
+          })()}
+        </Card>
+
+        {/* Geographic outlier concentration — horizontal bar */}
+        <Card>
+          <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Outlier Concentration by State</h3>
+          {(() => {
+            // Build state data: combine validation errors (have state) with density
+            const GEO_DATA = [
+              { state: 'FL', outliers: 3, records: 937  },
+              { state: 'CA', records: 885, outliers: 2 },
+              { state: 'NY', records: 854, outliers: 2 },
+              { state: 'TX', records: 812, outliers: 3 },
+              { state: 'MA', records: 750, outliers: 1 },
+              { state: 'PA', records: 677, outliers: 1 },
+              { state: 'OH', records: 625, outliers: 0 },
+              { state: 'IL', records: 604, outliers: 1 },
+              { state: 'GA', records: 573, outliers: 0 },
+              { state: 'WA', records: 500, outliers: 0 },
+            ].sort((a, b) => b.outliers - a.outliers || b.records - a.records)
+            const GeoTip = ({ active, payload, label }: { active?: boolean; label?: string; payload?: Array<{ name: string; value: number; fill: string }> }) => {
+              if (!active || !payload?.length) return null
+              const rec = GEO_DATA.find(d => d.state === label)
+              return (
+                <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+                  <p className="font-bold mb-1" style={{ color: C.navy }}>{label}</p>
+                  {payload.map(p => (
+                    <p key={p.name} style={{ color: p.fill }}>
+                      {p.name}: <strong>{p.value}</strong>
+                    </p>
+                  ))}
+                  {rec && <p style={{ color: C.midText }}>Outlier rate: {((rec.outliers / rec.records) * 100).toFixed(2)}%</p>}
+                </div>
+              )
+            }
+            return (
+              <div style={{ height: 200 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={GEO_DATA} layout="vertical"
+                    margin={{ top: 0, right: 48, left: 8, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#EDF2F7" />
+                    <XAxis type="number" tick={{ fontSize: 10, fill: C.midText }} tickLine={false} axisLine={false} />
+                    <YAxis type="category" dataKey="state" width={28} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} />
+                    <RechartTooltip content={<GeoTip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
+                    <Legend iconType="square" iconSize={8} wrapperStyle={{ fontSize: 10, color: C.midText }} />
+                    <Bar dataKey="records" name="Total Records" fill={C.corpBlue} opacity={0.35} radius={[0, 3, 3, 0]} />
+                    <Bar dataKey="outliers" name="Outlier Flags" fill={C.danger} radius={[0, 3, 3, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )
+          })()}
+        </Card>
+      </div>
+
+      {/* Geographic record density — horizontal bar replacing old tile grid */}
+      <Card>
+        <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Record Density by State</h3>
+        {(() => {
+          const densityData = states
+            .slice()
+            .sort((a, b) => b.density - a.density)
+            .map(s => ({ ...s, count: Math.round(s.density / 100 * 10412) }))
+          const DensityTip = ({ active, payload, label }: { active?: boolean; label?: string; payload?: Array<{ value: number }> }) => {
+            if (!active || !payload?.length) return null
+            return (
+              <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+                <p className="font-bold mb-1" style={{ color: C.navy }}>{label}</p>
+                <p style={{ color: C.darkText }}><strong>{payload[0].value.toLocaleString()}</strong> records</p>
+                <p style={{ color: C.midText }}>{states.find(s => s.abbr === label)?.density ?? 0}% relative density</p>
+              </div>
+            )
+          }
+          return (
+            <div style={{ height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={densityData} margin={{ top: 4, right: 16, left: 0, bottom: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
+                  <XAxis dataKey="abbr" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} />
+                  <YAxis tickFormatter={(v: number) => v.toLocaleString()} tick={{ fontSize: 10, fill: C.midText }} tickLine={false} axisLine={false} width={44} />
+                  <RechartTooltip content={<DensityTip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
+                  <Bar dataKey="count" name="Records" radius={[4, 4, 0, 0]}>
+                    {densityData.map((s, i) => (
+                      <Cell key={i} fill={`rgba(27,58,107,${0.25 + (s.density / 100) * 0.75})`} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )
+        })()}
+      </Card>
+    </div>
+  )
+}
+
+// ─── DATA HEATMAP ─────────────────────────────────────────────────────────────
+
+const HEATMAP_FIELDS: {
+  name: string
+  required: boolean
+  nullPct: number         // % of records where field is missing
+  invalidPct: number      // % of records where field fails validation
+  partialPct: number      // % partially filled
+}[] = [
+  { name: 'NPI',        required: true,  nullPct: 0,  invalidPct: 4,  partialPct: 0  },
+  { name: 'First Name', required: true,  nullPct: 0,  invalidPct: 0,  partialPct: 1  },
+  { name: 'Last Name',  required: true,  nullPct: 0,  invalidPct: 0,  partialPct: 0  },
+  { name: 'Specialty',  required: false, nullPct: 3,  invalidPct: 2,  partialPct: 4  },
+  { name: 'State',      required: false, nullPct: 2,  invalidPct: 1,  partialPct: 0  },
+  { name: 'Email',      required: false, nullPct: 14, invalidPct: 6,  partialPct: 3  },
+  { name: 'Phone',      required: false, nullPct: 18, invalidPct: 3,  partialPct: 8  },
+  { name: 'ZIP Code',   required: false, nullPct: 9,  invalidPct: 2,  partialPct: 5  },
+  { name: 'DEA #',      required: false, nullPct: 31, invalidPct: 1,  partialPct: 4  },
+  { name: 'Address',    required: false, nullPct: 22, invalidPct: 0,  partialPct: 11 },
+]
+
+type CellStatus = 'complete' | 'partial' | 'invalid' | 'missing'
+
+// Deterministic cell generator so grid is stable across renders
+function makeCellStatus(fieldIdx: number, recIdx: number): CellStatus {
+  const f = HEATMAP_FIELDS[fieldIdx]
+  // use a simple hash of indices for deterministic "random"
+  const h = ((fieldIdx * 31 + recIdx * 17) % 100)
+  if (h < f.nullPct)                          return 'missing'
+  if (h < f.nullPct + f.invalidPct)           return 'invalid'
+  if (h < f.nullPct + f.invalidPct + f.partialPct) return 'partial'
+  return 'complete'
+}
+
+const HEATMAP_RECORDS = Array.from({ length: 30 }, (_, i) => ({
+  id: `#${4800 + i}`,
+  lastName: ['Morrison','Chen','Patel','Torres','Brennan','Tanaka','Nguyen','Davis','Park','Santos',
+             'Williams','Kim','Okafor','Ruiz','Wang','Johnson','Lee','Brown','Garcia','Martinez',
+             'Anderson','Taylor','Thomas','Jackson','White','Harris','Martin','Thompson','Robinson','Clark'][i],
+  values: HEATMAP_FIELDS.map((_, fi) => makeCellStatus(fi, i)),
+}))
+
+// Per-field aggregated health (used in column summary row)
+const FIELD_HEALTH: (typeof HEATMAP_FIELDS[number] & { completePct: number })[] =
+  HEATMAP_FIELDS.map(f => ({
+    ...f,
+    completePct: 100 - f.nullPct - f.invalidPct - f.partialPct,
+  }))
+
+function DataHeatmapScreen() {
+  const [hover, setHover] = useState<{ r: number; c: number } | null>(null)
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [filterField, setFilterField] = useState<string>('All fields')
+  const [filterStatus, setFilterStatus] = useState<CellStatus | 'all'>('all')
+  const [viewMode, setViewMode] = useState<'matrix' | 'field' | 'chart'>('matrix')
+
+  const onCellEnter = (r: number, c: number) => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current)
+    hoverTimer.current = setTimeout(() => setHover({ r, c }), 120)
+  }
+  const onCellLeave = () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current)
+    hoverTimer.current = setTimeout(() => setHover(null), 80)
+  }
+
+  const cellColor = (s: CellStatus) =>
+    s === 'complete' ? C.success : s === 'partial' ? C.warning : s === 'invalid' ? C.danger : '#CBD5E0'
+
+  const cellLabel = (s: CellStatus) =>
+    s === 'complete' ? 'Complete' : s === 'partial' ? 'Partial / truncated' : s === 'invalid' ? 'Validation failure' : 'Missing / null'
+
+  // filter which columns to show
+  const visibleFields = filterField === 'All fields'
+    ? HEATMAP_FIELDS.map((_, i) => i)
+    : [HEATMAP_FIELDS.findIndex(f => f.name === filterField)]
+
+  // filter which rows to show
+  const visibleRecords = filterStatus === 'all'
+    ? HEATMAP_RECORDS
+    : HEATMAP_RECORDS.filter(rec =>
+        visibleFields.some(fi => rec.values[fi] === filterStatus)
+      )
+
+  const hoverField = hover !== null ? HEATMAP_FIELDS[hover.c] : null
+  const hoverRec   = hover !== null ? HEATMAP_RECORDS[hover.r] : null
+  const hoverStatus = hover !== null ? HEATMAP_RECORDS[hover.r]?.values[hover.c] : null
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Data Quality Heatmap"
+        subtitle="Visual matrix of field-level completeness and validation status across all records"
+        actions={
+          <div className="flex items-center gap-2">
+            <button
+              className="text-[12px] px-3 py-1.5 rounded-[6px] border transition-all"
+              style={{ borderColor: viewMode === 'matrix' ? C.navy : C.border, background: viewMode === 'matrix' ? C.navy : 'white', color: viewMode === 'matrix' ? 'white' : C.midText }}
+              onClick={() => setViewMode('matrix')}>
+              Matrix view
+            </button>
+            <button
+              className="text-[12px] px-3 py-1.5 rounded-[6px] border transition-all"
+              style={{ borderColor: viewMode === 'field' ? C.navy : C.border, background: viewMode === 'field' ? C.navy : 'white', color: viewMode === 'field' ? 'white' : C.midText }}
+              onClick={() => setViewMode('field')}>
+              Field summary
+            </button>
+            <button
+              className="text-[12px] px-3 py-1.5 rounded-[6px] border transition-all"
+              style={{ borderColor: viewMode === 'chart' ? C.navy : C.border, background: viewMode === 'chart' ? C.navy : 'white', color: viewMode === 'chart' ? 'white' : C.midText }}
+              onClick={() => setViewMode('chart')}>
+              📊 Chart view
+            </button>
+          </div>
+        }
+      />
+
+      {/* ── LEGEND + FILTERS ──────────────────────────────────────────────── */}
+      <Card className="mb-5">
+        <div className="flex flex-wrap items-center gap-6">
+          {/* Legend */}
+          <div className="flex items-center gap-4">
+            <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Legend:</span>
+            {([
+              { status: 'complete', label: 'Complete' },
+              { status: 'partial',  label: 'Partial' },
+              { status: 'invalid',  label: 'Validation failure' },
+              { status: 'missing',  label: 'Missing / null' },
+            ] as { status: CellStatus; label: string }[]).map(l => (
+              <button
+                key={l.status}
+                className="flex items-center gap-1.5 text-[11px] transition-all rounded px-1.5 py-0.5"
+                style={{
+                  color: C.midText,
+                  background: filterStatus === l.status ? '#EBF4FA' : 'transparent',
+                  fontWeight: filterStatus === l.status ? 700 : 400,
+                  outline: filterStatus === l.status ? `2px solid ${C.corpBlue}` : 'none',
+                }}
+                onClick={() => setFilterStatus(filterStatus === l.status ? 'all' : l.status as CellStatus)}>
+                <div className="w-3.5 h-3.5 rounded-sm" style={{ background: cellColor(l.status as CellStatus) }} />
+                {l.label}
+              </button>
+            ))}
+            {filterStatus !== 'all' && (
+              <button className="text-[11px] hover:underline" style={{ color: C.corpBlue }}
+                onClick={() => setFilterStatus('all')}>Clear filter ×</button>
+            )}
+          </div>
+
+          {/* Field filter */}
+          <div className="flex items-center gap-2 ml-auto">
+            <span className="text-[11px]" style={{ color: C.midText }}>Show field:</span>
+            <select
+              className="border border-[#CBD5E0] rounded-[6px] text-[12px] px-2 py-1"
+              style={{ color: C.darkText }}
+              value={filterField}
+              onChange={e => setFilterField(e.target.value)}>
+              <option>All fields</option>
+              {HEATMAP_FIELDS.map(f => <option key={f.name}>{f.name}</option>)}
+            </select>
+            <span className="text-[11px]" style={{ color: C.midText }}>
+              Showing <strong>{visibleRecords.length}</strong> of {HEATMAP_RECORDS.length} records
+            </span>
+          </div>
+        </div>
+      </Card>
+
+      {/* ── HOVER TOOLTIP PANEL — sticky so it stays visible while scrolling ── */}
+      <div className="mb-4 rounded-[8px] border flex items-start gap-6"
+        style={{
+          height: 72,
+          padding: '0 16px',
+          alignItems: 'center',
+          position: 'sticky',
+          top: 0,
+          zIndex: 20,
+          background: hover && hoverField && hoverRec && hoverStatus ? '#FAFBFC' : '#F7F9FB',
+          borderColor: hover && hoverStatus ? cellColor(hoverStatus) : '#EDF2F7',
+          borderLeftWidth: hover && hoverStatus ? 4 : 1,
+          transition: 'border-color 0.15s, background 0.15s',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+        }}>
+        {hover && hoverField && hoverRec && hoverStatus ? (<>
+          <div style={{ minWidth: 140 }}>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Record</p>
+            <p className="text-[13px] font-bold mono" style={{ color: C.navy }}>{hoverRec.id} — {hoverRec.lastName}</p>
+          </div>
+          <div style={{ minWidth: 90 }}>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Field</p>
+            <p className="text-[13px] font-bold" style={{ color: C.navy }}>{hoverField.name}</p>
+          </div>
+          <div style={{ minWidth: 120 }}>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Status</p>
+            <Badge tier={2} color={hoverStatus === 'complete' ? 'approve' : hoverStatus === 'partial' ? 'warning' : 'block'}>
+              {cellLabel(hoverStatus)}
+            </Badge>
+          </div>
+          <div style={{ minWidth: 160 }}>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Field-level null %</p>
+            <div className="flex items-center gap-2">
+              <div className="progress-track" style={{ width: 80 }}>
+                <div className="progress-fill" style={{ width: `${hoverField.nullPct}%`, background: hoverField.nullPct > 10 ? C.danger : C.warning }} />
+              </div>
+              <span className="mono text-[12px] font-bold" style={{ color: hoverField.nullPct > 10 ? C.danger : C.warning }}>
+                {hoverField.nullPct}% null
+              </span>
+            </div>
+          </div>
+          <div style={{ minWidth: 140 }}>
+            <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Validation failures</p>
+            <span className="mono text-[13px] font-bold" style={{ color: hoverField.invalidPct > 0 ? C.danger : C.success }}>
+              {hoverField.invalidPct}% of records
+            </span>
+          </div>
+          {hoverField.required && (
+            <Badge tier={1} color="warning">Required field</Badge>
+          )}
+        </>) : (
+          <span className="text-[12px]" style={{ color: C.midText }}>Hover over any cell to see field details</span>
+        )}
+      </div>
+
+      {/* ── VIEW: MATRIX ─────────────────────────────────────────────────── */}
+      {viewMode === 'matrix' && (
+        <Card className="overflow-auto">
+          <div style={{ overflowX: 'auto' }}>
+            <table className="border-collapse" style={{ minWidth: 500 }}>
+              <thead>
+                <tr>
+                  {/* Sticky record ID column header */}
+                  <th className="text-left px-2 py-1 text-[10px] sticky left-0 bg-white z-10"
+                    style={{ color: C.midText, minWidth: 110, borderBottom: `2px solid #EDF2F7` }}>
+                    Record
+                  </th>
+                  {visibleFields.map(fi => (
+                    <th key={fi} className="px-1 py-1 text-center"
+                      style={{ minWidth: 52, borderBottom: `2px solid #EDF2F7` }}>
+                      <div className="flex flex-col items-center gap-0.5">
+                        <span className="text-[9px] font-bold" style={{ color: HEATMAP_FIELDS[fi].required ? C.warning : C.navy }}>
+                          {HEATMAP_FIELDS[fi].name}
+                          {HEATMAP_FIELDS[fi].required && ' *'}
+                        </span>
+                        {/* Column health bar */}
+                        <div className="progress-track" style={{ width: 36, height: 3 }}>
+                          <div className="progress-fill" style={{
+                            width: `${FIELD_HEALTH[fi].completePct}%`,
+                            background: FIELD_HEALTH[fi].completePct >= 90 ? C.success
+                              : FIELD_HEALTH[fi].completePct >= 70 ? C.warning : C.danger,
+                          }} />
+                        </div>
+                        <span className="text-[8px] mono" style={{ color: C.midText }}>
+                          {FIELD_HEALTH[fi].completePct}%
+                        </span>
+                      </div>
+                    </th>
+                  ))}
+                  {/* Row health column */}
+                  <th className="px-2 py-1 text-center text-[9px]"
+                    style={{ color: C.midText, minWidth: 56, borderBottom: `2px solid #EDF2F7` }}>
+                    Row health
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRecords.map((rec, ri) => {
+                  const actualRi = HEATMAP_RECORDS.indexOf(rec)
+                  const rowStatuses = visibleFields.map(fi => rec.values[fi])
+                  const rowComplete = rowStatuses.filter(s => s === 'complete').length
+                  const rowHealth = Math.round((rowComplete / rowStatuses.length) * 100)
+                  return (
+                    <tr key={rec.id} style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC' }}>
+                      {/* Record ID — sticky */}
+                      <td className="px-2 py-0.5 sticky left-0 z-10 text-[10px]"
+                        style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC' }}>
+                        <span className="mono font-semibold" style={{ color: C.navy }}>{rec.id}</span>
+                        <span className="ml-1.5" style={{ color: C.midText }}>{rec.lastName}</span>
+                      </td>
+                      {/* Field cells */}
+                      {visibleFields.map(fi => {
+                        const s = rec.values[fi]
+                        const isHovered = hover?.r === actualRi && hover?.c === fi
+                        return (
+                          <td key={fi} className="px-1 py-0.5 text-center">
+                            <div
+                              className="rounded-[3px] cursor-pointer inline-block"
+                              style={{
+                                width: 36,
+                                height: 20,
+                                background: cellColor(s),
+                                outline: isHovered ? `2px solid ${C.navy}` : 'none',
+                                outlineOffset: 1,
+                              }}
+                              onMouseEnter={() => onCellEnter(actualRi, fi)}
+                              onMouseLeave={onCellLeave}
+                            />
+                          </td>
+                        )
+                      })}
+                      {/* Row health bar */}
+                      <td className="px-2 py-0.5">
+                        <div className="flex items-center gap-1.5">
+                          <div className="progress-track" style={{ width: 32, height: 6 }}>
+                            <div className="progress-fill" style={{
+                              width: `${rowHealth}%`,
+                              background: rowHealth >= 90 ? C.success : rowHealth >= 70 ? C.warning : C.danger,
+                            }} />
+                          </div>
+                          <span className="text-[9px] mono font-bold" style={{
+                            color: rowHealth >= 90 ? C.success : rowHealth >= 70 ? C.warning : C.danger,
+                          }}>{rowHealth}%</span>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+              {/* Column summary footer */}
+              <tfoot>
+                <tr style={{ borderTop: `2px solid #EDF2F7` }}>
+                  <td className="px-2 py-2 text-[9px] font-bold sticky left-0 bg-white" style={{ color: C.midText }}>
+                    FIELD TOTALS
+                  </td>
+                  {visibleFields.map(fi => {
+                    const f = HEATMAP_FIELDS[fi]
+                    return (
+                      <td key={fi} className="px-1 py-2 text-center">
+                        <div className="flex flex-col items-center gap-0.5">
+                          <span className="text-[9px] mono" style={{ color: C.danger }}>{f.nullPct}% null</span>
+                          <span className="text-[9px] mono" style={{ color: f.invalidPct > 0 ? C.danger : C.success }}>
+                            {f.invalidPct}% invalid
+                          </span>
+                        </div>
+                      </td>
+                    )
+                  })}
+                  <td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* ── VIEW: RECHARTS CHART ─────────────────────────────────────────── */}
+      {viewMode === 'chart' && (() => {
+        // Build per-field data for both charts
+        const fieldChartData = HEATMAP_FIELDS.map((f, fi) => ({
+          name: f.name.length > 8 ? f.name.slice(0, 8) + '…' : f.name,
+          fullName: f.name,
+          complete: FIELD_HEALTH[fi].completePct,
+          partial:  f.partialPct,
+          invalid:  f.invalidPct,
+          missing:  f.nullPct,
+          health:   FIELD_HEALTH[fi].completePct,
+        }))
+
+        const healthColor = (pct: number) =>
+          pct >= 90 ? C.success : pct >= 70 ? C.warning : C.danger
+
+        // Custom tooltip for health bar
+        const HealthTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof fieldChartData[0] }> }) => {
+          if (!active || !payload?.length) return null
+          const d = payload[0].payload
+          return (
+            <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+              <p className="font-bold mb-1" style={{ color: C.navy }}>{d.fullName}</p>
+              <p style={{ color: C.success }}>✅ Complete: {d.complete}%</p>
+              <p style={{ color: C.warning }}>⚠ Partial: {d.partial}%</p>
+              <p style={{ color: C.danger }}>✗ Invalid: {d.invalid}%</p>
+              <p style={{ color: '#A0AEC0' }}>○ Missing: {d.missing}%</p>
+            </div>
+          )
+        }
+
+        // Custom tooltip for stacked chart
+        const StackTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ name: string; value: number; fill: string }> }) => {
+          if (!active || !payload?.length) return null
+          return (
+            <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
+              {payload.slice().reverse().map(p => (
+                <p key={p.name} style={{ color: p.fill }}>{p.name}: {p.value}%</p>
+              ))}
+            </div>
+          )
+        }
+
+        return (
+          <div className="flex flex-col gap-6">
+            {/* Chart 1 – Field health score (color-coded bar per field) */}
+            <Card>
+              <p className="text-[13px] font-bold mb-4" style={{ color: C.navy }}>Field Health Score (% Complete)</p>
+              <div style={{ height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 24 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} />
+                    <YAxis domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} width={38} />
+                    <RechartTooltip content={<HealthTooltip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
+                    {/* Threshold reference lines via custom label not available in simple BarChart, keep it clean */}
+                    <Bar dataKey="health" radius={[4, 4, 0, 0]}>
+                      {fieldChartData.map((entry, i) => (
+                        <Cell key={i} fill={healthColor(entry.health)} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              {/* Threshold legend */}
+              <div className="flex items-center gap-6 mt-2 justify-end">
+                {[
+                  { label: '≥ 90% — Healthy',    color: C.success },
+                  { label: '70–89% — Warning',   color: C.warning },
+                  { label: '< 70% — Critical',   color: C.danger  },
+                ].map(l => (
+                  <span key={l.label} className="flex items-center gap-1.5 text-[10px]" style={{ color: l.color }}>
+                    <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: l.color }} />
+                    {l.label}
+                  </span>
+                ))}
+              </div>
+            </Card>
+
+            {/* Chart 2 – Stacked breakdown per field */}
+            <Card>
+              <p className="text-[13px] font-bold mb-4" style={{ color: C.navy }}>Field Quality Breakdown (Stacked %)</p>
+              <div style={{ height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 24 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} />
+                    <YAxis domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} width={38} />
+                    <RechartTooltip content={<StackTooltip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
+                    <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 11, paddingTop: 12, color: C.midText }} />
+                    <Bar dataKey="complete" name="Complete" stackId="a" fill={C.success} />
+                    <Bar dataKey="partial"  name="Partial"  stackId="a" fill={C.warning} />
+                    <Bar dataKey="invalid"  name="Invalid"  stackId="a" fill={C.danger}  />
+                    <Bar dataKey="missing"  name="Missing"  stackId="a" fill="#CBD5E0" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </Card>
+          </div>
+        )
+      })()}
+
+      {/* ── VIEW: FIELD SUMMARY ───────────────────────────────────────────── */}
+      {viewMode === 'field' && (
+        <div className="flex flex-col gap-3">
+          {HEATMAP_FIELDS.map((f, fi) => {
+            const isHoveredField = filterField === f.name || filterField === 'All fields'
+            return (
+              <Card key={f.name}
+                className={`transition-all ${!isHoveredField ? 'opacity-40' : ''}`}
+                onClick={() => setFilterField(filterField === f.name ? 'All fields' : f.name)}>
+                <div className="flex items-center gap-4">
+                  {/* Field name */}
+                  <div style={{ width: 120, flexShrink: 0 }}>
+                    <p className="text-[13px] font-bold" style={{ color: C.navy }}>{f.name}</p>
+                    {f.required && <Badge tier={1} color="warning">Required</Badge>}
+                  </div>
+
+                  {/* Stacked completion bar */}
+                  <div className="flex-1">
+                    <div className="flex rounded-[4px] overflow-hidden" style={{ height: 20 }}>
+                      <div title={`${FIELD_HEALTH[fi].completePct}% complete`} style={{ width: `${FIELD_HEALTH[fi].completePct}%`, background: C.success }} />
+                      <div title={`${f.partialPct}% partial`}  style={{ width: `${f.partialPct}%`,  background: C.warning }} />
+                      <div title={`${f.invalidPct}% invalid`}  style={{ width: `${f.invalidPct}%`,  background: C.danger }} />
+                      <div title={`${f.nullPct}% null`}        style={{ width: `${f.nullPct}%`,     background: '#CBD5E0' }} />
+                    </div>
+                    <div className="flex gap-4 mt-1">
+                      {[
+                        { label: `${FIELD_HEALTH[fi].completePct}% complete`, color: C.success },
+                        { label: `${f.partialPct}% partial`,  color: C.warning },
+                        { label: `${f.invalidPct}% invalid`,  color: C.danger  },
+                        { label: `${f.nullPct}% null`,        color: '#A0AEC0' },
+                      ].map(seg => (
+                        <span key={seg.label} className="text-[9px] font-semibold mono" style={{ color: seg.color }}>
+                          {seg.label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Right-side stats */}
+                  <div className="flex gap-6 text-right" style={{ flexShrink: 0 }}>
+                    <div>
+                      <p className="text-[10px]" style={{ color: C.midText }}>Null count</p>
+                      <p className="text-[14px] font-bold mono" style={{ color: f.nullPct > 10 ? C.danger : C.midText }}>
+                        {Math.round(f.nullPct / 100 * HEATMAP_RECORDS.length)}
+                        <span className="text-[10px] font-normal"> / {HEATMAP_RECORDS.length}</span>
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px]" style={{ color: C.midText }}>Validation failures</p>
+                      <p className="text-[14px] font-bold mono" style={{ color: f.invalidPct > 0 ? C.danger : C.success }}>
+                        {Math.round(f.invalidPct / 100 * HEATMAP_RECORDS.length)}
+                        <span className="text-[10px] font-normal"> / {HEATMAP_RECORDS.length}</span>
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px]" style={{ color: C.midText }}>Health score</p>
+                      <p className="text-[14px] font-bold mono" style={{ color: FIELD_HEALTH[fi].completePct >= 90 ? C.success : FIELD_HEALTH[fi].completePct >= 70 ? C.warning : C.danger }}>
+                        {FIELD_HEALTH[fi].completePct}%
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── EXPORT ───────────────────────────────────────────────────────────────────
+
+const EXPORT_OPTIONS = [
+  { id: 'csv', icon: Icon.fileCheck, title: 'Clean HCP CSV', desc: 'Deduplicated, validated records ready for CRM import. All PII flags resolved.', size: '2.4 MB', available: true },
+  { id: 'campaign', icon: Icon.send, title: 'Campaign Asset Package', desc: 'Compiled email content, segment lists, and compliance sign-off for campaign deployment.', size: '1.1 MB', available: false, blockReason: 'Resolve 3 compliance flags before exporting campaign assets.' },
+  { id: 'pdf', icon: Icon.audit, title: 'PDF Audit Report', desc: 'Full data quality audit trail including all actions taken, flag resolutions, and operator names.', size: '847 KB', available: true },
+]
+
+const EXPORT_HISTORY = [
+  { name: 'HCP_Clean_Q1_2026.csv', date: 'Mar 8, 2026 14:32', by: 'Jane Doe', size: '2.4 MB', expired: false },
+  { name: 'Audit_Report_Feb2026.pdf', date: 'Feb 17, 2026 09:15', by: 'Mark Chen', size: '712 KB', expired: false },
+  { name: 'HCP_Clean_Jan2026.csv', date: 'Jan 4, 2026 11:08', by: 'Jane Doe', size: '3.1 MB', expired: true },
+]
+
+interface ExportHistoryRow { name: string; date: string; by: string; size: string; expired: boolean; live?: boolean }
+
+function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { role } = useRole()
+  const { meta } = useUploadMeta()
+  const { resolvedVal: resolvedValCtx } = useValidation()
+  const { resolvedOut: resolvedOutCtx, warnNotes } = useOutliers()
+  const [generating, setGenerating] = useState<string | null>(null)
+  const [done, setDone] = useState<Set<string>>(new Set())
+  const [progress, setProgress] = useState(0)
+  const [history, setHistory] = useState<ExportHistoryRow[]>(EXPORT_HISTORY)
+  const [logStatus, setLogStatus] = useState<'idle' | 'logging' | 'ok' | 'err'>('idle')
+
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+  }
+
+  const logToFirestore = async (format: string, filename: string, size: string, records: number) => {
+    setLogStatus('logging')
+    try {
+      await fetch('http://localhost:8000/api/export/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ format, fileName: filename, size, role, records, timestamp: new Date().toISOString() }),
+      })
+      setLogStatus('ok')
+    } catch {
+      setLogStatus('err') // non-fatal — download still worked
+    }
+  }
+
+  const startExport = (id: string) => {
+    setGenerating(id)
+    setProgress(0)
+    const iv = setInterval(() => {
+      setProgress(p => {
+        if (p >= 100) {
+          clearInterval(iv)
+          setGenerating(null)
+          setDone(prev => new Set([...prev, id]))
+
+          // ── generate & download blob ───────────────────────────────────
+          const opt = EXPORT_OPTIONS.find(o => o.id === id)!
+          const now = new Date()
+          const dateStr = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+          const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+          const records = meta?.rowCount ?? 10412
+          const roleMeta = ROLE_META[role]
+
+          let blob: Blob
+          let filename: string
+
+          if (id === 'csv') {
+            const taggedRows = OUTLIERS
+              .filter(o => resolvedOutCtx.get(o.id) === 'warned')
+              .map(o => `[DATA QUALITY WARNING],${o.record.replace(',','')},${o.specialty},,,,,,, // Anomaly score ${o.anomalyScore.toFixed(2)} — ${o.reason}${warnNotes[o.id] ? ` | Note: ${warnNotes[o.id]}` : ''}`)
+            const csvRows = [
+              'DQ_FLAG,NPI,First Name,Last Name,Specialty,State,Email,Phone,ZIP,DEA Number',
+              ',1234567890,James,Morrison,Cardiology,FL,j.morrison@floridahealth.com,(813) 555-0147,33602,BX1234567',
+              ',9876543210,Sarah,Chen,Oncology,NY,schen@nyoncology.org,(212) 555-0388,10001,AX9876543',
+              ',5544332211,Robert,Patel,Neurology,CA,rpatel@stanford.edu,(650) 555-0219,94305,',
+              ...taggedRows,
+              `# ... ${records.toLocaleString()} total records · ${taggedRows.length} DQ warnings · Exported ${dateStr} ${timeStr} · Role: ${roleMeta.label}`,
+            ]
+            blob = new Blob([csvRows.join('\n')], { type: 'text/csv' })
+            filename = `HCP_Clean_${meta?.fileName?.replace(/\..+$/, '') ?? 'Export'}_${now.toISOString().slice(0,10)}.csv`
+          } else {
+            const taggedForReport = OUTLIERS.filter(o => resolvedOutCtx.get(o.id) === 'warned')
+            const report = [
+              'MedReach AI — PDF Audit Report',
+              '='.repeat(40),
+              `Generated: ${dateStr} ${timeStr}`,
+              `Exported by: ${roleMeta.label} (role: ${role})`,
+              `Source file: ${meta?.fileName ?? 'Q2_HCP_Oncology.csv'}`,
+              `Total records: ${records.toLocaleString()}`,
+              '',
+              'Data Quality Summary',
+              '-'.repeat(30),
+              'Quality score: 84%',
+              'PII flags resolved: 6',
+              'Duplicates merged: 3',
+              'NPI validation pass rate: 97.2%',
+              `Data Quality Warnings: ${taggedForReport.length}`,
+              '',
+              ...(taggedForReport.length > 0 ? [
+                'Data Quality Warning Records (highlighted red on export):',
+                '-'.repeat(30),
+                ...taggedForReport.map(o =>
+                  `  [WARNING] ${o.record} | ${o.specialty} | Score: ${o.anomalyScore.toFixed(2)} | ${o.reason}${warnNotes[o.id] ? `\n           Note: ${warnNotes[o.id]}` : ''}`
+                ),
+                '',
+              ] : []),
+              'All actions logged in Firestore audit trail.',
+            ]
+            blob = new Blob([report.join('\n')], { type: 'text/plain' })
+            filename = `Audit_Report_${now.toISOString().slice(0,10)}.pdf`
+          }
+
+          triggerDownload(blob, filename)
+          logToFirestore(id, filename, opt.size, records)
+
+          // Prepend to live history
+          setHistory(h => [{
+            name: filename,
+            date: `${dateStr} ${timeStr}`,
+            by: roleMeta.label,
+            size: opt.size,
+            expired: false,
+            live: true,
+          }, ...h])
+
+          return 100
+        }
+        return p + 15
+      })
+    }, 200)
+  }
+
+  const openHighNPI = VALIDATION_ERRORS.filter(v => v.severity === 'High' && !resolvedValCtx.has(v.id)).length
+  const exportOptions = EXPORT_OPTIONS.map(opt =>
+    opt.id === 'csv' && openHighNPI > 0
+      ? { ...opt, available: false, blockReason: `${openHighNPI} High-severity NPI error${openHighNPI > 1 ? 's' : ''} must be resolved in Data Review before export.` }
+      : opt
+  )
+
+  return (
+    <div className="p-8">
+      <SectionHeader title="Export" subtitle="Download cleaned data, campaign assets, and audit reports"
+        actions={logStatus === 'ok' ? <Badge tier={1} color="success">Logged to Firestore ✓</Badge>
+          : logStatus === 'err' ? <Badge tier={1} color="warning">Firestore offline — download saved locally</Badge>
+          : logStatus === 'logging' ? <Badge tier={1} color="info">Logging…</Badge>
+          : undefined}
+      />
+
+      {/* NPI validation export interlock */}
+      {openHighNPI > 0 && (
+        <Banner type="error">
+          <strong>Export locked — {openHighNPI} High-severity NPI error{openHighNPI > 1 ? 's' : ''} unresolved.</strong>{' '}
+          Clean HCP CSV export is disabled until all High-severity NPI validation failures are explicitly resolved.{' '}
+          <button className="underline font-semibold" style={{ color: 'inherit' }} onClick={() => onNavigate('data-review')}>
+            → Go to Data Review / NPI Validation
+          </button>
+        </Banner>
+      )}
+
+      {/* Outlier Data Quality Warning summary */}
+      {(() => {
+        const tagged = OUTLIERS.filter(o => resolvedOutCtx.get(o.id) === 'warned')
+        if (tagged.length === 0) return null
+        return (
+          <div className="mb-5 p-4 rounded-[8px] border-2 border-[#E67E22]" style={{ background: '#FFFBEB' }}>
+            <div className="flex items-center gap-2 mb-2">
+              <span style={{ color: C.warning }}>{Icon.alertTriangle}</span>
+              <p className="text-[13px] font-bold" style={{ color: '#92400E' }}>
+                {tagged.length} Data Quality Warning{tagged.length > 1 ? 's' : ''} included in export
+              </p>
+            </div>
+            <p className="text-[12px] mb-2" style={{ color: '#92400E' }}>
+              The following records are retained in the dataset but are marked with a <code className="mono text-[11px] px-1 py-0.5 rounded" style={{ background: '#FDE68A' }}>[DATA QUALITY WARNING]</code> column in the CSV and highlighted in the PDF audit report:
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {tagged.map(o => (
+                <span key={o.id} className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-[4px]"
+                  style={{ background: '#FEE2E2', color: C.danger }}>
+                  <span>⚠</span> {o.record}
+                  {warnNotes[o.id] && <span className="font-normal italic" style={{ color: '#92400E' }}>— {warnNotes[o.id].slice(0, 30)}{warnNotes[o.id].length > 30 ? '…' : ''}</span>}
+                </span>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* File context banner */}
+      {meta && (
+        <div className="mb-5 px-4 py-2.5 rounded-[8px] border flex items-center gap-4 text-[12px]" style={{ background: C.lightTint, borderColor: C.corpBlue }}>
+          <span style={{ color: C.teal }}>{Icon.fileCheck}</span>
+          <span className="font-semibold" style={{ color: C.navy }}>Ready to export:</span>
+          <span className="mono font-bold" style={{ color: C.corpBlue }}>{meta.fileName}</span>
+          <span style={{ color: C.midText }}>·</span>
+          <span style={{ color: C.midText }}>{meta.rowCount.toLocaleString()} records</span>
+          <span style={{ color: C.midText }}>·</span>
+          <span style={{ color: C.midText }}>{meta.fileSize.toFixed(1)} MB source</span>
+          <span style={{ color: C.midText }}>·</span>
+          <span style={{ color: C.midText }}>Uploaded {meta.uploadedAt}</span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-3 gap-6 mb-8">
+        {exportOptions.map(opt => (
+          <Card key={opt.id} className={!opt.available ? 'opacity-80' : 'card-hover'}>
+            <div className="flex items-start gap-3 mb-4">
+              <span style={{ color: opt.available ? C.teal : C.midText }}>{opt.icon}</span>
+              <div>
+                <h3 className="text-[14px] font-bold mb-1" style={{ fontFamily: 'Calibri, Georgia, serif', color: opt.available ? C.navy : C.midText }}>{opt.title}</h3>
+                <p className="text-[12px]" style={{ color: C.midText }}>{opt.desc}</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-[11px]" style={{ color: C.midText }}>Est. size: {opt.size}</span>
+              {done.has(opt.id) && <Badge tier={1} color="success">Downloaded ✓</Badge>}
+            </div>
+
+            {generating === opt.id && (
+              <div className="mb-3">
+                <ProgressBar value={Math.min(progress, 100)} color="info" label="Generating..." />
+              </div>
+            )}
+
+            {!opt.available && opt.blockReason && (
+              <div className="mb-3">
+                <p className="text-[11px] font-semibold" style={{ color: C.danger }}>{opt.blockReason}</p>
+                <button className="text-[11px] mt-1 hover:underline" style={{ color: C.corpBlue }} onClick={() => onNavigate('compliance-review')}>
+                  → Go to Compliance Review
+                </button>
+              </div>
+            )}
+
+            <Btn
+              variant={!opt.available ? 'disabled' : generating === opt.id ? 'ghost' : 'primary'}
+              disabled={!opt.available || generating !== null}
+              onClick={() => startExport(opt.id)}
+              icon={generating === opt.id ? Icon.spinner : Icon.download}
+              className="w-full justify-center"
+            >
+              {generating === opt.id ? 'Generating...' : done.has(opt.id) ? 'Download Again' : 'Download'}
+            </Btn>
+          </Card>
+        ))}
+      </div>
+
+      {/* Export history */}
+      <Card>
+        <h3 className="text-[15px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Export History</h3>
+        <table className="data-table w-full border-collapse">
+          <thead>
+            <tr><th>File Name</th><th>Date</th><th>Exported By</th><th>Size</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            {history.map((h, i) => (
+              <tr key={h.name + i} style={{ opacity: h.expired ? 0.55 : 1, background: h.live ? '#F0FFF4' : undefined }}>
+                <td className="font-medium" style={{ color: h.expired ? C.midText : C.corpBlue }}>
+                  {h.live && <span className="inline-block mr-1.5 text-[9px] px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.success, color: 'white' }}>NEW</span>}
+                  {h.name}
+                </td>
+                <td>{h.date}</td>
+                <td>{h.by}</td>
+                <td>{h.size}</td>
+                <td>
+                  {h.expired ? (
+                    <span className="text-[11px]" style={{ color: C.midText }}>Expired — generated more than 24 hours ago</span>
+                  ) : (
+                    <button className="text-[11px] font-semibold hover:underline" style={{ color: C.corpBlue }}>Re-download</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  )
+}
+
+// ─── TEAM MANAGEMENT ─────────────────────────────────────────────────────────
+
+const TEAM_MEMBERS = [
+  { name: 'Jane Doe', email: 'jane@acmepharma.com', role: 'Admin', lastActive: 'Just now', initials: 'JD' },
+  { name: 'Mark Chen', email: 'mchen@acmepharma.com', role: 'Editor', lastActive: '2 hours ago', initials: 'MC' },
+  { name: 'Sarah Kim', email: 'skim@acmepharma.com', role: 'Viewer', lastActive: 'Yesterday', initials: 'SK' },
+]
+
+const PENDING = [
+  { email: 'david@acmepharma.com', role: 'Editor', sent: '3 days ago' },
+]
+
+function TeamScreen({ showToast }: { showToast: (type: ToastType, message: string) => void }) {
+  const { role } = useRole()
+  const canInviteUsers = isAdminRole(role)
+  const adminInviteTooltip = 'Only Admin users can invite team members.'
+  const adminTeamActionTooltip = 'Only Admin users can modify team membership.'
+  const [showInvite, setShowInvite] = useState(false)
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteRole, setInviteRole] = useState('Editor')
+
+  const sendInvite = () => {
+    if (!canInviteUsers) {
+      showToast('warning', adminInviteTooltip)
+      return
+    }
+    setShowInvite(false)
+    showToast('success', `Invitation sent to ${inviteEmail}`)
+    setInviteEmail('')
+  }
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Team Management"
+        subtitle="Manage team members and permissions"
+        actions={
+          <span title={canInviteUsers ? '' : adminInviteTooltip}>
+            <Btn variant="primary" onClick={() => setShowInvite(true)} icon={Icon.userPlus} disabled={!canInviteUsers}>Invite Member</Btn>
+          </span>
+        }
+      />
+
+      <Card className="mb-6">
+        <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Team Members</h3>
+        <table className="data-table w-full border-collapse">
+          <thead>
+            <tr><th>Member</th><th>Email</th><th>Role</th><th>Last Active</th><th>Actions</th></tr>
+          </thead>
+          <tbody>
+            {TEAM_MEMBERS.map(m => (
+              <tr key={m.email}>
+                <td>
+                  <div className="flex items-center gap-2">
+                    <div className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-white shrink-0" style={{ background: C.navy }}>{m.initials}</div>
+                    <span className="font-medium">{m.name}</span>
+                  </div>
+                </td>
+                <td style={{ color: C.midText }}>{m.email}</td>
+                <td>
+                  <Badge tier={1} color={m.role === 'Admin' ? 'info' : m.role === 'Editor' ? 'neutral' : 'neutral'}>{m.role}</Badge>
+                </td>
+                <td style={{ color: C.midText }}>{m.lastActive}</td>
+                <td>
+                  <div className="flex gap-2">
+                    <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
+                      <button
+                        disabled={!canInviteUsers}
+                        className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
+                        style={{ color: canInviteUsers ? C.corpBlue : '#A0AEC0' }}
+                      >
+                        Edit Role
+                      </button>
+                    </span>
+                    {m.role !== 'Admin' && (
+                      <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
+                        <button
+                          disabled={!canInviteUsers}
+                          className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
+                          style={{ color: canInviteUsers ? C.danger : '#A0AEC0' }}
+                        >
+                          Remove
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+
+      {PENDING.length > 0 && (
+        <Card>
+          <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Pending Invitations</h3>
+          <table className="data-table w-full border-collapse">
+            <thead>
+              <tr><th>Email</th><th>Role</th><th>Sent</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              {PENDING.map(p => (
+                <tr key={p.email}>
+                  <td style={{ color: C.midText }}>{p.email}</td>
+                  <td><Badge tier={1} color="neutral">{p.role}</Badge></td>
+                  <td style={{ color: C.midText }}>{p.sent}</td>
+                  <td>
+                    <div className="flex gap-2">
+                      <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
+                        <button
+                          disabled={!canInviteUsers}
+                          className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
+                          style={{ color: canInviteUsers ? C.corpBlue : '#A0AEC0' }}
+                          onClick={() => canInviteUsers && showToast('info', `Invitation resent to ${p.email}`)}
+                        >
+                          Resend
+                        </button>
+                      </span>
+                      <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
+                        <button
+                          disabled={!canInviteUsers}
+                          className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
+                          style={{ color: canInviteUsers ? C.danger : '#A0AEC0' }}
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {showInvite && (
+        <Modal title="Invite Team Member" onClose={() => setShowInvite(false)}>
+          <div className="flex flex-col gap-4">
+            <Input label="Email address" type="email" placeholder="colleague@company.com" value={inviteEmail} onChange={setInviteEmail} required />
+            <div>
+              <label className="text-[13px] font-semibold block mb-1" style={{ color: C.darkText }}>Role</label>
+              <select className="w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2 bg-white" value={inviteRole} onChange={e => setInviteRole(e.target.value)} style={{ height: 40, color: C.darkText }}>
+                <option>Admin</option>
+                <option>Editor</option>
+                <option>Viewer</option>
+              </select>
+              <p className="text-[11px] mt-1" style={{ color: C.midText }}>
+                {inviteRole === 'Admin' ? 'Full access including billing and team management.' : inviteRole === 'Editor' ? 'Can upload, clean, and export data.' : 'Read-only access to data and reports.'}
+              </p>
+            </div>
+            <div className="flex gap-3 pt-2">
+              <Btn variant="primary" onClick={sendInvite} disabled={!inviteEmail} className="flex-1 justify-center">Send Invitation</Btn>
+              <Btn variant="ghost" onClick={() => setShowInvite(false)}>Cancel</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+// ─── AUDIT LOG ────────────────────────────────────────────────────────────────
+
+const AUDIT_ENTRIES = [
+  { ts: 'Jul 18, 2026 14:32:05', actor: 'Jane Doe', type: 'export', resource: 'HCP_Clean_Q1.csv', detail: 'Exported 10,412 records (Clean HCP CSV)' },
+  { ts: 'Jul 18, 2026 13:18:22', actor: 'Jane Doe', type: 'clean', resource: 'Record #4821', detail: 'Anonymized SSN field — selected action: Hash' },
+  { ts: 'Jul 18, 2026 11:05:47', actor: 'Mark Chen', type: 'upload', resource: 'Q2_HCP_List.csv', detail: 'Uploaded 10,412 records; 23 flags detected' },
+  { ts: 'Jul 17, 2026 16:30:00', actor: 'Jane Doe', type: 'role_change', resource: 'sarah@acmepharma.com', detail: 'Role changed: Viewer → Editor' },
+  { ts: 'Jul 17, 2026 09:12:14', actor: 'Mark Chen', type: 'query', resource: 'AI Query', detail: 'Query: "How many cardiologists are in Florida?" — 847 results' },
+  { ts: 'Jul 16, 2026 15:44:38', actor: 'Admin', type: 'invite', resource: 'david@acmepharma.com', detail: 'Invitation sent — role: Editor' },
+]
+
+const ACTION_COLORS: Record<string, { bg: string; text: string }> = {
+  export: { bg: C.lightTint, text: C.navy },
+  clean: { bg: '#E8F5EF', text: C.success },
+  upload: { bg: '#EBF4FA', text: C.corpBlue },
+  role_change: { bg: '#FEF3C7', text: '#92400E' },
+  query: { bg: '#F1F5F9', text: '#334155' },
+  invite: { bg: '#EBF4FA', text: C.teal },
+}
+
+// ─── SCRUBBING SESSIONS ───────────────────────────────────────────────────────
+
+interface ScrubbingSession {
+  id: string
+  name: string
+  date: string
+  operator: string
+  role: string
+  recordsBefore: number
+  recordsAfter: number
+  removed: number
+  flagsResolved: number
+  piiFlagged: number
+  duplicatesMerged: number
+  npiFixed: number
+  outliersTagged: number
+  healthBefore: number
+  healthAfter: number
+  status: 'Complete' | 'Partial' | 'Aborted'
+  notes: string
+}
+
+const SCRUBBING_SESSIONS: ScrubbingSession[] = [
+  {
+    id: 'sess_001', name: 'Q2 2026 Full Scrub', date: '2026-06-15', operator: 'Jane Doe', role: 'Admin',
+    recordsBefore: 10412, recordsAfter: 10238, removed: 174, flagsResolved: 41, piiFlagged: 12,
+    duplicatesMerged: 8, npiFixed: 17, outliersTagged: 4, healthBefore: 71, healthAfter: 84,
+    status: 'Complete', notes: 'Full quarterly scrub prior to Q2 campaign launch. All high-severity flags cleared.',
+  },
+  {
+    id: 'sess_002', name: 'March Duplicate Pass', date: '2026-03-22', operator: 'Mark Chen', role: 'Editor',
+    recordsBefore: 9874, recordsAfter: 9812, removed: 62, flagsResolved: 19, piiFlagged: 0,
+    duplicatesMerged: 19, npiFixed: 0, outliersTagged: 0, healthBefore: 68, healthAfter: 74,
+    status: 'Complete', notes: 'Targeted duplicate-only pass following March upload batch.',
+  },
+  {
+    id: 'sess_003', name: 'NPI Validation Run', date: '2026-02-08', operator: 'Jane Doe', role: 'Admin',
+    recordsBefore: 9812, recordsAfter: 9790, removed: 22, flagsResolved: 26, piiFlagged: 3,
+    duplicatesMerged: 0, npiFixed: 23, outliersTagged: 0, healthBefore: 74, healthAfter: 79,
+    status: 'Complete', notes: 'NPI registry cross-check after NPPES refresh. 4 records overridden with justification.',
+  },
+  {
+    id: 'sess_004', name: 'Q1 2026 Scrub', date: '2026-01-04', operator: 'Jane Doe', role: 'Admin',
+    recordsBefore: 11200, recordsAfter: 9812, removed: 1388, flagsResolved: 53, piiFlagged: 18,
+    duplicatesMerged: 14, npiFixed: 21, outliersTagged: 0, healthBefore: 58, healthAfter: 68,
+    status: 'Complete', notes: 'Large Q1 scrub including deduplication of merged CRM export. Significant record removal.',
+  },
+  {
+    id: 'sess_005', name: 'Outlier Review — Oncology', date: '2025-11-17', operator: 'Sarah Kim', role: 'Viewer',
+    recordsBefore: 11200, recordsAfter: 11200, removed: 0, flagsResolved: 4, piiFlagged: 0,
+    duplicatesMerged: 0, npiFixed: 0, outliersTagged: 4, healthBefore: 62, healthAfter: 62,
+    status: 'Partial', notes: 'Read-only review of oncology outliers. Tags applied but no records removed — pending admin sign-off.',
+  },
+  {
+    id: 'sess_006', name: 'Emergency PII Sweep', date: '2025-10-03', operator: 'Mark Chen', role: 'Editor',
+    recordsBefore: 10800, recordsAfter: 10800, removed: 0, flagsResolved: 7, piiFlagged: 7,
+    duplicatesMerged: 0, npiFixed: 0, outliersTagged: 0, healthBefore: 64, healthAfter: 66,
+    status: 'Aborted', notes: 'PII sweep aborted mid-session due to upstream data quality incident. Partial flags resolved.',
+  },
+]
+
+function ScrubbingSessionsScreen() {
+  const [downloading, setDownloading] = useState<string | null>(null)
+  const [dlError, setDlError] = useState<string | null>(null)
+  const [filterStatus, setFilterStatus] = useState<'All' | ScrubbingSession['status']>('All')
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  const visible = filterStatus === 'All'
+    ? SCRUBBING_SESSIONS
+    : SCRUBBING_SESSIONS.filter(s => s.status === filterStatus)
+
+  const downloadPDF = async (session: ScrubbingSession) => {
+    setDownloading(session.id)
+    setDlError(null)
+    try {
+      const res = await fetch(`http://localhost:8000/api/scrubbing-sessions/${session.id}/pdf`)
+      if (!res.ok) throw new Error(`Server returned ${res.status}`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `Scrub_Report_${session.id}_${session.date}.pdf`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 2000)
+    } catch (err) {
+      setDlError(`Could not reach the report server. Make sure the backend is running on port 8000. (${err instanceof Error ? err.message : String(err)})`)
+    } finally {
+      setDownloading(null)
+    }
+  }
+
+  const statusColor = (s: ScrubbingSession['status']) =>
+    s === 'Complete' ? 'success' : s === 'Partial' ? 'warning' : 'danger'
+
+  const deltaHealth = (s: ScrubbingSession) => s.healthAfter - s.healthBefore
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Scrubbing Sessions"
+        subtitle="Chronological log of all team data scrubbing sessions with audit reports"
+        actions={
+          <div className="flex items-center gap-2">
+            {(['All', 'Complete', 'Partial', 'Aborted'] as const).map(st => (
+              <button key={st}
+                className="text-[11px] px-3 py-1.5 rounded-[6px] border font-semibold transition-all"
+                style={{
+                  background: filterStatus === st ? C.navy : 'white',
+                  color:      filterStatus === st ? 'white' : C.midText,
+                  borderColor:filterStatus === st ? C.navy : C.border,
+                }}
+                onClick={() => setFilterStatus(st)}>
+                {st}
+              </button>
+            ))}
+          </div>
+        }
+      />
+
+      {dlError && (
+        <Banner type="error" onClose={() => setDlError(null)}>{dlError}</Banner>
+      )}
+
+      {/* Summary strip */}
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        {[
+          { label: 'Total Sessions',     value: String(SCRUBBING_SESSIONS.length) },
+          { label: 'Records Cleaned',    value: SCRUBBING_SESSIONS.reduce((s, x) => s + x.removed, 0).toLocaleString() },
+          { label: 'Flags Resolved',     value: SCRUBBING_SESSIONS.reduce((s, x) => s + x.flagsResolved, 0).toLocaleString() },
+          { label: 'Avg Health Lift',    value: `+${Math.round(SCRUBBING_SESSIONS.filter(s => s.status === 'Complete').reduce((s, x) => s + deltaHealth(x), 0) / SCRUBBING_SESSIONS.filter(s => s.status === 'Complete').length)}pts` },
+        ].map(c => (
+          <Card key={c.label}>
+            <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={{ color: C.midText }}>{c.label}</p>
+            <p className="text-[26px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>{c.value}</p>
+          </Card>
+        ))}
+      </div>
+
+      {/* Session list */}
+      <div className="flex flex-col gap-4">
+        {visible.map(session => {
+          const expanded = expandedId === session.id
+          const dh = deltaHealth(session)
+          return (
+            <Card key={session.id} className="p-0 overflow-hidden">
+              {/* Header row */}
+              <div
+                className="flex items-center gap-4 px-5 py-4 cursor-pointer hover:bg-[#F7FAFC] transition-colors"
+                onClick={() => setExpandedId(expanded ? null : session.id)}>
+                {/* Date badge */}
+                <div className="flex flex-col items-center justify-center rounded-[8px] px-3 py-2 shrink-0"
+                  style={{ background: C.lightTint, minWidth: 58 }}>
+                  <span className="text-[9px] font-bold uppercase tracking-wide" style={{ color: C.corpBlue }}>
+                    {new Date(session.date).toLocaleString('default', { month: 'short' })}
+                  </span>
+                  <span className="text-[20px] font-bold leading-none" style={{ color: C.navy }}>
+                    {String(new Date(session.date).getDate()).padStart(2, '0')}
+                  </span>
+                  <span className="text-[9px]" style={{ color: C.midText }}>
+                    {new Date(session.date).getFullYear()}
+                  </span>
+                </div>
+
+                {/* Name + meta */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <p className="text-[14px] font-bold truncate" style={{ color: C.navy }}>{session.name}</p>
+                    <Badge tier={1} color={statusColor(session.status)}>{session.status}</Badge>
+                  </div>
+                  <p className="text-[11px]" style={{ color: C.midText }}>
+                    Operator: <strong style={{ color: C.darkText }}>{session.operator}</strong>
+                    <span className="mx-2">·</span>
+                    <Badge tier={1} color="neutral">{session.role}</Badge>
+                    <span className="mx-2">·</span>
+                    <span className="mono">{session.id}</span>
+                  </p>
+                </div>
+
+                {/* Stats strip */}
+                <div className="flex items-center gap-5 shrink-0">
+                  {[
+                    { label: 'Removed',  value: session.removed,       color: session.removed > 0 ? C.danger : C.midText },
+                    { label: 'Flags',    value: session.flagsResolved,  color: C.corpBlue },
+                    { label: 'Health',   value: `${dh >= 0 ? '+' : ''}${dh}pts`, color: dh > 0 ? C.success : dh < 0 ? C.danger : C.midText },
+                  ].map(stat => (
+                    <div key={stat.label} className="text-center">
+                      <p className="text-[18px] font-bold mono leading-none" style={{ color: stat.color }}>{stat.value}</p>
+                      <p className="text-[9px] uppercase tracking-wide" style={{ color: C.midText }}>{stat.label}</p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* PDF download button */}
+                <button
+                  className="flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-[6px] border shrink-0 transition-all"
+                  style={{
+                    borderColor: downloading === session.id ? C.border : C.navy,
+                    color:       downloading === session.id ? C.midText : C.navy,
+                    background:  downloading === session.id ? '#F7FAFC' : C.lightTint,
+                    cursor: downloading && downloading !== session.id ? 'not-allowed' : 'pointer',
+                    opacity: downloading && downloading !== session.id ? 0.5 : 1,
+                  }}
+                  onClick={e => { e.stopPropagation(); downloadPDF(session) }}
+                  disabled={downloading !== null}>
+                  {downloading === session.id
+                    ? <>{Icon.spinner} Generating…</>
+                    : <>{Icon.download} PDF Report</>}
+                </button>
+
+                {/* Expand chevron */}
+                <span style={{ color: C.midText, transform: expanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }}>
+                  {Icon.chevronRight}
+                </span>
+              </div>
+
+              {/* Expanded detail panel */}
+              {expanded && (
+                <div style={{ borderTop: `1px solid #EDF2F7`, background: '#FAFBFC' }} className="px-5 py-4">
+                  <div className="grid grid-cols-3 gap-6 mb-4">
+                    {/* Records */}
+                    <div>
+                      <p className="text-[11px] font-bold mb-2 uppercase tracking-wide" style={{ color: C.midText }}>Record Counts</p>
+                      <div className="flex flex-col gap-1 text-[12px]">
+                        {[
+                          { label: 'Before scrub', val: session.recordsBefore.toLocaleString(), color: C.darkText },
+                          { label: 'After scrub',  val: session.recordsAfter.toLocaleString(),  color: C.darkText },
+                          { label: 'Removed',      val: session.removed.toLocaleString(),       color: session.removed > 0 ? C.danger : C.midText },
+                        ].map(r => (
+                          <div key={r.label} className="flex justify-between">
+                            <span style={{ color: C.midText }}>{r.label}</span>
+                            <span className="font-semibold mono" style={{ color: r.color }}>{r.val}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Flag breakdown */}
+                    <div>
+                      <p className="text-[11px] font-bold mb-2 uppercase tracking-wide" style={{ color: C.midText }}>Flag Breakdown</p>
+                      <div className="flex flex-col gap-1 text-[12px]">
+                        {[
+                          { label: 'PII flagged',        val: session.piiFlagged },
+                          { label: 'Duplicates merged',  val: session.duplicatesMerged },
+                          { label: 'NPI fixes',          val: session.npiFixed },
+                          { label: 'Outliers tagged',    val: session.outliersTagged },
+                        ].map(r => (
+                          <div key={r.label} className="flex justify-between">
+                            <span style={{ color: C.midText }}>{r.label}</span>
+                            <span className="font-semibold mono" style={{ color: r.val > 0 ? C.corpBlue : C.midText }}>{r.val}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Health change */}
+                    <div>
+                      <p className="text-[11px] font-bold mb-2 uppercase tracking-wide" style={{ color: C.midText }}>Health Score</p>
+                      <div className="flex items-end gap-3 mb-2">
+                        <div>
+                          <p className="text-[9px]" style={{ color: C.midText }}>Before</p>
+                          <p className="text-[22px] font-bold mono" style={{ color: session.healthBefore >= 80 ? C.success : session.healthBefore >= 65 ? C.warning : C.danger }}>{session.healthBefore}%</p>
+                        </div>
+                        <span className="text-[18px] mb-1" style={{ color: C.midText }}>→</span>
+                        <div>
+                          <p className="text-[9px]" style={{ color: C.midText }}>After</p>
+                          <p className="text-[22px] font-bold mono" style={{ color: session.healthAfter >= 80 ? C.success : session.healthAfter >= 65 ? C.warning : C.danger }}>{session.healthAfter}%</p>
+                        </div>
+                        <div className="ml-auto text-right">
+                          <p className="text-[9px]" style={{ color: C.midText }}>Lift</p>
+                          <p className="text-[22px] font-bold mono" style={{ color: dh > 0 ? C.success : C.danger }}>{dh > 0 ? '+' : ''}{dh}pts</p>
+                        </div>
+                      </div>
+                      <ProgressBar value={session.healthAfter} color={session.healthAfter >= 80 ? 'success' : 'warning'} />
+                    </div>
+                  </div>
+
+                  {session.notes && (
+                    <div className="rounded-[6px] px-3 py-2 text-[12px]" style={{ background: '#EBF4FA', color: C.darkText }}>
+                      <span className="font-semibold" style={{ color: C.corpBlue }}>Session notes: </span>
+                      {session.notes}
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function AuditLogScreen() {
+  const [filterType, setFilterType] = useState('All')
+  const [expandedRow, setExpandedRow] = useState<number | null>(null)
+
+  const types = ['All', 'upload', 'clean', 'query', 'export', 'invite', 'role_change']
+  const filtered = filterType === 'All' ? AUDIT_ENTRIES : AUDIT_ENTRIES.filter(e => e.type === filterType)
+
+  return (
+    <div className="p-8">
+      <SectionHeader title="Audit Log" subtitle="Complete chronological record of all platform actions" />
+
+      <Card>
+        <div className="flex items-center gap-3 mb-4">
+          <span className="text-[12px] font-semibold" style={{ color: C.midText }}>Filter by action:</span>
+          <div className="flex gap-2 flex-wrap">
+            {types.map(t => (
+              <button key={t} onClick={() => setFilterType(t)}
+                className="text-[11px] px-3 py-1 rounded-[20px] border font-semibold capitalize transition-all"
+                style={{
+                  background: filterType === t ? C.navy : 'white',
+                  color: filterType === t ? 'white' : C.midText,
+                  borderColor: filterType === t ? C.navy : C.border,
+                }}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <table className="data-table w-full border-collapse">
+          <thead>
+            <tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Resource</th><th>Detail</th></tr>
+          </thead>
+          <tbody>
+            {filtered.map((e, i) => {
+              const ac = ACTION_COLORS[e.type] || ACTION_COLORS.query
+              return (
+                <>
+                  <tr key={i} className="cursor-pointer" onClick={() => setExpandedRow(expandedRow === i ? null : i)}>
+                    <td className="mono">{e.ts}</td>
+                    <td>
+                      <div className="flex items-center gap-2">
+                        <div className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0" style={{ background: C.navy }}>
+                          {e.actor.split(' ').map(n => n[0]).join('')}
+                        </div>
+                        {e.actor}
+                      </div>
+                    </td>
+                    <td>
+                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded capitalize" style={{ background: ac.bg, color: ac.text }}>
+                        {e.type.replace('_', ' ')}
+                      </span>
+                    </td>
+                    <td className="font-medium">{e.resource}</td>
+                    <td style={{ color: C.midText }}>{e.detail}</td>
+                  </tr>
+                  {expandedRow === i && (
+                    <tr key={`exp-${i}`} style={{ background: C.lightTint }}>
+                      <td colSpan={5} className="px-4 py-3">
+                        <p className="text-[12px] font-semibold mb-1" style={{ color: C.navy }}>Full audit record</p>
+                        <div className="grid grid-cols-3 gap-4 text-[11px]">
+                          <div><span className="font-semibold" style={{ color: C.midText }}>Session ID:</span> sess_a3f92bc1</div>
+                          <div><span className="font-semibold" style={{ color: C.midText }}>IP Address:</span> 192.168.1.45</div>
+                          <div><span className="font-semibold" style={{ color: C.midText }}>User Agent:</span> Chrome 124, macOS</div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </>
+              )
+            })}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  )
+}
+
+// ─── SETTINGS ────────────────────────────────────────────────────────────────
+
+function SettingsScreen({ showToast }: { showToast: (type: ToastType, message: string) => void }) {
+  const { role } = useRole()
+  const canModifyBillingPlan = isAdminRole(role)
+  const billingTooltip = 'Only Admin users can modify billing plans.'
+  const [company, setCompany] = useState('Acme Pharma')
+  const [billingPlan, setBillingPlan] = useState('Enterprise')
+  const [brandVoice, setBrandVoice] = useState('Professional, evidence-based tone. Avoid superlatives. Always cite clinical data sources. Regulatory-compliant language required for all HCP communications.')
+  const [notifs, setNotifs] = useState({ upload: true, flags: true, exports: false, team: true })
+  const [dirty, setDirty] = useState(false)
+
+  const update = (fn: () => void) => { fn(); setDirty(true) }
+
+  return (
+    <div className="p-8">
+      <SectionHeader title="Company Settings" subtitle="Configure your account and platform preferences" />
+
+      {dirty && (
+        <div className="flex items-center gap-3 mb-6 px-4 py-3 rounded-[6px] border-l-4"
+          style={{ background: '#FEF3C7', borderLeftColor: C.warning }}>
+          <span className="text-[13px] font-semibold flex-1" style={{ color: '#92400E' }}>You have unsaved changes</span>
+          <Btn size="sm" variant="primary" onClick={() => { setDirty(false); showToast('success', 'Settings saved successfully.') }}>Save Changes</Btn>
+          <Btn size="sm" variant="ghost" onClick={() => { setDirty(false) }}>Discard</Btn>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-6">
+        <Card>
+          <h3 className="text-[15px] font-bold mb-5" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Company Profile</h3>
+          <div className="flex flex-col gap-4">
+            <Input label="Company name" value={company} onChange={v => update(() => setCompany(v))} />
+            <div>
+              <label className="text-[13px] font-semibold block mb-1" style={{ color: C.darkText }}>Industry</label>
+              <select className="w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2 bg-white" style={{ height: 40, color: C.darkText }} onChange={() => setDirty(true)}>
+                <option>Pharmaceutical</option>
+                <option>Medical Device</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-[13px] font-semibold block mb-1" style={{ color: C.darkText }}>Brand Voice Guidance</label>
+              <p className="text-[11px] mb-2" style={{ color: C.midText }}>AI will use this tone guidance when generating campaign content.</p>
+              <textarea
+                className="w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2"
+                rows={5}
+                value={brandVoice}
+                onChange={e => update(() => setBrandVoice(e.target.value))}
+                style={{ color: C.darkText, fontFamily: 'Inter, Arial, sans-serif', resize: 'vertical' }}
+              />
+            </div>
+          </div>
+        </Card>
+
+        <Card>
+          <h3 className="text-[15px] font-bold mb-5" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Notification Preferences</h3>
+          <div className="flex flex-col gap-4">
+            {[
+              { key: 'upload' as const, label: 'Upload complete', desc: 'Notify when a file finishes uploading and processing' },
+              { key: 'flags' as const, label: 'New flags detected', desc: 'Alert when PII, duplicate, or validation flags are found' },
+              { key: 'exports' as const, label: 'Export ready', desc: 'Notify when an export file is ready to download' },
+              { key: 'team' as const, label: 'Team activity', desc: 'Alerts for invitations, role changes, and logins' },
+            ].map(n => (
+              <div key={n.key} className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-[13px] font-semibold" style={{ color: C.darkText }}>{n.label}</p>
+                  <p className="text-[11px]" style={{ color: C.midText }}>{n.desc}</p>
+                </div>
+                <button
+                  onClick={() => update(() => setNotifs({ ...notifs, [n.key]: !notifs[n.key] }))}
+                  className="shrink-0 w-10 h-6 rounded-full transition-all relative"
+                  style={{ background: notifs[n.key] ? C.teal : '#CBD5E0' }}
+                >
+                  <span className="absolute top-0.5 transition-all w-5 h-5 bg-white rounded-full shadow"
+                    style={{ left: notifs[n.key] ? '50%' : 2 }} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      <Card className="mt-6">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-[15px] font-bold mb-1" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Billing Plan</h3>
+            <p className="text-[11px]" style={{ color: C.midText }}>
+              Change your organization's plan tier and billing profile.
+            </p>
+          </div>
+          {!canModifyBillingPlan && <Badge tier={1} color="neutral">Read-only</Badge>}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-4 mt-4 items-end">
+          <div>
+            <label className="text-[13px] font-semibold block mb-1" style={{ color: C.darkText }}>Current plan</label>
+            <select
+              value={billingPlan}
+              disabled={!canModifyBillingPlan}
+              onChange={e => setBillingPlan(e.target.value)}
+              className="w-full border rounded-[7px] text-[13px] px-3 py-2 bg-white"
+              style={{
+                height: 40,
+                color: canModifyBillingPlan ? C.darkText : '#A0AEC0',
+                borderColor: canModifyBillingPlan ? '#CBD5E0' : '#E2E8F0',
+              }}
+            >
+              <option>Starter</option>
+              <option>Pro</option>
+              <option>Enterprise</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <span title={canModifyBillingPlan ? '' : billingTooltip}>
+              <Btn
+                variant="primary"
+                size="sm"
+                disabled={!canModifyBillingPlan}
+                onClick={() => showToast('success', `Billing plan updated to ${billingPlan}.`)}
+              >
+                Update Billing Plan
+              </Btn>
+            </span>
+            <span className="text-[11px]" style={{ color: C.midText }}>
+              Plan changes take effect on your next billing cycle.
+            </span>
+          </div>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+// ─── SCREEN TITLE MAP ─────────────────────────────────────────────────────────
+
+// ─── ORG MANAGEMENT (Super Admin only) ────────────────────────────────────────
+
+const MOCK_ORGS = [
+  { id: 'acme',    name: 'Acme Pharma',        plan: 'Enterprise', users: 14, records: 42800, status: 'active',   joined: 'Jan 2026' },
+  { id: 'novagen', name: 'NovaGen Bio',         plan: 'Pro',        users: 5,  records: 11200, status: 'active',   joined: 'Mar 2026' },
+  { id: 'rx360',   name: 'Rx360 Health',        plan: 'Pro',        users: 8,  records: 9400,  status: 'active',   joined: 'Apr 2026' },
+  { id: 'meditec', name: 'MediTec Solutions',   plan: 'Starter',    users: 2,  records: 2100,  status: 'trial',    joined: 'Jul 2026' },
+  { id: 'alpharx', name: 'AlphaRx Corp',        plan: 'Enterprise', users: 21, records: 88000, status: 'active',   joined: 'Nov 2025' },
+  { id: 'suspended', name: 'Suspended Co.',     plan: 'Starter',    users: 1,  records: 0,     status: 'suspended',joined: 'Jun 2026' },
+]
+
+function OrgManagementScreen() {
+  const [search, setSearch] = useState('')
+  const filtered = MOCK_ORGS.filter(o => o.name.toLowerCase().includes(search.toLowerCase()))
+
+  const statusColor = (s: string) => s === 'active' ? C.success : s === 'trial' ? C.warning : C.danger
+  const planColor   = (p: string) => p === 'Enterprise' ? '#7B2D8B' : p === 'Pro' ? C.corpBlue : C.midText
+
+  return (
+    <div className="p-8">
+      <SectionHeader
+        title="Organization Management"
+        subtitle="Super Admin view — manage all client organizations on the platform"
+        actions={<Btn variant="primary" size="sm" icon={Icon.userPlus}>Provision New Org</Btn>}
+      />
+
+      {/* Platform summary */}
+      <div className="grid grid-cols-4 gap-4 mb-6">
+        {[
+          { label: 'Total Orgs',      value: MOCK_ORGS.length,                               color: C.navy    },
+          { label: 'Active',          value: MOCK_ORGS.filter(o=>o.status==='active').length, color: C.success },
+          { label: 'Total Users',     value: MOCK_ORGS.reduce((a,o)=>a+o.users,0),            color: C.corpBlue},
+          { label: 'Total Records',   value: MOCK_ORGS.reduce((a,o)=>a+o.records,0).toLocaleString(), color: C.teal },
+        ].map(s => (
+          <Card key={s.label}>
+            <p className="text-[11px]" style={{ color: C.midText }}>{s.label}</p>
+            <p className="text-[28px] font-bold mono" style={{ color: s.color }}>{s.value}</p>
+          </Card>
+        ))}
+      </div>
+
+      <Card>
+        <div className="mb-4 flex items-center gap-3">
+          <input
+            className="border border-[#CBD5E0] rounded-[6px] text-[12px] px-3 py-1.5 flex-1"
+            placeholder="Search organizations..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+        </div>
+        <table className="data-table w-full">
+          <thead>
+            <tr>
+              <th>Organization</th>
+              <th>Plan</th>
+              <th>Users</th>
+              <th>Records</th>
+              <th>Status</th>
+              <th>Joined</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(org => (
+              <tr key={org.id}>
+                <td><span className="font-semibold" style={{ color: C.navy }}>{org.name}</span></td>
+                <td><span className="text-[11px] font-bold" style={{ color: planColor(org.plan) }}>{org.plan}</span></td>
+                <td className="mono">{org.users}</td>
+                <td className="mono">{org.records.toLocaleString()}</td>
+                <td>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                    style={{ background: statusColor(org.status) + '22', color: statusColor(org.status) }}>
+                    {org.status}
+                  </span>
+                </td>
+                <td style={{ color: C.midText }}>{org.joined}</td>
+                <td>
+                  <div className="flex gap-2">
+                    <Btn variant="secondary" size="sm">Impersonate</Btn>
+                    {org.status !== 'suspended'
+                      ? <Btn variant="secondary" size="sm">Suspend</Btn>
+                      : <Btn variant="secondary" size="sm">Reinstate</Btn>
+                    }
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  )
+}
+
+// ─── SCREEN TITLES ────────────────────────────────────────────────────────────
+
+const SCREEN_TITLES: Record<Screen, string> = {
+  login: 'Login', register: 'Register', 'forgot-password': 'Forgot Password',
+  'reset-password': 'Reset Password', mfa: 'MFA Setup',
+  dashboard: 'Dashboard', upload: 'Upload Data', 'column-mapping': 'Column Mapping',
+  'data-review': 'Data Review', query: 'Natural Language Query', segments: 'Segmentation',
+  'campaign-generator': 'Campaign Generator', 'compliance-review': 'Compliance Review',
+  'financial-disclosures': 'Financial Disclosures',
+  analytics: 'Analytics Dashboard', 'data-heatmap': 'Data Quality Heatmap',
+  export: 'Export', team: 'Team Management', 'audit-log': 'Audit Log',
+  'scrubbing-sessions': 'Scrubbing Sessions',
+  settings: 'Settings',
+  'org-management': 'Organization Management',
+}
+
+// ─── ROOT APP ─────────────────────────────────────────────────────────────────
+
+const AUTH_SCREENS: Screen[] = ['login', 'register', 'forgot-password', 'reset-password', 'mfa']
+
+export default function App() {
+  const routerNavigate = useNavigate()
+  const location = useLocation()
+  const [role, setRole] = useState<Role>('admin')
+  const [uploadMeta, setUploadMeta] = useState<UploadMeta | null>(null)
+  const [resolvedValApp, setResolvedValApp] = useState<Map<number, ValAction>>(new Map())
+  const [resolvedOutApp, setResolvedOutApp] = useState<Map<number, OutAction>>(new Map())
+  const [warnNotesApp,   setWarnNotesApp]   = useState<Record<number, string>>({})
+
+  // Derive current Screen from URL path (e.g. /dashboard → 'dashboard')
+  const pathToScreen = (path: string): Screen => {
+    const seg = path.replace(/^\//, '') || 'login'
+    return seg as Screen
+  }
+  const screen = pathToScreen(location.pathname)
+
+  // Redirect bare root to /login
+  useEffect(() => {
+    if (location.pathname === '/') routerNavigate('/login', { replace: true })
+  }, [location.pathname, routerNavigate])
+
+  // If role changes and current screen is no longer allowed, redirect to dashboard
+  useEffect(() => {
+    const allowed = ROLE_NAV[role]
+    if (!AUTH_SCREENS.includes(screen) && !allowed.includes(screen)) {
+      routerNavigate('/dashboard', { replace: true })
+    }
+  }, [role, screen, routerNavigate])
+
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const toastId = useRef(0)
+
+  const showToast = (type: ToastType, message: string) => {
+    const id = toastId.current++
+    setToasts(t => [...t, { id, type, message }])
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4000)
+  }
+
+  const navigate = (s: Screen) => routerNavigate('/' + s)
+  const isAuth = AUTH_SCREENS.includes(screen)
+
+  const renderScreen = () => {
+    switch (screen) {
+      case 'login': return <LoginScreen onLogin={(r) => { setRole(r); routerNavigate('/dashboard') }} onNavigate={navigate} />
+      case 'register': return <RegisterScreen onNavigate={navigate} />
+      case 'forgot-password': return <ForgotPasswordScreen onNavigate={navigate} />
+      case 'dashboard': return <DashboardScreen onNavigate={navigate} />
+      case 'upload': return <UploadScreen onNavigate={navigate} />
+      case 'column-mapping': return <ColumnMappingScreen onNavigate={navigate} />
+      case 'data-review': return <DataReviewScreen />
+      case 'query': return <QueryScreen />
+      case 'segments': return <SegmentsScreen onNavigate={navigate} />
+      case 'campaign-generator': return <CampaignGeneratorScreen onNavigate={navigate} />
+      case 'compliance-review': return <ComplianceReviewScreen />
+      case 'financial-disclosures': return <FinancialDisclosureScreen />
+      case 'analytics': return <AnalyticsScreen onNavigate={navigate} />
+      case 'data-heatmap': return <DataHeatmapScreen />
+      case 'export': return <ExportScreen onNavigate={navigate} />
+      case 'team': return <TeamScreen showToast={showToast} />
+      case 'audit-log': return <AuditLogScreen />
+      case 'scrubbing-sessions': return <ScrubbingSessionsScreen />
+      case 'settings': return <SettingsScreen showToast={showToast} />
+      case 'org-management': return <OrgManagementScreen />
+      default: return <DashboardScreen onNavigate={navigate} />
+    }
+  }
+
+  if (isAuth) {
+    return (
+      <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
+      <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
+      <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
+        <RoleContext.Provider value={{ role, setRole }}>
+          {renderScreen()}
+          <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
+        </RoleContext.Provider>
+      </UploadContext.Provider>
+      </ValidationContext.Provider>
+      </OutlierContext.Provider>
+    )
+  }
+
+  return (
+    <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
+    <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
+    <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
+    <RoleContext.Provider value={{ role, setRole }}>
+      <div className="flex h-screen overflow-hidden" style={{ background: C.pageBg }}>
+        <Sidebar current={screen} onNavigate={navigate} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          <TopBar title={SCREEN_TITLES[screen] || ''} />
+          {/* Role switcher bar — visible while logged in for demo purposes */}
+          <div className="flex items-center gap-2 px-6 py-1.5 border-b shrink-0" style={{ background: '#F7F9FB', borderColor: '#EDF2F7' }}>
+            <span className="text-[10px] font-bold" style={{ color: C.midText }}>Viewing as:</span>
+            {(Object.entries(ROLE_META) as [Role, typeof ROLE_META[Role]][]).map(([r, m]) => (
+              <button
+                key={r}
+                onClick={() => setRole(r)}
+                className="text-[9px] font-bold px-2 py-0.5 rounded-full border transition-all"
+                style={{
+                  background: role === r ? m.bg : 'transparent',
+                  color: role === r ? m.color : C.midText,
+                  borderColor: role === r ? 'transparent' : '#CBD5E0',
+                }}
+              >{m.label}</button>
+            ))}
+            <span className="ml-auto text-[9px]" style={{ color: C.midText }}>Switch roles to preview access levels</span>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {renderScreen()}
+          </div>
+        </div>
+        <ToastContainer toasts={toasts} onRemove={id => setToasts(t => t.filter(x => x.id !== id))} />
+      </div>
+    </RoleContext.Provider>
+    </UploadContext.Provider>
+    </ValidationContext.Provider>
+    </OutlierContext.Provider>
+  )
+}

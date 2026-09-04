@@ -1,0 +1,3 @@
+npi,first_name,last_name,email,phone,practice_state,specialty,has_opted_in
+1234567890,John,Doe,john@example.com,(555) 123-4567,CA,Cardiology,true
+9876543210,Jane,Smith,jane@example.com,555-234-5678,NY,Internal Medicine,yes
