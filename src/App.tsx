@@ -21,8 +21,8 @@ const ROLE_META: Record<Role, { label: string; color: string; bg: string; descri
 const ROLE_NAV: Record<Role, string[]> = {
   'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings','org-management'],
   'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings'],
-  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','scrubbing-sessions'],
-  'viewer':      ['dashboard','data-review','data-heatmap','query','analytics','scrubbing-sessions'],
+  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','team','scrubbing-sessions','settings'],
+  'viewer':      ['dashboard','data-review','data-heatmap','query','analytics','team','scrubbing-sessions','settings'],
 }
 
 const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
@@ -30,6 +30,7 @@ const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
   setRole: () => {},
 })
 const useRole = () => useContext(RoleContext)
+const isAdminRole = (role: Role) => role === 'admin' || role === 'super-admin'
 
 // Shared upload file metadata (written by UploadScreen, read by ColumnMappingScreen + ExportScreen)
 interface UploadMeta { fileName: string; fileSize: number; rowCount: number; fileType: string; uploadedAt: string }
@@ -853,8 +854,294 @@ const RECENT_ACTIVITY = [
   { time: 'Yesterday', actor: 'Mark Chen', action: 'Ran segmentation', resource: '6 segments generated' },
 ]
 
+type WalkthroughSource = 'api' | 'demo'
+
+interface WalkthroughValidationError {
+  severity: string
+  reason: string
+}
+
+interface WalkthroughSunshine {
+  totalAmountUsd: number | null
+  companies: string[]
+  transactionCount: number | null
+}
+
+interface ProviderWalkthroughRecord {
+  id: string
+  providerName: string
+  npi: string
+  specialty: string
+  anomalyExplanation: string | null
+  anomalyScore: number | null
+  npiStatus: string | null
+  validationError: WalkthroughValidationError | null
+  sunshineFlag: boolean
+  sunshineMetadata: WalkthroughSunshine | null
+  softDeletedDuplicate: boolean
+  duplicateClusterId: string | null
+}
+
+const DEMO_PROVIDER_WALKTHROUGH: ProviderWalkthroughRecord[] = [
+  {
+    id: 'prov-4490',
+    providerName: 'Dr. James Williams',
+    npi: '9988776655',
+    specialty: 'Cardiology',
+    anomalyExplanation: 'Billing volume is 5.0x above the Cardiology average',
+    anomalyScore: 0.91,
+    npiStatus: 'Deactivated',
+    validationError: {
+      severity: 'High',
+      reason: 'NPI status classified as Deactivated by CMS NPI Registry',
+    },
+    sunshineFlag: true,
+    sunshineMetadata: {
+      totalAmountUsd: 18750,
+      companies: ['AstraZeneca'],
+      transactionCount: 3,
+    },
+    softDeletedDuplicate: true,
+    duplicateClusterId: 'dup-003',
+  },
+  {
+    id: 'prov-5512',
+    providerName: 'Dr. Marcus Okonkwo',
+    npi: '5566778899',
+    specialty: 'Neurology',
+    anomalyExplanation: 'Prescribing pattern spans 14 states — geographically implausible',
+    anomalyScore: 0.78,
+    npiStatus: 'Active',
+    validationError: null,
+    sunshineFlag: true,
+    sunshineMetadata: {
+      totalAmountUsd: 3200,
+      companies: ['Johnson & Johnson'],
+      transactionCount: 1,
+    },
+    softDeletedDuplicate: false,
+    duplicateClusterId: null,
+  },
+  {
+    id: 'prov-6630',
+    providerName: 'Dr. Maria Santos',
+    npi: '4455667788',
+    specialty: 'Oncology',
+    anomalyExplanation: 'NPI check digit invalid; record confidence reduced by validation pipeline',
+    anomalyScore: 0.68,
+    npiStatus: 'Unvalidated',
+    validationError: {
+      severity: 'High',
+      reason: 'NPI status classified as Unvalidated because no matching NPI registry record was returned',
+    },
+    sunshineFlag: false,
+    sunshineMetadata: null,
+    softDeletedDuplicate: false,
+    duplicateClusterId: null,
+  },
+]
+
+function safeText(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const cleaned = value.trim()
+  return cleaned.length > 0 ? cleaned : null
+}
+
+function safeNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(item => {
+      if (typeof item === 'string') return item.trim()
+      if (item && typeof item === 'object' && 'payer_name' in item) {
+        return safeText((item as { payer_name?: unknown }).payer_name) ?? ''
+      }
+      return ''
+    })
+    .filter(Boolean)
+}
+
+function normalizeWalkthroughRecord(raw: Record<string, unknown>, index: number): ProviderWalkthroughRecord {
+  const metadata = raw.metadata && typeof raw.metadata === 'object'
+    ? raw.metadata as Record<string, unknown>
+    : {}
+
+  const validationRaw = (
+    raw.validation_error_flag
+    ?? raw.validationError
+    ?? metadata.validation_error_flag
+    ?? metadata.validationError
+  ) as Record<string, unknown> | undefined
+
+  const validationSeverity = safeText(validationRaw?.severity)
+  const validationReason = safeText(validationRaw?.reason)
+
+  const sunshineRaw = (
+    raw.sunshine_metadata
+    ?? raw.sunshineMetadata
+    ?? metadata.sunshine_metadata
+    ?? metadata.sunshineMetadata
+  ) as Record<string, unknown> | undefined
+
+  const sunshineCompanies = [
+    ...toStringArray(sunshineRaw?.companies),
+    ...toStringArray(sunshineRaw?.company_names),
+    ...toStringArray(sunshineRaw?.payer_names),
+    ...toStringArray(sunshineRaw?.top_payers),
+  ]
+
+  const totalAmountUsd =
+    safeNumber(sunshineRaw?.total_amount_usd)
+    ?? safeNumber(sunshineRaw?.total_amount)
+    ?? safeNumber(sunshineRaw?.totalAmount)
+
+  const transactionCount =
+    safeNumber(sunshineRaw?.transaction_count)
+    ?? safeNumber(sunshineRaw?.count)
+    ?? safeNumber(sunshineRaw?.payments_count)
+
+  const providerName =
+    safeText(raw.provider_name)
+    ?? safeText(raw.providerName)
+    ?? safeText(raw.name)
+    ?? `Provider ${index + 1}`
+
+  const anomalyExplanation =
+    safeText(raw.anomaly_explanation)
+    ?? safeText(raw.anomalyExplanation)
+    ?? safeText(metadata.anomaly_explanation)
+
+  const npiStatus =
+    safeText(raw.npi_status)
+    ?? safeText(raw.validation_status)
+    ?? safeText(metadata.npi_status)
+
+  const softDeletedDuplicate = Boolean(
+    raw.soft_deleted
+    ?? raw.is_soft_deleted
+    ?? raw.duplicate_soft_deleted
+    ?? raw.is_duplicate_archived
+    ?? metadata.soft_deleted_duplicate
+  )
+
+  return {
+    id: safeText(raw.record_id) ?? safeText(raw.id) ?? `${providerName}-${index}`,
+    providerName,
+    npi: safeText(raw.npi) ?? 'Unknown',
+    specialty: safeText(raw.specialty) ?? 'Unknown',
+    anomalyExplanation,
+    anomalyScore: safeNumber(raw.anomaly_score) ?? safeNumber(raw.anomalyScore),
+    npiStatus,
+    validationError: validationSeverity || validationReason
+      ? {
+          severity: validationSeverity ?? 'Unknown',
+          reason: validationReason ?? 'No reason provided by pipeline',
+        }
+      : null,
+    sunshineFlag: Boolean(raw.sunshine_act_flag ?? raw.sunshineFlag),
+    sunshineMetadata: (totalAmountUsd !== null || sunshineCompanies.length > 0 || transactionCount !== null)
+      ? {
+          totalAmountUsd,
+          companies: [...new Set(sunshineCompanies)],
+          transactionCount,
+        }
+      : null,
+    softDeletedDuplicate,
+    duplicateClusterId: safeText(raw.duplicate_cluster_id) ?? safeText(metadata.duplicate_cluster_id),
+  }
+}
+
+function extractWalkthroughArray(payload: unknown): Record<string, unknown>[] {
+  if (Array.isArray(payload)) return payload as Record<string, unknown>[]
+  if (!payload || typeof payload !== 'object') return []
+
+  const wrapper = payload as Record<string, unknown>
+  const candidates = [wrapper.records, wrapper.providers, wrapper.data]
+  for (const maybe of candidates) {
+    if (Array.isArray(maybe)) return maybe as Record<string, unknown>[]
+  }
+  return []
+}
+
+function useProviderWalkthrough(companyId: string) {
+  const [records, setRecords] = useState<ProviderWalkthroughRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [source, setSource] = useState<WalkthroughSource>('demo')
+
+  useEffect(() => {
+    let ignore = false
+
+    const fetchWalkthrough = async () => {
+      setLoading(true)
+      setError(null)
+
+      const endpoints = [
+        `http://localhost:8000/api/companies/${encodeURIComponent(companyId)}/provider_walkthrough`,
+        `http://localhost:8000/api/companies/${encodeURIComponent(companyId)}/records`,
+      ]
+
+      for (const endpoint of endpoints) {
+        try {
+          const response = await fetch(endpoint)
+          if (!response.ok) continue
+
+          const payload = await response.json()
+          const normalized = extractWalkthroughArray(payload)
+            .map((entry, index) => normalizeWalkthroughRecord(entry, index))
+            .filter(record => (
+              record.anomalyExplanation
+              || record.validationError
+              || record.sunshineFlag
+              || record.sunshineMetadata
+              || record.softDeletedDuplicate
+            ))
+
+          if (normalized.length > 0) {
+            if (!ignore) {
+              setRecords(normalized)
+              setSource('api')
+              setLoading(false)
+            }
+            return
+          }
+        } catch {
+          // Try the next endpoint.
+        }
+      }
+
+      if (!ignore) {
+        setRecords(DEMO_PROVIDER_WALKTHROUGH)
+        setSource('demo')
+        setError('Record walkthrough API unavailable — showing demo pipeline snapshots')
+        setLoading(false)
+      }
+    }
+
+    fetchWalkthrough()
+    return () => { ignore = true }
+  }, [companyId])
+
+  return { records, loading, error, source }
+}
+
+function formatUsd(value: number | null): string {
+  if (value === null) return 'N/A'
+  return value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
+}
+
 function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const { data: stats, loading, error, refresh, lastFetched } = useDashboardStats()
+  const walkthrough = useProviderWalkthrough('acme')
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
   // If user has been in Data Review this session, blend in the live score
   const { resolvedOut } = useOutliers()
   const { resolvedVal }  = useValidation()
@@ -867,6 +1154,23 @@ function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     npi_validation: Math.max(0, stats.unresolved_flags.npi_validation - resolvedVal.size),
   } : null
   const liveFlagTotal = liveFlags ? Object.values(liveFlags).reduce((a, b) => a + b, 0) : 0
+  const selectedRecord = walkthrough.records.find(record => record.id === selectedRecordId) ?? walkthrough.records[0] ?? null
+
+  useEffect(() => {
+    if (walkthrough.records.length === 0) {
+      setSelectedRecordId(null)
+      return
+    }
+    const exists = walkthrough.records.some(record => record.id === selectedRecordId)
+    if (!exists) {
+      setSelectedRecordId(walkthrough.records[0].id)
+    }
+  }, [walkthrough.records, selectedRecordId])
+
+  const hasHighSeverityNpiIssue = selectedRecord?.validationError
+    ? selectedRecord.validationError.severity.toLowerCase() === 'high'
+      && /deactivated|unvalidated/.test(`${selectedRecord.npiStatus ?? ''} ${selectedRecord.validationError.reason}`.toLowerCase())
+    : false
 
   return (
     <div className="p-8">
@@ -947,6 +1251,167 @@ function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         )}
       </Card>
 
+      <Card className="mb-6">
+        <div className="flex items-start justify-between mb-4 gap-4">
+          <div>
+            <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Flagged Provider Walkthrough</h3>
+            <p className="text-[12px] mt-1" style={{ color: C.midText }}>
+              Click a provider to inspect pipeline outputs: anomaly explanation, NPI validation status, Sunshine Act metadata, and duplicate soft-delete state.
+            </p>
+          </div>
+          <Badge tier={1} color={walkthrough.source === 'api' ? 'success' : 'warning'}>
+            {walkthrough.source === 'api' ? 'Live pipeline data' : 'Demo pipeline snapshot'}
+          </Badge>
+        </div>
+
+        {walkthrough.error && (
+          <div className="mb-4 p-3 rounded-[7px] border" style={{ borderColor: '#FBD38D', background: '#FFFAF0' }}>
+            <p className="text-[12px]" style={{ color: '#975A16' }}>{walkthrough.error}</p>
+          </div>
+        )}
+
+        {walkthrough.loading ? (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="animate-pulse h-56 rounded-[8px]" style={{ background: '#EDF2F7' }} />
+            <div className="animate-pulse h-56 rounded-[8px]" style={{ background: '#EDF2F7' }} />
+          </div>
+        ) : walkthrough.records.length === 0 ? (
+          <EmptyState title="No flagged providers returned" subtitle="Upload and process records to view provider-level walkthrough details." />
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="border rounded-[8px] overflow-hidden" style={{ borderColor: C.border }}>
+              <div className="px-3 py-2 text-[10px] font-bold uppercase tracking-widest" style={{ background: C.lightTint, color: C.navy }}>
+                Providers requiring review
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {walkthrough.records.map(record => {
+                  const isActive = selectedRecord?.id === record.id
+                  return (
+                    <button
+                      key={record.id}
+                      onClick={() => setSelectedRecordId(record.id)}
+                      className="w-full text-left px-3 py-3 border-b transition-colors"
+                      style={{
+                        borderColor: '#EDF2F7',
+                        background: isActive ? '#EBF4FA' : '#FFFFFF',
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-2 mb-1">
+                        <span className="text-[12px] font-bold" style={{ color: C.darkText }}>{record.providerName}</span>
+                        {record.softDeletedDuplicate && <Badge tier={1} color="danger">Soft-deleted duplicate</Badge>}
+                      </div>
+                      <p className="text-[11px] mono mb-1" style={{ color: C.midText }}>NPI: {record.npi}</p>
+                      <p className="text-[11px]" style={{ color: C.midText }}>{record.specialty}</p>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                        {record.anomalyExplanation && <Badge tier={1} color="warning">Anomaly</Badge>}
+                        {record.validationError && <Badge tier={1} color={record.validationError.severity.toLowerCase() === 'high' ? 'danger' : 'warning'}>NPI validation</Badge>}
+                        {(record.sunshineFlag || record.sunshineMetadata) && <Badge tier={1} color="info">Sunshine Act</Badge>}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            {selectedRecord && (
+              <div className="border rounded-[8px] p-4" style={{ borderColor: C.border }}>
+                <div className="flex items-start justify-between gap-2 mb-3">
+                  <div>
+                    <h4 className="text-[16px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>{selectedRecord.providerName}</h4>
+                    <p className="text-[11px] mono" style={{ color: C.midText }}>NPI: {selectedRecord.npi}</p>
+                  </div>
+                  {selectedRecord.anomalyScore !== null && (
+                    <Badge tier={2} color={selectedRecord.anomalyScore >= 0.85 ? 'danger' : 'warning'}>
+                      Score {selectedRecord.anomalyScore.toFixed(2)}
+                    </Badge>
+                  )}
+                </div>
+
+                <div className="mb-4 p-3 rounded-[7px]" style={{ background: '#F8FAFC', border: '1px solid #E2E8F0' }}>
+                  <p className="text-[10px] font-bold uppercase tracking-widest mb-1" style={{ color: C.midText }}>Plain-text anomaly explanation</p>
+                  <p className="text-[12px] leading-relaxed whitespace-pre-wrap" style={{ color: C.darkText }}>
+                    {selectedRecord.anomalyExplanation ?? 'No anomaly explanation returned for this record.'}
+                  </p>
+                </div>
+
+                {selectedRecord.validationError && (
+                  <div
+                    className="mb-4 p-3 rounded-[7px] border"
+                    style={{
+                      background: hasHighSeverityNpiIssue ? '#FEE2E2' : '#FFFBEB',
+                      borderColor: hasHighSeverityNpiIssue ? '#FCA5A5' : '#FBD38D',
+                    }}
+                  >
+                    <div className="flex items-start gap-2">
+                      <span style={{ color: hasHighSeverityNpiIssue ? C.danger : C.warning }}>{Icon.alertTriangle}</span>
+                      <div>
+                        <p className="text-[12px] font-bold" style={{ color: hasHighSeverityNpiIssue ? '#991B1B' : '#92400E' }}>
+                          {hasHighSeverityNpiIssue
+                            ? 'High-severity NPI validation error'
+                            : `${selectedRecord.validationError.severity} NPI validation warning`}
+                        </p>
+                        <p className="text-[12px]" style={{ color: hasHighSeverityNpiIssue ? '#991B1B' : '#744210' }}>
+                          {selectedRecord.validationError.reason}
+                        </p>
+                        {selectedRecord.npiStatus && (
+                          <p className="text-[11px] mt-1" style={{ color: hasHighSeverityNpiIssue ? '#7F1D1D' : '#975A16' }}>
+                            Registry status: {selectedRecord.npiStatus}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="mb-4 p-3 rounded-[7px]" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
+                  <p className="text-[10px] font-bold uppercase tracking-widest mb-1" style={{ color: '#1E40AF' }}>Sunshine Act metadata</p>
+                  {(selectedRecord.sunshineFlag || selectedRecord.sunshineMetadata) ? (
+                    <>
+                      <p className="text-[12px]" style={{ color: '#1E3A8A' }}>
+                        Total reported value: <span className="font-bold">{formatUsd(selectedRecord.sunshineMetadata?.totalAmountUsd ?? null)}</span>
+                      </p>
+                      <p className="text-[12px] mt-1" style={{ color: '#1E3A8A' }}>
+                        Pharmaceutical companies: {(selectedRecord.sunshineMetadata?.companies.length ?? 0) > 0
+                          ? selectedRecord.sunshineMetadata?.companies.join(', ')
+                          : 'None returned'}
+                      </p>
+                      {selectedRecord.sunshineMetadata?.transactionCount !== null && selectedRecord.sunshineMetadata?.transactionCount !== undefined && (
+                        <p className="text-[11px] mt-1" style={{ color: '#1D4ED8' }}>
+                          Transactions: {selectedRecord.sunshineMetadata.transactionCount}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="text-[12px]" style={{ color: '#1E3A8A' }}>
+                      No Sunshine Act threshold breach metadata attached.
+                    </p>
+                  )}
+                </div>
+
+                <div className="p-3 rounded-[7px]" style={{
+                  background: selectedRecord.softDeletedDuplicate ? '#FEE2E2' : '#F0FFF4',
+                  border: `1px solid ${selectedRecord.softDeletedDuplicate ? '#FECACA' : '#9AE6B4'}`,
+                }}>
+                  <p className="text-[10px] font-bold uppercase tracking-widest mb-1" style={{ color: selectedRecord.softDeletedDuplicate ? '#991B1B' : '#1B5E3B' }}>
+                    Duplicate resolution state
+                  </p>
+                  <p className="text-[12px]" style={{ color: selectedRecord.softDeletedDuplicate ? '#991B1B' : '#1B5E3B' }}>
+                    {selectedRecord.softDeletedDuplicate
+                      ? 'This record is soft-deleted as a duplicate and excluded from clean export outputs.'
+                      : 'This record remains active and has not been soft-deleted as a duplicate.'}
+                  </p>
+                  {selectedRecord.duplicateClusterId && (
+                    <p className="text-[11px] mt-1" style={{ color: selectedRecord.softDeletedDuplicate ? '#7F1D1D' : '#276749' }}>
+                      Duplicate cluster: {selectedRecord.duplicateClusterId}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
       {/* Activity feed */}
       <Card>
         <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Recent Activity</h3>
@@ -1002,6 +1467,9 @@ const MOCK_PARSE_ERRORS: ParseError[] = [
 ]
 
 function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { role } = useRole()
+  const canDeleteDatasets = isAdminRole(role)
+  const deleteDatasetTooltip = 'Only Admin users can delete datasets.'
   const { setMeta } = useUploadMeta()
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [fileName,    setFileName]    = useState('')
@@ -1505,7 +1973,15 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
                 <td><Badge tier={1} color={u.status === 'complete' ? 'success' : 'warning'}>{u.status === 'complete' ? 'Complete' : 'Processing'}</Badge></td>
                 <td>
                   <button className="text-[11px] font-semibold hover:underline mr-3" style={{ color: C.corpBlue }}>View</button>
-                  <button className="text-[11px] font-semibold hover:underline" style={{ color: C.danger }}>Delete</button>
+                  <span title={canDeleteDatasets ? '' : deleteDatasetTooltip}>
+                    <button
+                      disabled={!canDeleteDatasets}
+                      className={`text-[11px] font-semibold ${canDeleteDatasets ? 'hover:underline' : 'cursor-not-allowed'}`}
+                      style={{ color: canDeleteDatasets ? C.danger : '#A0AEC0' }}
+                    >
+                      Delete
+                    </button>
+                  </span>
                 </td>
               </tr>
             ))}
@@ -4818,11 +5294,19 @@ const PENDING = [
 ]
 
 function TeamScreen({ showToast }: { showToast: (type: ToastType, message: string) => void }) {
+  const { role } = useRole()
+  const canInviteUsers = isAdminRole(role)
+  const adminInviteTooltip = 'Only Admin users can invite team members.'
+  const adminTeamActionTooltip = 'Only Admin users can modify team membership.'
   const [showInvite, setShowInvite] = useState(false)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteRole, setInviteRole] = useState('Editor')
 
   const sendInvite = () => {
+    if (!canInviteUsers) {
+      showToast('warning', adminInviteTooltip)
+      return
+    }
     setShowInvite(false)
     showToast('success', `Invitation sent to ${inviteEmail}`)
     setInviteEmail('')
@@ -4833,7 +5317,11 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
       <SectionHeader
         title="Team Management"
         subtitle="Manage team members and permissions"
-        actions={<Btn variant="primary" onClick={() => setShowInvite(true)} icon={Icon.userPlus}>Invite Member</Btn>}
+        actions={
+          <span title={canInviteUsers ? '' : adminInviteTooltip}>
+            <Btn variant="primary" onClick={() => setShowInvite(true)} icon={Icon.userPlus} disabled={!canInviteUsers}>Invite Member</Btn>
+          </span>
+        }
       />
 
       <Card className="mb-6">
@@ -4858,9 +5346,25 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
                 <td style={{ color: C.midText }}>{m.lastActive}</td>
                 <td>
                   <div className="flex gap-2">
-                    <button className="text-[11px] font-semibold hover:underline" style={{ color: C.corpBlue }}>Edit Role</button>
+                    <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
+                      <button
+                        disabled={!canInviteUsers}
+                        className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
+                        style={{ color: canInviteUsers ? C.corpBlue : '#A0AEC0' }}
+                      >
+                        Edit Role
+                      </button>
+                    </span>
                     {m.role !== 'Admin' && (
-                      <button className="text-[11px] font-semibold hover:underline" style={{ color: C.danger }}>Remove</button>
+                      <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
+                        <button
+                          disabled={!canInviteUsers}
+                          className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
+                          style={{ color: canInviteUsers ? C.danger : '#A0AEC0' }}
+                        >
+                          Remove
+                        </button>
+                      </span>
                     )}
                   </div>
                 </td>
@@ -4885,9 +5389,25 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
                   <td style={{ color: C.midText }}>{p.sent}</td>
                   <td>
                     <div className="flex gap-2">
-                      <button className="text-[11px] font-semibold hover:underline" style={{ color: C.corpBlue }}
-                        onClick={() => showToast('info', `Invitation resent to ${p.email}`)}>Resend</button>
-                      <button className="text-[11px] font-semibold hover:underline" style={{ color: C.danger }}>Cancel</button>
+                      <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
+                        <button
+                          disabled={!canInviteUsers}
+                          className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
+                          style={{ color: canInviteUsers ? C.corpBlue : '#A0AEC0' }}
+                          onClick={() => canInviteUsers && showToast('info', `Invitation resent to ${p.email}`)}
+                        >
+                          Resend
+                        </button>
+                      </span>
+                      <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
+                        <button
+                          disabled={!canInviteUsers}
+                          className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
+                          style={{ color: canInviteUsers ? C.danger : '#A0AEC0' }}
+                        >
+                          Cancel
+                        </button>
+                      </span>
                     </div>
                   </td>
                 </tr>
@@ -5318,7 +5838,11 @@ function AuditLogScreen() {
 // ─── SETTINGS ────────────────────────────────────────────────────────────────
 
 function SettingsScreen({ showToast }: { showToast: (type: ToastType, message: string) => void }) {
+  const { role } = useRole()
+  const canModifyBillingPlan = isAdminRole(role)
+  const billingTooltip = 'Only Admin users can modify billing plans.'
   const [company, setCompany] = useState('Acme Pharma')
+  const [billingPlan, setBillingPlan] = useState('Enterprise')
   const [brandVoice, setBrandVoice] = useState('Professional, evidence-based tone. Avoid superlatives. Always cite clinical data sources. Regulatory-compliant language required for all HCP communications.')
   const [notifs, setNotifs] = useState({ upload: true, flags: true, exports: false, team: true })
   const [dirty, setDirty] = useState(false)
@@ -5391,6 +5915,55 @@ function SettingsScreen({ showToast }: { showToast: (type: ToastType, message: s
           </div>
         </Card>
       </div>
+
+      <Card className="mt-6">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-[15px] font-bold mb-1" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Billing Plan</h3>
+            <p className="text-[11px]" style={{ color: C.midText }}>
+              Change your organization's plan tier and billing profile.
+            </p>
+          </div>
+          {!canModifyBillingPlan && <Badge tier={1} color="neutral">Read-only</Badge>}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-4 mt-4 items-end">
+          <div>
+            <label className="text-[13px] font-semibold block mb-1" style={{ color: C.darkText }}>Current plan</label>
+            <select
+              value={billingPlan}
+              disabled={!canModifyBillingPlan}
+              onChange={e => setBillingPlan(e.target.value)}
+              className="w-full border rounded-[7px] text-[13px] px-3 py-2 bg-white"
+              style={{
+                height: 40,
+                color: canModifyBillingPlan ? C.darkText : '#A0AEC0',
+                borderColor: canModifyBillingPlan ? '#CBD5E0' : '#E2E8F0',
+              }}
+            >
+              <option>Starter</option>
+              <option>Pro</option>
+              <option>Enterprise</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <span title={canModifyBillingPlan ? '' : billingTooltip}>
+              <Btn
+                variant="primary"
+                size="sm"
+                disabled={!canModifyBillingPlan}
+                onClick={() => showToast('success', `Billing plan updated to ${billingPlan}.`)}
+              >
+                Update Billing Plan
+              </Btn>
+            </span>
+            <span className="text-[11px]" style={{ color: C.midText }}>
+              Plan changes take effect on your next billing cycle.
+            </span>
+          </div>
+        </div>
+      </Card>
     </div>
   )
 }

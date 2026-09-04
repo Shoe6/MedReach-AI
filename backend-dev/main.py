@@ -1,10 +1,31 @@
-from fastapi import FastAPI, HTTPException, Path
+from datetime import datetime
+
+from fastapi import Depends, FastAPI, HTTPException, Header, Path
+from pydantic import BaseModel
 from database import db
 
 from crud import create_company, create_upload, create_user, get_dashboard_metrics
 from models import Company, Upload, User, DashboardMetrics
 
 app = FastAPI(title="MedReach AI Backend", version="1.0")
+
+ADMIN_ROLES = frozenset({"admin", "super-admin"})
+
+
+def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
+    """Ensure only admin-equivalent roles can execute protected operations."""
+    normalized = (x_user_role or "").strip().lower()
+    if normalized not in ADMIN_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin role required for this operation. Set X-User-Role to admin.",
+        )
+    return normalized
+
+
+class BillingPlanUpdatePayload(BaseModel):
+    plan: str
+    reason: str | None = None
 
 
 @app.get("/api/health")
@@ -38,6 +59,7 @@ async def post_user(
         ...,
         description="Tenant company identifier",
     ),
+    _admin_role: str = Depends(require_admin),
 ):
     """Create a user under the tenant-scoped company path."""
     if user.company_id != company_id:
@@ -50,6 +72,51 @@ async def post_user(
     if not doc_ref:
         raise HTTPException(status_code=500, detail="Unable to create user")
     return user
+
+
+@app.delete("/api/companies/{company_id}/uploads/{upload_id}")
+async def delete_company_upload(
+    company_id: str = Path(..., description="Tenant company identifier"),
+    upload_id: str = Path(..., description="Upload document identifier"),
+    admin_role: str = Depends(require_admin),
+):
+    """Soft-delete a company dataset upload. Admin role is required."""
+    upload_ref = db.collection("companies").document(company_id).collection("uploads").document(upload_id)
+    snapshot = upload_ref.get()
+    if not snapshot.exists:
+        raise HTTPException(status_code=404, detail=f"Upload '{upload_id}' not found")
+
+    upload_ref.set(
+        {
+            "metadata": {
+                "soft_deleted": True,
+                "deleted_at": datetime.utcnow().isoformat(),
+                "deleted_by_role": admin_role,
+            }
+        },
+        merge=True,
+    )
+    return {"company_id": company_id, "upload_id": upload_id, "soft_deleted": True}
+
+
+@app.patch("/api/companies/{company_id}/billing-plan")
+async def patch_company_billing_plan(
+    payload: BillingPlanUpdatePayload,
+    company_id: str = Path(..., description="Tenant company identifier"),
+    admin_role: str = Depends(require_admin),
+):
+    """Update tenant billing plan. Admin role is required."""
+    company_ref = db.collection("companies").document(company_id)
+    company_ref.set(
+        {
+            "billing_plan": payload.plan,
+            "billing_plan_updated_at": datetime.utcnow().isoformat(),
+            "billing_plan_updated_by_role": admin_role,
+            "billing_plan_update_reason": payload.reason,
+        },
+        merge=True,
+    )
+    return {"company_id": company_id, "billing_plan": payload.plan, "updated": True}
 
 
 @app.post("/api/companies/{company_id}/uploads", response_model=Upload)
