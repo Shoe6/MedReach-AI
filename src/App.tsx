@@ -2069,18 +2069,26 @@ function DataReviewScreen() {
         const response = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/export_data')
         if (!response.ok) throw new Error(`Export request failed (${response.status})`)
         const contentType = response.headers.get('content-type') || ''
-        const payload = contentType.includes('json') ? await response.json() : await response.text()
-        if (Array.isArray(payload)) {
-          setProcessedRecords(payload)
-        } else if (typeof payload === 'string') {
+        if (contentType.includes('json')) {
+          const data: unknown = await response.json()
+          const recordArray = Array.isArray(data)
+            ? data
+            : data && typeof data === 'object' && Array.isArray((data as { records?: unknown }).records)
+              ? (data as { records: unknown[] }).records
+              : null
+
+          if (!recordArray) throw new Error('Export response did not contain a records array')
+          setProcessedRecords(recordArray.filter((record): record is Record<string, unknown> => (
+            record !== null && typeof record === 'object' && !Array.isArray(record)
+          )))
+        } else {
+          const payload = await response.text()
           const [headerLine, ...lines] = payload.trim().split(/\r?\n/)
           const headers = headerLine ? headerLine.split(',') : []
           setProcessedRecords(lines.filter(Boolean).map(line => {
             const values = line.split(',')
             return Object.fromEntries(headers.map((header, index) => [header, values[index] || '']))
           }))
-        } else if (Array.isArray(payload?.records)) {
-          setProcessedRecords(payload.records)
         }
       } catch (error) {
         setRecordsError(error instanceof Error ? error.message : 'Unable to load processed records')
@@ -2186,7 +2194,7 @@ function DataReviewScreen() {
   }
 
   // Category weights: NPI (30) > PII (25) > Duplicates (25) > Outliers (20)
-  const liveRatio = TOTAL_ROWS > 0 ? Math.min(1, unresolvedDataFlags / TOTAL_ROWS) : 0
+  const liveRatio = TOTAL_ROWS === 0 ? 0 : Math.min(1, unresolvedDataFlags / TOTAL_ROWS)
   const npiPoints = TOTAL_ROWS > 0 ? 30 * (1 - processedNPIValidation / TOTAL_ROWS) : 0
   const piiPoints = TOTAL_ROWS > 0 ? 25 * (1 - processedPII / TOTAL_ROWS) : 0
   const dupPoints = TOTAL_ROWS > 0 ? 25 * (1 - processedDuplicates / TOTAL_ROWS) : 0
@@ -2226,7 +2234,7 @@ function DataReviewScreen() {
         }
       />
 
-      <RecordDetailDashboard />
+      <RecordDetailDashboard records={processedRecords} />
 
       {/* ── Data Health Score bar ── */}
       {(() => {
