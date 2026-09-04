@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, createContext, useContext, Fragment, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
+import RecordDetailDashboard from './RecordDetailDashboard'
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip as RechartTooltip,
   Cell, CartesianGrid, Legend, PieChart, Pie,
@@ -2191,6 +2192,8 @@ function DataReviewScreen() {
           </div>
         }
       />
+
+      <RecordDetailDashboard />
 
       {/* ── Data Health Score bar ── */}
       {(() => {
