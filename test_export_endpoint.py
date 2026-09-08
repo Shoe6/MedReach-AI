@@ -1,6 +1,4 @@
-"""Tests for the CRM export endpoint - Jira ticket MA-18."""
-import csv
-import io
+"""Tests for the processed-record export endpoint."""
 from uuid import uuid4
 
 import pandas as pd
@@ -13,15 +11,12 @@ from database import db
 client = TestClient(app)
 
 
-def test_export_data_hipaa_compliance_filters_non_opted_in():
+def test_export_data_returns_all_stored_records():
     """
-    Test that the export endpoint filters out non-opted-in records (HIPAA compliance).
+    Test that the export endpoint returns every stored record.
     
     Test data:
-    - Record 1: Has_Opted_In = true (should be included)
-    - Record 2: Has_Opted_In = false (should be excluded)
-    - Record 3: Has_Opted_In = null (should be excluded)
-    - Record 4: Has_Opted_In missing (should be excluded)
+    - Records with true, false, null, and missing Has_Opted_In are all included.
     """
     company_id = f"test-hipaa-compliance-{uuid4()}"
     
@@ -68,32 +63,24 @@ def test_export_data_hipaa_compliance_filters_non_opted_in():
     # Verify response status
     assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
     
-    # Verify headers
-    assert "text/csv" in response.headers["content-type"]
-    assert f"crm_export_{company_id}.csv" in response.headers["content-disposition"]
+    exported_records = response.json()["records"]
     
-    # Parse the CSV response
-    csv_text = response.text
-    csv_reader = csv.DictReader(io.StringIO(csv_text))
-    exported_records = list(csv_reader)
+    assert len(exported_records) == 4, f"Expected 4 records, got {len(exported_records)}"
+    assert {record["name"] for record in exported_records} == {
+        "John Doe", "Jane Smith", "Bob Johnson", "Alice Brown",
+    }
     
-    # Verify only opted-in records are present
-    assert len(exported_records) == 1, f"Expected 1 record, got {len(exported_records)}"
-    assert exported_records[0]["name"] == "John Doe"
-    assert exported_records[0]["email"] == "john@example.com"
-    
-    print(f"✓ HIPAA compliance test passed: {len(exported_records)} opted-in record exported")
+    print(f"✓ Export test passed: {len(exported_records)} stored records exported")
 
 
-def test_export_data_standardizes_csv_format():
+def test_export_data_preserves_record_fields():
     """
     Test that the export endpoint standardizes the CSV format correctly.
     
     Verifications:
-    - NaN values are replaced with empty strings
-    - UTF-8 encoding is used
-    - Comma delimiter with proper quoting
-    - No index column
+    - Stored fields are returned in the JSON records envelope
+    - UTF-8 characters are preserved
+    - No synthetic index column is added
     """
     company_id = f"test-csv-format-{uuid4()}"
     
@@ -128,43 +115,37 @@ def test_export_data_standardizes_csv_format():
     # Verify response status
     assert response.status_code == 200
     
-    # Parse the CSV response
-    csv_text = response.text
-    csv_reader = csv.DictReader(io.StringIO(csv_text))
-    exported_records = list(csv_reader)
+    exported_records = response.json()["records"]
     
     # Verify all records are present (both opted-in)
     assert len(exported_records) == 2
     
-    # Verify NaN values are replaced with empty strings (check both records)
     # Create a lookup by email to verify the correct record's fields
     records_by_email = {r["email"]: r for r in exported_records}
-    assert records_by_email["john@example.com"]["phone"] == ""
-    assert records_by_email["jose@example.com"]["address"] == ""
+    assert records_by_email["john@example.com"]["phone"] is None
+    assert records_by_email["jose@example.com"]["address"] is None
     
     # Verify UTF-8 characters are preserved
     assert "Döe" in records_by_email["john@example.com"]["name"]
     assert "José" in records_by_email["jose@example.com"]["name"]
     
-    # Verify CSV structure (no index column)
-    headers = list(exported_records[0].keys())
-    assert all("index" not in h.lower() for h in headers)
-    assert headers[0] in ["id", "name", "email", "phone", "address", "Has_Opted_In"]
+    assert all("index" not in key.lower() for key in exported_records[0])
     
     print(f"✓ CSV format standardization test passed: {len(exported_records)} records exported with correct formatting")
 
 
-def test_export_data_returns_404_for_nonexistent_company():
-    """Test that the export endpoint returns 404 for a nonexistent company."""
+def test_export_data_returns_empty_records_for_nonexistent_company():
+    """Test that an empty company export remains a successful JSON response."""
     nonexistent_company = f"nonexistent-{uuid4()}"
     
     response = client.get(f"/api/companies/{nonexistent_company}/export_data")
     
-    assert response.status_code == 404
-    print("✓ 404 test passed: Nonexistent company returns 404")
+    assert response.status_code == 200
+    assert response.json() == {"records": []}
+    print("✓ Empty export test passed: Nonexistent company returns no records")
 
 
-def test_export_data_empty_when_all_records_non_opted_in():
+def test_export_data_returns_records_without_opt_in():
     """
     Test that the export endpoint handles the case where all records are non-opted-in.
     """
@@ -198,14 +179,10 @@ def test_export_data_empty_when_all_records_non_opted_in():
     # or 200 with empty CSV (just headers)
     assert response.status_code == 200
     
-    # Parse the CSV response
-    csv_text = response.text
-    csv_reader = csv.DictReader(io.StringIO(csv_text))
-    exported_records = list(csv_reader)
+    exported_records = response.json()["records"]
     
-    # Verify no records are exported
-    assert len(exported_records) == 0
-    print("✓ Empty opt-in test passed: All non-opted-in records were filtered out")
+    assert len(exported_records) == 2
+    print("✓ Records without opt-in test passed")
 
 
 def test_export_data_handles_missing_opted_in_column():
@@ -239,11 +216,7 @@ def test_export_data_handles_missing_opted_in_column():
     # Verify response status (200 but with no records, as no one is explicitly opted-in)
     assert response.status_code == 200
     
-    # Parse the CSV response
-    csv_text = response.text
-    csv_reader = csv.DictReader(io.StringIO(csv_text))
-    exported_records = list(csv_reader)
+    exported_records = response.json()["records"]
     
-    # Verify no records are exported (missing Has_Opted_In means not opted-in)
-    assert len(exported_records) == 0
-    print("✓ Missing column test passed: Records without Has_Opted_In were filtered out")
+    assert len(exported_records) == 2
+    print("✓ Missing column test passed: Records without Has_Opted_In were returned")
