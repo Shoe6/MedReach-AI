@@ -1,9 +1,11 @@
 import csv
 import io
+import logging
 import os
 from datetime import datetime
 from uuid import uuid4
 
+from firebase_admin import storage
 from fastapi import Depends, FastAPI, File, HTTPException, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -11,6 +13,8 @@ from pydantic import BaseModel
 
 from database import db
 from record_merge_service import merge_record_cluster
+
+logger = logging.getLogger(__name__)
 
 def _get_ingest():
     """Lazy import so the app can start even when pandas is not installed."""
@@ -573,62 +577,43 @@ async def merge_company_records(company_id: str, payload: dict, _role: str = Dep
         master_record_id = payload.get("master_record_id")
 
         if not isinstance(records, list) or not records:
-            raise HTTPException(status_code=400, detail="'records' must be a non-empty list.")
+            raise HTTPException(status_code=422, detail="'records' must be a non-empty list.")
 
         merged = merge_record_cluster(records, master_record_id=master_record_id)
         master = merged["master_record"]
+
+        records_ref = db.collection("companies").document(company_id).collection("records")
+        master_id = str(master.get("record_id") or master_record_id or uuid4())
+        master["record_id"] = master_id
+        records_ref.document(master_id).set(master)
+
+        for archived_record in merged["archived_records"]:
+            archived_id = str(archived_record.get("record_id") or uuid4())
+            archived_record["record_id"] = archived_id
+            records_ref.document(archived_id).set(archived_record)
 
         return {
             "company_id": company_id,
             "merged_record": master,
             "archived_records": merged["archived_records"],
-            "master_record_id": str(master.get("record_id") or master_record_id or ""),
+            "master_record_id": master_id,
         }
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Unable to merge company records: {exc}") from exc
+        logger.exception("Failed to merge company records")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/companies/{company_id}/export_data")
 async def export_company_data(company_id: str):
-    """
-    Export processed records for a company as a CRM-compatible CSV.
-
-    HIPAA COMPLIANCE: Only records with Has_Opted_In=true are included.
-    """
+    """Return processed records for the Data Review and export staging workflows."""
     try:
-        import pandas as pd  # lazy: optional dependency
-
         records_ref = db.collection("companies").document(company_id).collection("records")
         records = [doc.to_dict() for doc in records_ref.stream()]
-
-        if not records:
-            raise HTTPException(status_code=404, detail=f"No records found for company {company_id}")
-
-        df = pd.DataFrame(records)
-
-        if "Has_Opted_In" in df.columns:
-            df = df[df["Has_Opted_In"] == True]  # noqa: E712
-        else:
-            df = df.iloc[0:0]
-
-        if df.empty:
-            raise HTTPException(status_code=200, detail="No opted-in records available for export")
-
-        df = df.fillna("")
-        for col in df.select_dtypes(include=["object", "string"]).columns:
-            df[col] = df[col].astype(str).str.encode("utf-8", errors="replace").str.decode("utf-8")
-
-        csv_buffer = io.StringIO()
-        df.to_csv(csv_buffer, index=False, quoting=csv.QUOTE_MINIMAL, encoding="utf-8")
-        csv_buffer.seek(0)
-
-        return StreamingResponse(
-            iter([csv_buffer.getvalue()]),
-            media_type="text/csv",
-            headers={"Content-Disposition": f'attachment; filename="crm_export_{company_id}.csv"'},
-        )
+        return {"records": records}
 
     except HTTPException:
         raise
