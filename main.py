@@ -28,6 +28,7 @@ app.add_middleware(
 )
 
 ADMIN_ROLES = frozenset({"admin", "super-admin"})
+EDITOR_ROLES = frozenset({"editor", "admin", "super-admin"})
 
 
 def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
@@ -37,6 +38,17 @@ def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-R
         raise HTTPException(
             status_code=403,
             detail="Admin role required for this operation. Set X-User-Role to admin.",
+        )
+    return normalized
+
+
+def require_editor_or_above(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
+    """Block read-only Viewer roles from data modification/export/cleaning operations."""
+    normalized = (x_user_role or "").strip().lower()
+    if normalized not in EDITOR_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Editor role or higher required for this operation. Viewers are read-only.",
         )
     return normalized
 
@@ -208,8 +220,8 @@ class BillingPlanUpdatePayload(BaseModel):
 
 
 @app.post("/api/export/log")
-async def log_export(payload: ExportLogPayload):
-    """Write an export event to Firestore exports collection."""
+async def log_export(payload: ExportLogPayload, _role: str = Depends(require_editor_or_above)):
+    """Write an export event to Firestore exports collection. Viewers are blocked."""
     try:
         doc = {
             "format": payload.format,
@@ -377,8 +389,12 @@ async def download_session_pdf(session_id: str):
 # ── Company file upload ───────────────────────────────────────────────────────
 
 @app.post("/api/companies/{company_id}/upload_file", status_code=201)
-async def upload_company_file(company_id: str, file: UploadFile = File(...)):
-    """Upload a file for a specific company tenant and return its upload metadata."""
+async def upload_company_file(
+    company_id: str,
+    file: UploadFile = File(...),
+    _role: str = Depends(require_editor_or_above),
+):
+    """Upload a file for a specific company tenant and return its upload metadata. Viewers are blocked."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file selected for upload.")
 
@@ -460,8 +476,18 @@ async def invite_company_user(
     payload: InviteUserPayload,
     admin_role: str = Depends(require_admin),
 ):
-    """Create a tenant-scoped invitation. Admin role is required."""
+    """Create a tenant-scoped invitation, provision the Auth account, and send a verification email. Admin role is required."""
     try:
+        from firebase_admin import auth
+
+        # Provision (or reuse) the Firebase Auth account so a verification link can be issued.
+        try:
+            user_record = auth.create_user(email=payload.email, email_verified=False, disabled=False)
+        except auth.EmailAlreadyExistsError:
+            user_record = auth.get_user_by_email(payload.email)
+
+        verification_link = auth.generate_email_verification_link(payload.email)
+
         invitation_id = str(uuid4())
         invitation = {
             "invitation_id": invitation_id,
@@ -471,9 +497,13 @@ async def invite_company_user(
             "created_at": datetime.utcnow().isoformat(),
             "status": "pending",
             "created_by_role": admin_role,
+            "auth_uid": user_record.uid,
+            "verification_link": verification_link,
         }
         db.collection("companies").document(company_id).collection("invitations").document(invitation_id).set(invitation)
         return {"company_id": company_id, "invitation": invitation}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Unable to create invitation: {exc}") from exc
 
@@ -529,8 +559,8 @@ async def update_company_billing_plan(
 
 
 @app.post("/api/companies/{company_id}/records/merge")
-async def merge_company_records(company_id: str, payload: dict):
-    """Merge a duplicate cluster into a master record and archive the rest.
+async def merge_company_records(company_id: str, payload: dict, _role: str = Depends(require_editor_or_above)):
+    """Merge a duplicate cluster into a master record and archive the rest. Viewers are blocked.
 
     Request body should look like:
     {
