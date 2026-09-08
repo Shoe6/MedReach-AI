@@ -1,12 +1,10 @@
 import csv
 import io
-import logging
 import os
 from datetime import datetime
-from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -28,6 +26,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+ADMIN_ROLES = frozenset({"admin", "super-admin"})
+
+
+def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
+    """Ensure the request is made by an admin-equivalent role."""
+    normalized = (x_user_role or "").strip().lower()
+    if normalized not in ADMIN_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin role required for this operation. Set X-User-Role to admin.",
+        )
+    return normalized
 
 async def validate_csv_upload(file: UploadFile) -> None:
     """Validate CSV uploads before writing them to storage."""
@@ -185,9 +196,15 @@ class ExportLogPayload(BaseModel):
     timestamp: str
 
 
-class MergeRecordsPayload(BaseModel):
-    records: list[dict[str, Any]]
-    master_record_id: str | None = None
+class InviteUserPayload(BaseModel):
+    email: str
+    role: str = "Viewer"
+    invited_by: str | None = None
+
+
+class BillingPlanUpdatePayload(BaseModel):
+    plan: str
+    reason: str | None = None
 
 
 @app.post("/api/export/log")
@@ -437,8 +454,82 @@ async def get_company_dashboard_metrics(company_id: str):
         ) from exc
 
 
+@app.post("/api/companies/{company_id}/users/invite", status_code=201)
+async def invite_company_user(
+    company_id: str,
+    payload: InviteUserPayload,
+    admin_role: str = Depends(require_admin),
+):
+    """Create a tenant-scoped invitation. Admin role is required."""
+    try:
+        invitation_id = str(uuid4())
+        invitation = {
+            "invitation_id": invitation_id,
+            "email": payload.email,
+            "role": payload.role,
+            "invited_by": payload.invited_by,
+            "created_at": datetime.utcnow().isoformat(),
+            "status": "pending",
+            "created_by_role": admin_role,
+        }
+        db.collection("companies").document(company_id).collection("invitations").document(invitation_id).set(invitation)
+        return {"company_id": company_id, "invitation": invitation}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to create invitation: {exc}") from exc
+
+
+@app.delete("/api/companies/{company_id}/uploads/{upload_id}")
+async def delete_company_dataset(
+    company_id: str,
+    upload_id: str,
+    admin_role: str = Depends(require_admin),
+):
+    """Soft-delete a dataset upload. Admin role is required."""
+    try:
+        upload_ref = db.collection("companies").document(company_id).collection("uploads").document(upload_id)
+        snapshot = upload_ref.get()
+        if not snapshot.exists:
+            raise HTTPException(status_code=404, detail=f"Upload '{upload_id}' not found for company '{company_id}'.")
+
+        upload_ref.update(
+            {
+                "soft_deleted": True,
+                "deleted_at": datetime.utcnow().isoformat(),
+                "deleted_by_role": admin_role,
+            }
+        )
+        return {"company_id": company_id, "upload_id": upload_id, "soft_deleted": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to delete upload: {exc}") from exc
+
+
+@app.patch("/api/companies/{company_id}/billing-plan")
+async def update_company_billing_plan(
+    company_id: str,
+    payload: BillingPlanUpdatePayload,
+    admin_role: str = Depends(require_admin),
+):
+    """Update a company's billing plan. Admin role is required."""
+    try:
+        company_ref = db.collection("companies").document(company_id)
+        company_ref.set(
+            {
+                "billing_plan": payload.plan,
+                "billing_plan_updated_at": datetime.utcnow().isoformat(),
+                "billing_plan_updated_by_role": admin_role,
+                "billing_plan_update_reason": payload.reason,
+            },
+            merge=True,
+        )
+        return {"company_id": company_id, "billing_plan": payload.plan, "updated": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to update billing plan: {exc}") from exc
+
+
 @app.post("/api/companies/{company_id}/records/merge")
-async def merge_company_records(company_id: str, request: MergeRecordsPayload):
+async def merge_company_records(company_id: str, payload: dict):
     """Merge a duplicate cluster into a master record and archive the rest.
 
     Request body should look like:
@@ -447,63 +538,67 @@ async def merge_company_records(company_id: str, request: MergeRecordsPayload):
       "master_record_id": "record-123"
     }
     """
-    print(f"Received {len(request.records)} records to merge")
     try:
-        if not request.records:
+        records = payload.get("records")
+        master_record_id = payload.get("master_record_id")
+
+        if not isinstance(records, list) or not records:
             raise HTTPException(status_code=400, detail="'records' must be a non-empty list.")
 
-        merged = merge_record_cluster(
-            request.records,
-            master_record_id=request.master_record_id,
-        )
+        merged = merge_record_cluster(records, master_record_id=master_record_id)
         master = merged["master_record"]
-        master_record_id = str(master.get("record_id") or request.master_record_id or uuid4())
-        master["record_id"] = master_record_id
-
-        try:
-            records_ref = db.collection("companies").document(company_id).collection("records")
-            write_batch = db.batch()
-            for record in request.records:
-                record_data = dict(record)
-                record_id = str(record_data.get("record_id") or uuid4())
-                record_data["record_id"] = record_id
-                record_data["is_anomaly"] = float(record_data.get("prescription_volume") or 0) > 1000
-                write_batch.set(records_ref.document(record_id), record_data)
-            write_batch.set(records_ref.document(master_record_id), master)
-            commit_results = write_batch.commit()
-            print(f"Committed {len(commit_results)} Firestore writes for company {company_id}")
-        except Exception as exc:
-            print(exc)
-            raise
 
         return {
             "company_id": company_id,
             "merged_record": master,
             "archived_records": merged["archived_records"],
-            "master_record_id": master_record_id,
+            "master_record_id": str(master.get("record_id") or master_record_id or ""),
         }
-    except HTTPException:
-        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        logging.exception("Failed to merge company records for company %s", company_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=f"Unable to merge company records: {exc}") from exc
 
 
 @app.get("/api/companies/{company_id}/export_data")
 async def export_company_data(company_id: str):
     """
-    Return processed records for a company.
+    Export processed records for a company as a CRM-compatible CSV.
 
-    Return every processed record stored for the company.
+    HIPAA COMPLIANCE: Only records with Has_Opted_In=true are included.
     """
     try:
-        docs = db.collection(f"companies/{company_id}/records").stream()
-        records_list = [doc.to_dict() or {} for doc in docs]
-        print(f"Export query found {len(records_list)} records")
+        import pandas as pd  # lazy: optional dependency
 
-        return {"records": records_list}
+        records_ref = db.collection("companies").document(company_id).collection("records")
+        records = [doc.to_dict() for doc in records_ref.stream()]
+
+        if not records:
+            raise HTTPException(status_code=404, detail=f"No records found for company {company_id}")
+
+        df = pd.DataFrame(records)
+
+        if "Has_Opted_In" in df.columns:
+            df = df[df["Has_Opted_In"] == True]  # noqa: E712
+        else:
+            df = df.iloc[0:0]
+
+        if df.empty:
+            raise HTTPException(status_code=200, detail="No opted-in records available for export")
+
+        df = df.fillna("")
+        for col in df.select_dtypes(include=["object", "string"]).columns:
+            df[col] = df[col].astype(str).str.encode("utf-8", errors="replace").str.decode("utf-8")
+
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False, quoting=csv.QUOTE_MINIMAL, encoding="utf-8")
+        csv_buffer.seek(0)
+
+        return StreamingResponse(
+            iter([csv_buffer.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="crm_export_{company_id}.csv"'},
+        )
 
     except HTTPException:
         raise
