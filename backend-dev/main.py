@@ -10,6 +10,7 @@ from models import Company, Upload, User, DashboardMetrics
 app = FastAPI(title="MedReach AI Backend", version="1.0")
 
 ADMIN_ROLES = frozenset({"admin", "super-admin"})
+EDITOR_ROLES = frozenset({"editor", "admin", "super-admin"})
 
 
 def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
@@ -19,6 +20,17 @@ def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-R
         raise HTTPException(
             status_code=403,
             detail="Admin role required for this operation. Set X-User-Role to admin.",
+        )
+    return normalized
+
+
+def require_editor_or_above(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
+    """Block read-only Viewer roles from data modification/cleaning operations."""
+    normalized = (x_user_role or "").strip().lower()
+    if normalized not in EDITOR_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Editor role or higher required for this operation. Viewers are read-only.",
         )
     return normalized
 
@@ -126,8 +138,9 @@ async def post_upload(
         ...,
         description="Tenant company identifier",
     ),
+    _role: str = Depends(require_editor_or_above),
 ):
-    """Create an upload under the tenant-scoped company path."""
+    """Create an upload under the tenant-scoped company path. Viewers are blocked."""
     if upload.company_id != company_id:
         raise HTTPException(
             status_code=400,

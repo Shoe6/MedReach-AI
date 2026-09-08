@@ -13,7 +13,7 @@ type Role = 'super-admin' | 'admin' | 'editor' | 'viewer'
 const ROLE_META: Record<Role, { label: string; color: string; bg: string; description: string }> = {
   'super-admin': { label: 'Super Admin', color: '#fff',     bg: '#7B2D8B', description: 'Full platform access across all organizations' },
   'admin':       { label: 'Admin',       color: '#1B3A6B', bg: '#BEE3F8', description: 'Full access within your organization' },
-  'editor':      { label: 'Editor',      color: '#744210', bg: '#FEEBC8', description: 'Upload, clean, and review data — no export or team mgmt' },
+  'editor':      { label: 'Editor',      color: '#744210', bg: '#FEEBC8', description: 'Upload, run scrubbing, resolve flags, and export data — no company settings or user management' },
   'viewer':      { label: 'Viewer',      color: '#1B5E3B', bg: '#C6F6D5', description: 'Read-only access to reports and dashboards' },
 }
 
@@ -21,7 +21,7 @@ const ROLE_META: Record<Role, { label: string; color: string; bg: string; descri
 const ROLE_NAV: Record<Role, string[]> = {
   'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings','org-management'],
   'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings'],
-  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','team','scrubbing-sessions','settings'],
+  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','export','scrubbing-sessions'],
   'viewer':      ['dashboard','data-review','data-heatmap','query','analytics','team','scrubbing-sessions','settings'],
 }
 
@@ -880,6 +880,20 @@ interface ProviderWalkthroughRecord {
   sunshineMetadata: WalkthroughSunshine | null
   softDeletedDuplicate: boolean
   duplicateClusterId: string | null
+  prescriptionVolume: number | null
+}
+
+// Reference benchmarks for the provider volume comparison histogram
+const NATIONAL_AVERAGE_VOLUME = 1200
+const SPECIALTY_AVERAGE_VOLUME: Record<string, number> = {
+  Cardiology: 1450,
+  Neurology: 1100,
+  Oncology: 950,
+  'Family Medicine': 1600,
+  'Internal Medicine': 1350,
+}
+function specialtyAverageVolume(specialty: string): number {
+  return SPECIALTY_AVERAGE_VOLUME[specialty] ?? NATIONAL_AVERAGE_VOLUME
 }
 
 const DEMO_PROVIDER_WALKTHROUGH: ProviderWalkthroughRecord[] = [
@@ -890,6 +904,7 @@ const DEMO_PROVIDER_WALKTHROUGH: ProviderWalkthroughRecord[] = [
     specialty: 'Cardiology',
     anomalyExplanation: 'Billing volume is 5.0x above the Cardiology average',
     anomalyScore: 0.91,
+    prescriptionVolume: 7250,
     npiStatus: 'Deactivated',
     validationError: {
       severity: 'High',
@@ -911,6 +926,7 @@ const DEMO_PROVIDER_WALKTHROUGH: ProviderWalkthroughRecord[] = [
     specialty: 'Neurology',
     anomalyExplanation: 'Prescribing pattern spans 14 states — geographically implausible',
     anomalyScore: 0.78,
+    prescriptionVolume: 1980,
     npiStatus: 'Active',
     validationError: null,
     sunshineFlag: true,
@@ -929,6 +945,7 @@ const DEMO_PROVIDER_WALKTHROUGH: ProviderWalkthroughRecord[] = [
     specialty: 'Oncology',
     anomalyExplanation: 'NPI check digit invalid; record confidence reduced by validation pipeline',
     anomalyScore: 0.68,
+    prescriptionVolume: 615,
     npiStatus: 'Unvalidated',
     validationError: {
       severity: 'High',
@@ -1056,6 +1073,13 @@ function normalizeWalkthroughRecord(raw: Record<string, unknown>, index: number)
       : null,
     softDeletedDuplicate,
     duplicateClusterId: safeText(raw.duplicate_cluster_id) ?? safeText(metadata.duplicate_cluster_id),
+    prescriptionVolume:
+      safeNumber(raw.prescription_volume)
+      ?? safeNumber(raw.prescriptionVolume)
+      ?? safeNumber(raw.billing_volume)
+      ?? safeNumber(raw.billingVolume)
+      ?? safeNumber(metadata.prescription_volume)
+      ?? safeNumber(metadata.billing_volume),
   }
 }
 
@@ -1333,6 +1357,34 @@ function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
                     {selectedRecord.anomalyExplanation ?? 'No anomaly explanation returned for this record.'}
                   </p>
                 </div>
+
+                {selectedRecord.prescriptionVolume !== null && (
+                  <div className="mb-4 p-3 rounded-[7px]" style={{ background: '#F8FAFC', border: '1px solid #E2E8F0' }}>
+                    <p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: C.midText }}>
+                      Volume vs. national &amp; specialty peers
+                    </p>
+                    <ResponsiveContainer width="100%" height={180}>
+                      <BarChart
+                        data={[
+                          { label: selectedRecord.providerName, volume: selectedRecord.prescriptionVolume },
+                          { label: 'National Avg', volume: NATIONAL_AVERAGE_VOLUME },
+                          { label: `${selectedRecord.specialty} Avg`, volume: specialtyAverageVolume(selectedRecord.specialty) },
+                        ]}
+                        margin={{ top: 4, right: 8, left: -16, bottom: 4 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={0} />
+                        <YAxis tick={{ fontSize: 10 }} />
+                        <RechartTooltip formatter={(value) => Array.isArray(value) ? value.join(', ') : Number(value).toLocaleString()} />
+                        <Bar dataKey="volume" radius={[4, 4, 0, 0]}>
+                          <Cell fill={C.danger} />
+                          <Cell fill={C.corpBlue} />
+                          <Cell fill={C.teal} />
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
 
                 {selectedRecord.validationError && (
                   <div
@@ -5012,6 +5064,17 @@ const EXPORT_HISTORY = [
 
 interface ExportHistoryRow { name: string; date: string; by: string; size: string; expired: boolean; live?: boolean }
 
+// States with prescriber-data confidentiality laws (Vermont, Maine) — HCPs here are "privacy-locked" for export
+const PRIVACY_LOCKED_STATES = ['VT', 'ME']
+
+const STAGING_RECORDS = [
+  { npi: '1234567890', firstName: 'James',  lastName: 'Morrison', specialty: 'Cardiology', state: 'FL', email: 'j.morrison@floridahealth.com', phone: '(813) 555-0147', zip: '33602', deaNumber: 'BX1234567' },
+  { npi: '9876543210', firstName: 'Sarah',   lastName: 'Chen',     specialty: 'Oncology',   state: 'NY', email: 'schen@nyoncology.org',          phone: '(212) 555-0388', zip: '10001', deaNumber: 'AX9876543' },
+  { npi: '5544332211', firstName: 'Robert',  lastName: 'Patel',    specialty: 'Neurology',  state: 'CA', email: 'rpatel@stanford.edu',           phone: '(650) 555-0219', zip: '94305', deaNumber: '' },
+  { npi: '4412239087', firstName: 'Emily',   lastName: 'Tran',     specialty: 'Family Medicine', state: 'VT', email: 'etran@greenmountainmed.org', phone: '(802) 555-0163', zip: '05401', deaNumber: 'BT4412239' },
+  { npi: '3301128765', firstName: 'David',   lastName: 'Okafor',   specialty: 'Internal Medicine', state: 'ME', email: 'dokafor@pinetreehealth.org', phone: '(207) 555-0284', zip: '04101', deaNumber: '' },
+]
+
 function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const { role } = useRole()
   const { meta } = useUploadMeta()
@@ -5022,6 +5085,12 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const [progress, setProgress] = useState(0)
   const [history, setHistory] = useState<ExportHistoryRow[]>(EXPORT_HISTORY)
   const [logStatus, setLogStatus] = useState<'idle' | 'logging' | 'ok' | 'err'>('idle')
+  const [excludeLockedContacts, setExcludeLockedContacts] = useState(false)
+
+  const lockedRecords = STAGING_RECORDS.filter(r => PRIVACY_LOCKED_STATES.includes(r.state))
+  const stagingRecords = excludeLockedContacts
+    ? STAGING_RECORDS.filter(r => !PRIVACY_LOCKED_STATES.includes(r.state))
+    : STAGING_RECORDS
 
   const triggerDownload = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob)
@@ -5039,7 +5108,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     try {
       await fetch('http://localhost:8000/api/export/log', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ format, fileName: filename, size, role, records, timestamp: new Date().toISOString() }),
       })
       setLogStatus('ok')
@@ -5075,11 +5144,9 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               .map(o => `[DATA QUALITY WARNING],${o.record.replace(',','')},${o.specialty},,,,,,, // Anomaly score ${o.anomalyScore.toFixed(2)} — ${o.reason}${warnNotes[o.id] ? ` | Note: ${warnNotes[o.id]}` : ''}`)
             const csvRows = [
               'DQ_FLAG,NPI,First Name,Last Name,Specialty,State,Email,Phone,ZIP,DEA Number',
-              ',1234567890,James,Morrison,Cardiology,FL,j.morrison@floridahealth.com,(813) 555-0147,33602,BX1234567',
-              ',9876543210,Sarah,Chen,Oncology,NY,schen@nyoncology.org,(212) 555-0388,10001,AX9876543',
-              ',5544332211,Robert,Patel,Neurology,CA,rpatel@stanford.edu,(650) 555-0219,94305,',
+              ...stagingRecords.map(r => `,${r.npi},${r.firstName},${r.lastName},${r.specialty},${r.state},${r.email},${r.phone},${r.zip},${r.deaNumber}`),
               ...taggedRows,
-              `# ... ${records.toLocaleString()} total records · ${taggedRows.length} DQ warnings · Exported ${dateStr} ${timeStr} · Role: ${roleMeta.label}`,
+              `# ... ${records.toLocaleString()} total records · ${taggedRows.length} DQ warnings${excludeLockedContacts ? ` · ${lockedRecords.length} privacy-locked contact(s) excluded (VT/ME)` : ''} · Exported ${dateStr} ${timeStr} · Role: ${roleMeta.label}`,
             ]
             blob = new Blob([csvRows.join('\n')], { type: 'text/csv' })
             filename = `HCP_Clean_${meta?.fileName?.replace(/\..+$/, '') ?? 'Export'}_${now.toISOString().slice(0,10)}.csv`
@@ -5162,6 +5229,23 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         </Banner>
       )}
 
+      {/* Privacy-locked HCP warning (Vermont / Maine prescriber confidentiality laws) */}
+      {lockedRecords.length > 0 && !excludeLockedContacts && (
+        <Banner type="warning">
+          <strong>{lockedRecords.length} privacy-locked healthcare professional{lockedRecords.length > 1 ? 's' : ''} in this dataset.</strong>{' '}
+          Records from Vermont and Maine are subject to state prescriber-data confidentiality laws and should not be included in marketing exports without consent.{' '}
+          <span className="font-semibold">{lockedRecords.map(r => `${r.firstName} ${r.lastName} (${r.state})`).join(', ')}</span>
+          <div className="mt-2">
+            <Btn variant="secondary" size="sm" onClick={() => setExcludeLockedContacts(true)}>Exclude Locked Contacts</Btn>
+          </div>
+        </Banner>
+      )}
+      {lockedRecords.length > 0 && excludeLockedContacts && (
+        <Banner type="success" onClose={() => setExcludeLockedContacts(false)}>
+          {lockedRecords.length} privacy-locked contact{lockedRecords.length > 1 ? 's' : ''} excluded from the export staging table.
+        </Banner>
+      )}
+
       {/* Outlier Data Quality Warning summary */}
       {(() => {
         const tagged = OUTLIERS.filter(o => resolvedOutCtx.get(o.id) === 'warned')
@@ -5204,6 +5288,33 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           <span style={{ color: C.midText }}>Uploaded {meta.uploadedAt}</span>
         </div>
       )}
+
+      {/* Export staging table */}
+      <Card className="mb-8">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Export Staging Table</h3>
+          <span className="text-[12px]" style={{ color: C.midText }}>{stagingRecords.length} of {STAGING_RECORDS.length} records staged</span>
+        </div>
+        <table className="data-table w-full border-collapse">
+          <thead>
+            <tr><th>NPI</th><th>Name</th><th>Specialty</th><th>State</th></tr>
+          </thead>
+          <tbody>
+            {stagingRecords.map(r => (
+              <tr key={r.npi}>
+                <td className="mono">{r.npi}</td>
+                <td>{r.firstName} {r.lastName}</td>
+                <td>{r.specialty}</td>
+                <td>
+                  {PRIVACY_LOCKED_STATES.includes(r.state)
+                    ? <Badge tier={1} color="warning">{r.state} — Privacy-locked</Badge>
+                    : r.state}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
 
       <div className="grid grid-cols-3 gap-6 mb-8">
         {exportOptions.map(opt => (
@@ -5301,15 +5412,34 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
   const [showInvite, setShowInvite] = useState(false)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteRole, setInviteRole] = useState('Editor')
+  const [inviting, setInviting] = useState(false)
+  const [pending, setPending] = useState(PENDING)
 
-  const sendInvite = () => {
+  const sendInvite = async () => {
     if (!canInviteUsers) {
       showToast('warning', adminInviteTooltip)
       return
     }
-    setShowInvite(false)
-    showToast('success', `Invitation sent to ${inviteEmail}`)
-    setInviteEmail('')
+    setInviting(true)
+    try {
+      const res = await fetch('http://localhost:8000/api/companies/acme/users/invite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
+        body: JSON.stringify({ email: inviteEmail, role: inviteRole, invited_by: role }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail || `Request failed with status ${res.status}`)
+      }
+      setPending(p => [{ email: inviteEmail, role: inviteRole, sent: 'Just now' }, ...p])
+      setShowInvite(false)
+      showToast('success', `Invitation and verification email sent to ${inviteEmail}`)
+      setInviteEmail('')
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Unable to send invitation.')
+    } finally {
+      setInviting(false)
+    }
   }
 
   return (
@@ -5374,7 +5504,7 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
         </table>
       </Card>
 
-      {PENDING.length > 0 && (
+      {pending.length > 0 && (
         <Card>
           <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Pending Invitations</h3>
           <table className="data-table w-full border-collapse">
@@ -5382,7 +5512,7 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
               <tr><th>Email</th><th>Role</th><th>Sent</th><th>Actions</th></tr>
             </thead>
             <tbody>
-              {PENDING.map(p => (
+              {pending.map(p => (
                 <tr key={p.email}>
                   <td style={{ color: C.midText }}>{p.email}</td>
                   <td><Badge tier={1} color="neutral">{p.role}</Badge></td>
@@ -5433,7 +5563,9 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
               </p>
             </div>
             <div className="flex gap-3 pt-2">
-              <Btn variant="primary" onClick={sendInvite} disabled={!inviteEmail} className="flex-1 justify-center">Send Invitation</Btn>
+              <Btn variant="primary" onClick={sendInvite} disabled={!inviteEmail || inviting} className="flex-1 justify-center">
+                {inviting ? 'Sending…' : 'Send Invitation'}
+              </Btn>
               <Btn variant="ghost" onClick={() => setShowInvite(false)}>Cancel</Btn>
             </div>
           </div>
