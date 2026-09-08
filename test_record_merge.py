@@ -66,6 +66,7 @@ def test_merge_records_endpoint_returns_master_and_archived_records():
     response = client.post(
         "/api/companies/test-merge-company/records/merge",
         json=payload,
+        headers={"X-User-Role": "admin"},
     )
 
     assert response.status_code == 200, response.text
@@ -99,7 +100,7 @@ def test_merge_records_endpoint_persists_every_incoming_record():
         ],
     }
 
-    response = client.post(f"/api/companies/{company_id}/records/merge", json=payload)
+    response = client.post(f"/api/companies/{company_id}/records/merge", json=payload, headers={"X-User-Role": "admin"})
 
     assert response.status_code == 200, response.text
     records = list(
@@ -112,7 +113,7 @@ def test_merge_records_endpoint_persists_every_incoming_record():
 
 
 def test_merge_records_endpoint_requires_records_field():
-    response = client.post("/api/companies/test-merge-company/records/merge", json={})
+    response = client.post("/api/companies/test-merge-company/records/merge", json={}, headers={"X-User-Role": "admin"})
 
     assert response.status_code == 422
 
@@ -126,6 +127,7 @@ def test_merge_records_endpoint_logs_and_returns_execution_error(monkeypatch, ca
     response = client.post(
         "/api/companies/test-merge-company/records/merge",
         json={"records": [{"record_id": "r1"}]},
+        headers={"X-User-Role": "admin"},
     )
 
     assert response.status_code == 500
