@@ -60,6 +60,7 @@ async def _upload_csv_payload(csv_payload: str):
                     return await client.post(
                         "/api/companies/integration-ma-24-34-37-42-43-44/upload_file",
                         files={"file": ("providers.csv", csv_payload, "text/csv")},
+                        headers={"X-User-Role": "editor"},
                     )
 
 
