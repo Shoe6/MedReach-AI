@@ -26,6 +26,7 @@ def test_upload_returns_duplicate_clusters():
     response = client.post(
         "/api/companies/test-dedupe-company/upload_file",
         files={"file": ("dupes.csv", csv_data, "text/csv")},
+        headers={"X-User-Role": "admin"},
     )
 
     assert response.status_code == 201
