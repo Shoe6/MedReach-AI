@@ -368,6 +368,7 @@ class TestUploadEndpointIntegration:
         response = client.post(
             "/api/companies/test-ma19-company/upload_file",
             files={"file": ("healthcare.csv", csv_data, "text/csv")},
+            headers={"X-User-Role": "admin"},
         )
         
         # Verify response
