@@ -1,0 +1,25 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // True if the request carries a valid Firebase Auth session.
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // True if the caller's custom claims mark them as an Admin.
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.role == 'Admin';
+    }
+
+    // True if the caller's org_id claim matches the document's org_id, scoping access per tenant.
+    function isSameOrg(docOrgId) {
+      return isAuthenticated() && request.auth.token.org_id == docOrgId;
+    }
+
+    match /providers/{document=**} {
+      allow read, write: if isAuthenticated() && (isAdmin() || isSameOrg(resource.data.org_id));
+    }
+  }
+}

@@ -1,0 +1,61 @@
+record_id,first_name,last_name,specialty,npi,email,phone,billing_volume,prescription_volume,payer_name,nature_of_payment,sunshine_act_transaction_total
+REG-0001,avery,BENNETT 1,cardiology,1400000001,avery.bennett 10@clinic.example,,90,160,Northstar Pharma,Food and Beverage,24
+REG-0002,Jordan, carter 2 , neurology ,1400000002,jordan.carter 21@clinic.example,555-010-0002,101,175,Harbor Pharma,Consulting Fee,33.5
+REG-0003,taylor,davis 3,pediatrics,1400000003,taylor.davis 32@clinic.example,555-010-0003,112,190,Cedar Pharma,Travel,43
+REG-0004,MORGAN, evans 4 ,oncology,1400000004,morgan.evans 43@clinic.example,555-010-0004,123,205,Northstar Pharma,Education,52.5
+REG-0005,RILEY,FLORES 5,Family Medicine,1400000005,riley.flores 54@clinic.example,555-010-0005,134,220,Harbor Pharma,Food and Beverage,62
+REG-0006,Casey,GARCIA 6, cardiology ,1400000006,casey.garcia 65@clinic.example,555-010-0006,145,235,Cedar Pharma,Consulting Fee,24
+REG-0007,avery,bennett 7,NEUROLOGY,1400000007,avery.bennett 76@clinic.example,555-010-0007,156,250,Northstar Pharma,Travel,33.5
+REG-0008, jordan ,Carter 8,PEDIATRICS,1400000008,jordan.carter 87@clinic.example,555-010-0008,167,160,Harbor Pharma,Food and Bevrage,43
+REG-0009,Taylor, davis 9 , oncology ,1400000009,taylor.davis 98@clinic.example,555-010-0009,90,175,Cedar Pharma,Food and Beverage,52.5
+REG-0010, morgan ,Evans 10,FAMILY MEDICINE,1400000010,morgan.evans 109@clinic.example,,101,190,Northstar Pharma,Consulting Fee,62
+REG-0011, riley , flores 11 ,Cardiology,1400000011,riley.flores 1110@clinic.example,555-010-0011,112,205,Harbor Pharma,Travel,24
+REG-0012,casey, garcia 12 ,neurology,1400000012,casey.garcia 1211@clinic.example,555-010-0012,123,220,Cedar Pharma,Education,33.5
+REG-0013,avery,BENNETT 13,pediatrics,,avery.bennett 1312@clinic.example,555-010-0013,134,235,Northstar Pharma,Food and Beverage,43
+REG-0014,JORDAN,carter 14,oncology,1400000014,jordan.carter 1413@clinic.example,555-010-0014,145,250,Harbor Pharma,Consulting Fee,52.5
+REG-0015,taylor,DAVIS 15, family medicine ,1400000015,taylor.davis 1514@clinic.example,555-010-0015,48000,160,Cedar Pharma,Travel,62
+REG-0016,Morgan,Evans 16, cardiology ,1400000016,morgan.evans 1615@clinic.example,555-010-0016,167,175,Northstar Pharma,Education,24
+REG-0017,riley, flores 17 ,neurology,1400000017,riley.flores 1716@clinic.example,555-010-0017,90,190,Harbor Pharma,Food and Beverage,33.5
+REG-0018, casey ,garcia 18,Pediatrics,1400000018,casey.garcia 1817@clinic.example,555-010-0018,101,205,Cedar Pharma,Consulting Fee,43
+REG-0019,Avery, bennett 19 ,Oncology,1400000019,avery.bennett 1918@clinic.example,,112,220,,Travel,52.5
+REG-0020,Jordan,CARTER 20, family medicine ,1400000020,jordan.carter 2019@clinic.example,555-010-0020,123,235,Harbor Pharma,Education,62
+REG-0021,TAYLOR,DAVIS 21,CARDIOLOGY,1400000021,taylor.davis 2120@clinic.example,555-010-0021,134,250,Cedar Pharma,Food and Beverage,24
+REG-0022,Morgan,EVANS 22,neurology,1400000022,morgan.evans 2221@clinic.example,555-010-0022,145,160,Northstar Pharma,Consulting Fee,33.5
+REG-0023, riley , flores 23 ,pediatrics,1400000023,riley.flores 2322@clinic.example,555-010-0023,156,175,Harbor Pharma,Travel,43
+REG-0024,Casey,GARCIA 24, oncology ,1400000024,casey.garcia 2423@clinic.example,555-010-0024,167,190,Cedar Pharma,Consultng Fee,52.5
+REG-0025, avery ,BENNETT 25,Family Medicine,1400000025,avery.bennett 2524@clinic.example,555-010-0025,90,205,Northstar Pharma,Food and Beverage,62
+REG-0026, jordan ,Carter 26, cardiology ,1400000026,jordan.carter 2625@clinic.example,555-010-0026,101,220,Harbor Pharma,Consulting Fee,24
+REG-0027,TAYLOR,Davis 27,NEUROLOGY,1400000027,taylor.davis 2726@clinic.example,555-010-0027,112,235,Cedar Pharma,Travel,33.5
+REG-0028,Morgan, evans 28 ,Pediatrics,1400000028,morgan.evans 2827@clinic.example,,123,250,Northstar Pharma,Education,43
+REG-0029,Riley,flores 29,oncology,1400000029,riley.flores 2928@clinic.example,555-010-0029,134,160,Harbor Pharma,Food and Beverage,52.5
+REG-0030,casey,GARCIA 30,Family Medicine,1400000030,casey.garcia 3029@clinic.example,555-010-0030,145,175,Cedar Pharma,Consulting Fee,62
+REG-0031, avery ,Bennett 31,Cardiology,1400000031,avery.bennett 3130@clinic.example,555-010-0031,156,190,Northstar Pharma,Travel,24
+REG-0032, jordan ,carter 32,NEUROLOGY,1400000032,jordan.carter 3231@clinic.example,555-010-0032,167,205,Harbor Pharma,Education,33.5
+REG-0033,TAYLOR,davis 33, pediatrics ,1400000033,taylor.davis 3332@clinic.example,555-010-0033,90,220,Cedar Pharma,Food and Beverage,43
+REG-0034,MORGAN, evans 34 ,oncology,1400000034,morgan.evans 3433@clinic.example,555-010-0034,101,235,Northstar Pharma,Consulting Fee,52.5
+REG-0035, riley ,FLORES 35,family medicine,1400000035,riley.flores 3534@clinic.example,555-010-0035,112,250,Harbor Pharma,Travel,62
+REG-0036, casey ,GARCIA 36,Cardiology,1400000036,casey.garcia 3635@clinic.example,555-010-0036,123,160,Cedar Pharma,Education,24
+REG-0037, avery ,Bennett 37, neurology ,1400000037,avery.bennett 3736@clinic.example,,134,175,Northstar Pharma,Food and Beverage,33.5
+REG-0038, jordan , carter 38 ,pediatrics,1400000038,jordan.carter 3837@clinic.example,555-010-0038,145,190,Harbor Pharma,Consulting Fee,43
+REG-0039,Taylor, davis 39 ,Oncology,1400000039,taylor.davis 3938@clinic.example,555-010-0039,156,75000,Cedar Pharma,Travel,52.5
+REG-0040,morgan, evans 40 ,Family Medicine,1400000040,morgan.evans 4039@clinic.example,555-010-0040,167,220,Northstar Pharma,Education,62
+REG-0041,Riley,FLORES 41,cardiology,1400000041,riley.flores 4140@clinic.example,555-010-0041,90,235,Harbor Pharma,Food and Beverage,24
+REG-0042, casey ,GARCIA 42,Neurology,,casey.garcia 4241@clinic.example,555-010-0042,101,250,Cedar Pharma,Consulting Fee,33.5
+REG-0043,avery,Bennett 43, pediatrics ,1400000043,avery.bennett 4342@clinic.example,555-010-0043,112,160,Northstar Pharma,Travel,43
+REG-0044,jordan,Carter 44,Oncology,1400000044,jordan.carter 4443@clinic.example,555-010-0044,123,175,Harbor Pharma,Education,52.5
+REG-0045, taylor ,davis 45,Family Medicine,1400000045,taylor.davis 4544@clinic.example,555-010-0045,134,190,Cedar Pharma,Food and Beverage,62
+REG-0046, morgan ,EVANS 46, cardiology ,1400000046,morgan.evans 4645@clinic.example,,145,205,Northstar Pharma,Consulting Fee,24
+REG-0047,riley, flores 47 ,NEUROLOGY,1400000047,riley.flores 4746@clinic.example,555-010-0047,156,220,Harbor Pharma,Travel,33.5
+REG-0048, casey ,garcia 48,PEDIATRICS,1400000048,casey.garcia 4847@clinic.example,555-010-0048,167,235,,Education,43
+REG-0049,Avery, bennett 49 ,oncology,1400000049,avery.bennett 4948@clinic.example,555-010-0049,90,250,Northstar Pharma,Food and Beverage,52.5
+REG-0050,jordan,CARTER 50,Family Medicine,1400000050,jordan.carter 5049@clinic.example,555-010-0050,101,160,Harbor Pharma,Consulting Fee,62
+REG-0051, taylor ,Davis 51,CARDIOLOGY,1400000051,taylor.davis 5150@clinic.example,555-010-0051,112,175,Cedar Pharma,Travel,24
+REG-0052, morgan , evans 52 ,NEUROLOGY,1400000052,morgan.evans 5251@clinic.example,555-010-0052,123,190,Northstar Pharma,Education,33.5
+REG-0053,riley, flores 53 , pediatrics ,1400000053,riley.flores 5352@clinic.example,555-010-0053,134,205,Harbor Pharma,Food and Beverage,18500
+REG-0054,casey,GARCIA 54,oncology,1400000054,casey.garcia 5453@clinic.example,555-010-0054,145,220,Cedar Pharma,Consulting Fee,52.5
+REG-0055,avery,BENNETT 55, family medicine ,1400000055,avery.bennett 5554@clinic.example,,156,235,Northstar Pharma,Travel,62
+REG-0056,Jordan,Carter 56,CARDIOLOGY,1400000056,jordan.carter 5655@clinic.example,555-010-0056,167,250,Harbor Pharma,Education,24
+DUP-1-A,taylor,davis 3,pediatrics,1400000003,,555-019-0001,112,190,Cedar Pharma,Travel,43
+DUP-2-A,riley, flores 17 ,neurology,1400000017,,555-019-0002,90,190,Harbor Pharma,Food and Beverage,33.5
+DUP-3-A,casey,GARCIA 30,Family Medicine,1400000030,,555-019-0003,145,175,Cedar Pharma,Consulting Fee,62
+DUP-4-A, taylor ,davis 45,Family Medicine,1400000045,,555-019-0004,134,190,Cedar Pharma,Food and Beverage,62
