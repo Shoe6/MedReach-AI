@@ -41,7 +41,7 @@ const UploadContext = createContext<{ meta: UploadMeta | null; setMeta: (m: Uplo
 const useUploadMeta = () => useContext(UploadContext)
 
 // Shared NPI validation resolution state — read by ExportScreen to gate CSV export
-type ValAction = 'removed' | 'override'
+type ValAction = 'removed' | 'override' | 'approved'
 const ValidationContext = createContext<{
   resolvedVal: Map<number, ValAction>
   setResolvedVal: (m: Map<number, ValAction>) => void
@@ -49,7 +49,7 @@ const ValidationContext = createContext<{
 const useValidation = () => useContext(ValidationContext)
 
 // Shared outlier resolution state — read by Analytics + Export
-type OutAction = 'removed' | 'kept' | 'warned'
+type OutAction = 'removed' | 'kept' | 'warned' | 'approved'
 const OutlierContext = createContext<{
   resolvedOut: Map<number, OutAction>
   setResolvedOut: (m: Map<number, OutAction>) => void
@@ -1161,6 +1161,21 @@ function useProviderWalkthrough(companyId: string) {
 function formatUsd(value: number | null): string {
   if (value === null) return 'N/A'
   return value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
+}
+
+// Bulk-approves all Low-severity flags for a company via Firestore batched writes (≤500 docs/batch).
+async function approveLowSeverityFlags(companyId: string): Promise<{ approved_count: number; batch_count: number } | null> {
+  try {
+    const response = await globalThis.fetch(`http://localhost:8000/api/companies/${encodeURIComponent(companyId)}/flags/approve-low-severity`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User-Role': 'editor' },
+      body: JSON.stringify({}),
+    })
+    if (!response.ok) return null
+    return await response.json()
+  } catch {
+    return null
+  }
 }
 
 function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
@@ -2650,8 +2665,8 @@ function DataReviewScreen() {
   const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
-  // Map of PII id -> action ('anonymized'|'removed'|'override')
-  const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override'>>(new Map())
+  // Map of PII id -> action ('anonymized'|'removed'|'override'|'approved')
+  const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override' | 'approved'>>(new Map())
   // NPI validation resolution — lifted into ValidationContext so ExportScreen can gate export
   const { resolvedVal, setResolvedVal } = useValidation()
   // Outlier resolution — lifted into OutlierContext so Analytics + Export can read tagged records
@@ -2979,6 +2994,25 @@ function DataReviewScreen() {
         <Card>
           <NullSummaryBar tab="pii" records={processedRecords} />
 
+          {(() => {
+            const lowSeverityIds = sortedPII.filter(f => f.severity === 'Low' && !resolvedPII.has(f.id)).map(f => f.id)
+            return (
+              <div className="flex justify-end mb-3">
+                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
+                  onClick={async () => {
+                    await approveLowSeverityFlags('demo-company')
+                    setResolvedPII(prev => {
+                      const m = new Map(prev)
+                      lowSeverityIds.forEach(id => m.set(id, 'approved'))
+                      return m
+                    })
+                  }}>
+                  Approve All Low-Severity ({lowSeverityIds.length})
+                </Btn>
+              </div>
+            )
+          })()}
+
           {selected.size > 0 && (
             <div className="flex items-center gap-3 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
               <span className="text-[12px] font-semibold" style={{ color: C.navy }}>{selected.size} records selected</span>
@@ -3049,6 +3083,7 @@ function DataReviewScreen() {
                       {resolved ? (
                         action === 'anonymized' ? <Badge tier={1} color="success">Anonymized</Badge>
                         : action === 'removed' ? <Badge tier={1} color="danger">Removed</Badge>
+                        : action === 'approved' ? <Badge tier={1} color="success">Approved</Badge>
                         : <Badge tier={1} color="info">Overridden</Badge>
                       ) : (
                         <div className="flex gap-1">
@@ -3271,6 +3306,23 @@ function DataReviewScreen() {
         <Card>
           <NullSummaryBar tab="outliers" />
 
+          {(() => {
+            const lowSeverityIds = OUTLIERS.filter(o => o.severity === 'Low' && !resolvedOut.has(o.id)).map(o => o.id)
+            return (
+              <div className="flex justify-end mb-3">
+                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
+                  onClick={async () => {
+                    await approveLowSeverityFlags('demo-company')
+                    const m = new Map(resolvedOut)
+                    lowSeverityIds.forEach(id => m.set(id, 'approved'))
+                    setResolvedOut(m)
+                  }}>
+                  Approve All Low-Severity ({lowSeverityIds.length})
+                </Btn>
+              </div>
+            )
+          })()}
+
           {/* Tagged-records summary strip */}
           {(() => {
             const tagged = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
@@ -3365,6 +3417,7 @@ function DataReviewScreen() {
                           <div className="flex flex-col gap-0.5">
                             {action === 'removed' && <Badge tier={1} color="danger">Removed</Badge>}
                             {action === 'kept'    && <Badge tier={1} color="success">Kept</Badge>}
+                            {action === 'approved' && <Badge tier={1} color="success">Approved</Badge>}
                             {action === 'warned'  && (
                               <>
                                 <Badge tier={1} color="warning">Data Quality Warning</Badge>
@@ -3470,6 +3523,23 @@ function DataReviewScreen() {
           <Banner type="warning">NPI Registry is temporarily unavailable. 847 records marked pending. Will auto-retry in 5 minutes.</Banner>
           <NullSummaryBar tab="validation" />
 
+          {(() => {
+            const lowSeverityIds = VALIDATION_ERRORS.filter(v => v.severity === 'Low' && !resolvedVal.has(v.id)).map(v => v.id)
+            return (
+              <div className="flex justify-end mb-3">
+                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
+                  onClick={async () => {
+                    await approveLowSeverityFlags('demo-company')
+                    const m = new Map(resolvedVal)
+                    lowSeverityIds.forEach(id => m.set(id, 'approved'))
+                    setResolvedVal(m)
+                  }}>
+                  Approve All Low-Severity ({lowSeverityIds.length})
+                </Btn>
+              </div>
+            )
+          })()}
+
           <table className="data-table w-full border-collapse">
             <thead>
               <tr>
@@ -3526,6 +3596,8 @@ function DataReviewScreen() {
                           <div className="flex flex-col gap-0.5">
                             {action === 'removed'
                               ? <Badge tier={1} color="danger">Removed</Badge>
+                              : action === 'approved'
+                              ? <Badge tier={1} color="success">Approved</Badge>
                               : <Badge tier={1} color="info">Overridden</Badge>
                             }
                             {action === 'override' && valJustifications[v.id] && (
