@@ -1,0 +1,31 @@
+# Virtual Environments & Caches
+venv/
+venv_clean/
+venv_new/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Git & Editor
+.git/
+.gitignore
+.vscode/
+
+# Frontend & Build Artifacts
+node_modules/
+dist/
+src/
+*.html
+*.config.js
+*.config.ts
+tsconfig*.json
+
+# Logs & Local Credentials
+*.log
+.env
+serviceAccountKey.json
+.firebase/
+.firebase-data/
