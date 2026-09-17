@@ -1,3 +1,7 @@
+{
+"firestore": {
+  "indexes": "firestore.indexes.json"
+},
 "rewrites": [
   {
     "source": "/api/**",
@@ -7,3 +11,4 @@
     }
   }
 ]
+}

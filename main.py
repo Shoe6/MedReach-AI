@@ -6,7 +6,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from firebase_admin import storage
-from fastapi import Depends, FastAPI, File, HTTPException, Header, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Header, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -33,6 +33,7 @@ app.add_middleware(
 
 ADMIN_ROLES = frozenset({"admin", "super-admin"})
 EDITOR_ROLES = frozenset({"editor", "admin", "super-admin"})
+FIRESTORE_PAGE_SIZE = 500
 
 
 def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
@@ -162,13 +163,13 @@ async def dashboard_summary():
 
         for company_doc in companies_ref.stream():
             flags_ref = company_doc.reference.collection("flags")
-            for flag_doc in flags_ref.stream():
-                flag = flag_doc.to_dict() or {}
-                if flag.get("resolved"):
-                    continue
-                category = str(flag.get("category", "")).lower()
-                if category in flag_counts:
-                    flag_counts[category] += 1
+            for category in flag_counts:
+                unresolved_flags = (
+                    flags_ref.where("resolved", "==", False)
+                    .where("category", "==", category)
+                    .stream()
+                )
+                flag_counts[category] += sum(1 for _ in unresolved_flags)
 
         total_flags = sum(flag_counts.values())
 
@@ -608,12 +609,29 @@ async def merge_company_records(company_id: str, payload: dict, _role: str = Dep
 
 
 @app.get("/api/companies/{company_id}/export_data")
-async def export_company_data(company_id: str):
+async def export_company_data(
+    company_id: str,
+    page_size: int = Query(FIRESTORE_PAGE_SIZE, ge=1, le=1000),
+    cursor: str | None = Query(default=None),
+):
     """Return processed records for the Data Review and export staging workflows."""
     try:
         records_ref = db.collection("companies").document(company_id).collection("records")
-        records = [doc.to_dict() for doc in records_ref.stream()]
-        return {"records": records}
+        records_query = records_ref.order_by("__name__")
+        if cursor:
+            cursor_snapshot = records_ref.document(cursor).get()
+            if not cursor_snapshot.exists:
+                raise HTTPException(status_code=400, detail="Invalid export cursor.")
+            records_query = records_query.start_after(cursor_snapshot)
+
+        documents = list(records_query.limit(page_size + 1).stream())
+        has_more = len(documents) > page_size
+        documents = documents[:page_size]
+        next_cursor = documents[-1].id if has_more else None
+        response = {"records": [doc.to_dict() for doc in documents]}
+        if next_cursor:
+            response["next_cursor"] = next_cursor
+        return response
 
     except HTTPException:
         raise
