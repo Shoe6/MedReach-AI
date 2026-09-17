@@ -105,7 +105,7 @@ function MetricCard({
 // ─── MAIN COMPONENT ──────────────────────────────────────────────────────────
 export function ExecutiveMetricCards({
   companyId,
-  apiBaseUrl = 'http://localhost:8000',
+  apiBaseUrl = import.meta.env.VITE_API_URL ?? '',
 }: ExecutiveMetricCardsProps) {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null)
   const [loading, setLoading] = useState(true)

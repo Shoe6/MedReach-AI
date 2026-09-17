@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import logging
@@ -12,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from database import db
+from bulk_approval_service import approve_low_severity_flags
 from record_merge_service import merge_record_cluster
 
 logger = logging.getLogger(__name__)
@@ -413,17 +415,21 @@ async def upload_company_file(
     await file.seek(0)
     file_bytes = await file.read()
 
-    ingestion_summary = _get_ingest()(io.BytesIO(file_bytes))
+    # Run the CPU-bound pandas ingestion off the event loop so concurrent requests aren't serialized behind it.
+    ingestion_summary = await asyncio.to_thread(_get_ingest(), io.BytesIO(file_bytes))
 
-    try:
-        from firebase_admin import storage
-
+    def _upload_to_storage() -> None:
         bucket = storage.bucket()
         blob = bucket.blob(storage_path)
         blob.upload_from_string(
             file_bytes,
             content_type=file.content_type or "application/octet-stream",
         )
+
+    try:
+        # Storage writes are blocking network I/O; run in a thread so a slow/unreachable
+        # bucket can't stall the event loop for every other concurrent upload.
+        await asyncio.to_thread(_upload_to_storage)
     except Exception:
         pass
 
@@ -604,6 +610,29 @@ async def merge_company_records(company_id: str, payload: dict, _role: str = Dep
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to merge company records")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class BulkApproveLowSeverityPayload(BaseModel):
+    flag_ids: list[str] | None = None
+
+
+@app.post("/api/companies/{company_id}/flags/approve-low-severity")
+async def approve_low_severity_flags_endpoint(
+    company_id: str,
+    payload: BulkApproveLowSeverityPayload,
+    _role: str = Depends(require_editor_or_above),
+):
+    """Bulk-approve all Low-severity flags for a company. Viewers are blocked.
+
+    Uses Firestore batched writes (at most 500 operations per batch) so
+    large flag sets are approved in a small, fixed number of round trips.
+    """
+    try:
+        result = approve_low_severity_flags(db, company_id, flag_ids=payload.flag_ids)
+        return {"company_id": company_id, **result}
+    except Exception as exc:
+        logger.exception("Failed to bulk-approve low-severity flags")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

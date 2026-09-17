@@ -15,3 +15,7 @@ grp_public_reporting.csv
 grp_public_reporting_cahps.csv
 vg_public_reporting.csv
 manifest.json
+*.log
+.env.*
+!.env.example
+.firebase/

@@ -2,6 +2,9 @@ import { useState, useRef, useEffect, createContext, useContext, Fragment, type 
 import { useNavigate, useLocation } from 'react-router-dom'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
 import RecordDetailDashboard from './RecordDetailDashboard'
+
+// Backend base URL — empty string means calls are relative (proxied via Firebase Hosting rewrites in prod)
+const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip as RechartTooltip,
   Cell, CartesianGrid, Legend, PieChart, Pie,
@@ -41,7 +44,7 @@ const UploadContext = createContext<{ meta: UploadMeta | null; setMeta: (m: Uplo
 const useUploadMeta = () => useContext(UploadContext)
 
 // Shared NPI validation resolution state — read by ExportScreen to gate CSV export
-type ValAction = 'removed' | 'override'
+type ValAction = 'removed' | 'override' | 'approved'
 const ValidationContext = createContext<{
   resolvedVal: Map<number, ValAction>
   setResolvedVal: (m: Map<number, ValAction>) => void
@@ -49,7 +52,7 @@ const ValidationContext = createContext<{
 const useValidation = () => useContext(ValidationContext)
 
 // Shared outlier resolution state — read by Analytics + Export
-type OutAction = 'removed' | 'kept' | 'warned'
+type OutAction = 'removed' | 'kept' | 'warned' | 'approved'
 const OutlierContext = createContext<{
   resolvedOut: Map<number, OutAction>
   setResolvedOut: (m: Map<number, OutAction>) => void
@@ -809,7 +812,7 @@ function useDashboardStats() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('http://localhost:8000/api/dashboard/summary')
+      const res = await fetch(`${API_BASE_URL}/api/dashboard/summary`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json: DashboardStats = await res.json()
       setData(json)
@@ -1110,8 +1113,8 @@ function useProviderWalkthrough(companyId: string) {
       setError(null)
 
       const endpoints = [
-        `http://localhost:8000/api/companies/${encodeURIComponent(companyId)}/provider_walkthrough`,
-        `http://localhost:8000/api/companies/${encodeURIComponent(companyId)}/records`,
+        `${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/provider_walkthrough`,
+        `${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/records`,
       ]
 
       for (const endpoint of endpoints) {
@@ -1161,6 +1164,21 @@ function useProviderWalkthrough(companyId: string) {
 function formatUsd(value: number | null): string {
   if (value === null) return 'N/A'
   return value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
+}
+
+// Bulk-approves all Low-severity flags for a company via Firestore batched writes (≤500 docs/batch).
+async function approveLowSeverityFlags(companyId: string): Promise<{ approved_count: number; batch_count: number } | null> {
+  try {
+    const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/flags/approve-low-severity`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User-Role': 'editor' },
+      body: JSON.stringify({}),
+    })
+    if (!response.ok) return null
+    return await response.json()
+  } catch {
+    return null
+  }
 }
 
 function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
@@ -1584,14 +1602,14 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
 
       const formData = new FormData()
       formData.append('file', file, file.name)
-      const uploadResponse = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/upload_file', {
+      const uploadResponse = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/upload_file`, {
         method: 'POST',
         body: formData,
       })
       if (!uploadResponse.ok) throw new Error(await uploadResponse.text())
 
       console.log("Parsed Payload:", recordsToUpload);
-      const mergeResponse = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/records/merge', {
+      const mergeResponse = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/records/merge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ records: recordsToUpload }),
@@ -2650,8 +2668,8 @@ function DataReviewScreen() {
   const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
-  // Map of PII id -> action ('anonymized'|'removed'|'override')
-  const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override'>>(new Map())
+  // Map of PII id -> action ('anonymized'|'removed'|'override'|'approved')
+  const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override' | 'approved'>>(new Map())
   // NPI validation resolution — lifted into ValidationContext so ExportScreen can gate export
   const { resolvedVal, setResolvedVal } = useValidation()
   // Outlier resolution — lifted into OutlierContext so Analytics + Export can read tagged records
@@ -2672,7 +2690,7 @@ function DataReviewScreen() {
   useEffect(() => {
     const loadProcessedRecords = async () => {
       try {
-        const response = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/export_data')
+        const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/export_data`)
         if (!response.ok) throw new Error(`Export request failed (${response.status})`)
         const contentType = response.headers.get('content-type') || ''
         if (contentType.includes('json')) {
@@ -2979,6 +2997,25 @@ function DataReviewScreen() {
         <Card>
           <NullSummaryBar tab="pii" records={processedRecords} />
 
+          {(() => {
+            const lowSeverityIds = sortedPII.filter(f => f.severity === 'Low' && !resolvedPII.has(f.id)).map(f => f.id)
+            return (
+              <div className="flex justify-end mb-3">
+                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
+                  onClick={async () => {
+                    await approveLowSeverityFlags('demo-company')
+                    setResolvedPII(prev => {
+                      const m = new Map(prev)
+                      lowSeverityIds.forEach(id => m.set(id, 'approved'))
+                      return m
+                    })
+                  }}>
+                  Approve All Low-Severity ({lowSeverityIds.length})
+                </Btn>
+              </div>
+            )
+          })()}
+
           {selected.size > 0 && (
             <div className="flex items-center gap-3 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
               <span className="text-[12px] font-semibold" style={{ color: C.navy }}>{selected.size} records selected</span>
@@ -3049,6 +3086,7 @@ function DataReviewScreen() {
                       {resolved ? (
                         action === 'anonymized' ? <Badge tier={1} color="success">Anonymized</Badge>
                         : action === 'removed' ? <Badge tier={1} color="danger">Removed</Badge>
+                        : action === 'approved' ? <Badge tier={1} color="success">Approved</Badge>
                         : <Badge tier={1} color="info">Overridden</Badge>
                       ) : (
                         <div className="flex gap-1">
@@ -3271,6 +3309,23 @@ function DataReviewScreen() {
         <Card>
           <NullSummaryBar tab="outliers" />
 
+          {(() => {
+            const lowSeverityIds = OUTLIERS.filter(o => o.severity === 'Low' && !resolvedOut.has(o.id)).map(o => o.id)
+            return (
+              <div className="flex justify-end mb-3">
+                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
+                  onClick={async () => {
+                    await approveLowSeverityFlags('demo-company')
+                    const m = new Map(resolvedOut)
+                    lowSeverityIds.forEach(id => m.set(id, 'approved'))
+                    setResolvedOut(m)
+                  }}>
+                  Approve All Low-Severity ({lowSeverityIds.length})
+                </Btn>
+              </div>
+            )
+          })()}
+
           {/* Tagged-records summary strip */}
           {(() => {
             const tagged = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
@@ -3365,6 +3420,7 @@ function DataReviewScreen() {
                           <div className="flex flex-col gap-0.5">
                             {action === 'removed' && <Badge tier={1} color="danger">Removed</Badge>}
                             {action === 'kept'    && <Badge tier={1} color="success">Kept</Badge>}
+                            {action === 'approved' && <Badge tier={1} color="success">Approved</Badge>}
                             {action === 'warned'  && (
                               <>
                                 <Badge tier={1} color="warning">Data Quality Warning</Badge>
@@ -3470,6 +3526,23 @@ function DataReviewScreen() {
           <Banner type="warning">NPI Registry is temporarily unavailable. 847 records marked pending. Will auto-retry in 5 minutes.</Banner>
           <NullSummaryBar tab="validation" />
 
+          {(() => {
+            const lowSeverityIds = VALIDATION_ERRORS.filter(v => v.severity === 'Low' && !resolvedVal.has(v.id)).map(v => v.id)
+            return (
+              <div className="flex justify-end mb-3">
+                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
+                  onClick={async () => {
+                    await approveLowSeverityFlags('demo-company')
+                    const m = new Map(resolvedVal)
+                    lowSeverityIds.forEach(id => m.set(id, 'approved'))
+                    setResolvedVal(m)
+                  }}>
+                  Approve All Low-Severity ({lowSeverityIds.length})
+                </Btn>
+              </div>
+            )
+          })()}
+
           <table className="data-table w-full border-collapse">
             <thead>
               <tr>
@@ -3526,6 +3599,8 @@ function DataReviewScreen() {
                           <div className="flex flex-col gap-0.5">
                             {action === 'removed'
                               ? <Badge tier={1} color="danger">Removed</Badge>
+                              : action === 'approved'
+                              ? <Badge tier={1} color="success">Approved</Badge>
                               : <Badge tier={1} color="info">Overridden</Badge>
                             }
                             {action === 'override' && valJustifications[v.id] && (
@@ -5233,7 +5308,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const logToFirestore = async (format: string, filename: string, size: string, records: number) => {
     setLogStatus('logging')
     try {
-      await fetch('http://localhost:8000/api/export/log', {
+      await fetch(`${API_BASE_URL}/api/export/log`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ format, fileName: filename, size, role, records, timestamp: new Date().toISOString() }),
@@ -5549,7 +5624,7 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
     }
     setInviting(true)
     try {
-      const res = await fetch('http://localhost:8000/api/companies/acme/users/invite', {
+      const res = await fetch(`${API_BASE_URL}/api/companies/acme/users/invite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ email: inviteEmail, role: inviteRole, invited_by: role }),
@@ -5797,7 +5872,7 @@ function ScrubbingSessionsScreen() {
     setDownloading(session.id)
     setDlError(null)
     try {
-      const res = await fetch(`http://localhost:8000/api/scrubbing-sessions/${session.id}/pdf`)
+      const res = await fetch(`${API_BASE_URL}/api/scrubbing-sessions/${session.id}/pdf`)
       if (!res.ok) throw new Error(`Server returned ${res.status}`)
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
