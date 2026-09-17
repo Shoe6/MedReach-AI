@@ -3,13 +3,15 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Iterable
 
+from csv_injection_sanitizer import sanitize_cell_value
+
 
 def _clean_value(value: Any) -> Any:
-    """Normalize empty and null-like values to avoid merging blank fields over real data."""
+    """Normalize empty/null-like values and strip spreadsheet/script injection payloads."""
     if value is None:
         return ""
     if isinstance(value, str):
-        return value.strip()
+        return sanitize_cell_value(value.strip())
     return value
 
 
