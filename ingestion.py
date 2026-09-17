@@ -126,5 +126,6 @@ def ingest_csv_chunks(file_obj) -> dict[str, Any]:
         "preview_data": _json_safe(preview_data),
         "inferred_schema": {str(key): str(value) for key, value in inferred_schema.items()},
         "duplicate_clusters": detect_duplicate_clusters(_json_safe(all_rows)),
+        "records": _json_safe(all_rows),
         "peak_memory_mb": round(peak / (1024 * 1024), 4),
     }

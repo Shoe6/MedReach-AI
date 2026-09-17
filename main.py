@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from database import db
 from record_merge_service import merge_record_cluster
+from scrubbing_pipeline import scrub_provider_records
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +416,7 @@ async def upload_company_file(
     file_bytes = await file.read()
 
     ingestion_summary = _get_ingest()(io.BytesIO(file_bytes))
+    scrubbed_records = await scrub_provider_records(ingestion_summary.get("records", []))
 
     try:
         from firebase_admin import storage
@@ -436,6 +438,7 @@ async def upload_company_file(
         "preview_data": ingestion_summary["preview_data"],
         "inferred_schema": ingestion_summary["inferred_schema"],
         "duplicate_clusters": ingestion_summary.get("duplicate_clusters", []),
+        "records": scrubbed_records,
         "peak_memory_mb": ingestion_summary["peak_memory_mb"],
     }
 
