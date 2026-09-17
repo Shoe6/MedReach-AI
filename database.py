@@ -2,20 +2,27 @@ import os
 import firebase_admin
 from firebase_admin import firestore, storage
 
-os.environ["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
-os.environ.setdefault("FIREBASE_AUTH_EMULATOR_HOST", "127.0.0.1:9099")
-os.environ.setdefault("FIREBASE_STORAGE_EMULATOR_HOST", "http://127.0.0.1:9199")
-os.environ.setdefault("STORAGE_EMULATOR_HOST", "http://127.0.0.1:9199")
+# K_SERVICE is set automatically by Cloud Run; never point a deployed instance at a local emulator.
+IS_CLOUD_RUN = bool(os.environ.get("K_SERVICE"))
+USE_EMULATOR = not IS_CLOUD_RUN and os.environ.get("USE_FIRESTORE_EMULATOR", "true").lower() != "false"
 
-storage_bucket = os.environ.get("FIREBASE_STORAGE_BUCKET", "demo-medreach-ai.appspot.com")
+if USE_EMULATOR:
+    os.environ["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
+    os.environ.setdefault("FIREBASE_AUTH_EMULATOR_HOST", "127.0.0.1:9099")
+    os.environ.setdefault("FIREBASE_STORAGE_EMULATOR_HOST", "http://127.0.0.1:9199")
+    os.environ.setdefault("STORAGE_EMULATOR_HOST", "http://127.0.0.1:9199")
+
+# In production, leave bucket/projectId unset so the Admin SDK auto-detects them via ADC.
+storage_bucket = os.environ.get(
+    "FIREBASE_STORAGE_BUCKET",
+    "demo-medreach-ai.appspot.com" if USE_EMULATOR else None,
+)
 
 if not firebase_admin._apps:
-    firebase_admin.initialize_app(
-        options={
-            "projectId": "demo-project",
-            "storageBucket": storage_bucket,
-        }
-    )
+    app_options = {"projectId": "demo-project"} if USE_EMULATOR else {}
+    if storage_bucket:
+        app_options["storageBucket"] = storage_bucket
+    firebase_admin.initialize_app(options=app_options)
 
 db = firestore.client()
-default_bucket = storage.bucket(name=storage_bucket)
+default_bucket = storage.bucket(name=storage_bucket) if storage_bucket else storage.bucket()
