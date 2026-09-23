@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pandas as pd
+from google.cloud import storage
 
 from dbscan_fallback_service import detect_anomalies_dynamic
 from npi_registry_client import CMSNPIRegistryClient
@@ -13,6 +15,8 @@ from npi_status_enrichment import enrich_provider_with_npi_status
 from pii_detection_service import scan_text_for_pii
 
 OFFLINE_NPI_STATUS = "unvalidated_offline"
+DEFAULT_GCS_BUCKET = "medreach-ai-uploads"
+DEFAULT_GCS_CHUNK_SIZE = 500
 
 
 def _run_local_scrubbing(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -74,4 +78,36 @@ async def scrub_provider_records(records: list[dict[str, Any]]) -> list[dict[str
     return enriched_records
 
 
-__all__ = ["OFFLINE_NPI_STATUS", "scrub_provider_records"]
+async def stream_scrubbed_gcs_csv(
+    object_name: str,
+    *,
+    bucket_name: str = DEFAULT_GCS_BUCKET,
+    batch_size: int = DEFAULT_GCS_CHUNK_SIZE,
+    client: storage.Client | None = None,
+) -> AsyncIterator[list[dict[str, Any]]]:
+    """Stream a GCS CSV and yield scrubbed record batches without retaining the file."""
+    if not object_name or object_name.endswith("/"):
+        raise ValueError("object_name must identify a CSV object")
+    if batch_size < 1:
+        raise ValueError("batch_size must be greater than zero")
+
+    storage_client = client or storage.Client()
+    blob = storage_client.bucket(bucket_name).blob(object_name)
+
+    with blob.open("rb", chunk_size=4 * 1024 * 1024) as stream:
+        csv_batches = iter(pd.read_csv(stream, chunksize=batch_size, low_memory=False))
+        while True:
+            frame = await asyncio.to_thread(next, csv_batches, None)
+            if frame is None:
+                break
+            records = frame.to_dict(orient="records")
+            yield await scrub_provider_records(records)
+
+
+__all__ = [
+    "DEFAULT_GCS_BUCKET",
+    "DEFAULT_GCS_CHUNK_SIZE",
+    "OFFLINE_NPI_STATUS",
+    "scrub_provider_records",
+    "stream_scrubbed_gcs_csv",
+]

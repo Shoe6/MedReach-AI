@@ -2,13 +2,14 @@ import csv
 import io
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from firebase_admin import storage
 from fastapi import Depends, FastAPI, File, HTTPException, Header, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from google.cloud import storage as gcs_storage
 from pydantic import BaseModel
 
 from database import db
@@ -223,6 +224,39 @@ class InviteUserPayload(BaseModel):
 class BillingPlanUpdatePayload(BaseModel):
     plan: str
     reason: str | None = None
+
+
+class SignedUrlPayload(BaseModel):
+    filename: str
+    content_type: str = "text/csv"
+
+
+@app.post("/api/uploads/generate-signed-url")
+async def generate_signed_upload_url(payload: SignedUrlPayload):
+    """Generate a short-lived V4 URL for a raw upload to Cloud Storage."""
+    filename = payload.filename.strip()
+    if not filename or filename in {".", ".."} or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="A valid filename without path components is required.")
+
+    object_name = f"raw_uploads/{filename}"
+    try:
+        bucket = gcs_storage.Client().bucket("medreach-ai-uploads")
+        blob = bucket.blob(object_name)
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=15),
+            method="PUT",
+            content_type=payload.content_type,
+        )
+    except Exception as exc:
+        logger.exception("Failed to generate signed upload URL")
+        raise HTTPException(status_code=500, detail="Unable to generate upload URL.") from exc
+
+    return {
+        "signed_url": signed_url,
+        "object_name": object_name,
+        "expires_in": 900,
+    }
 
 
 @app.post("/api/export/log")
