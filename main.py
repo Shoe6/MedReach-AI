@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from uuid import uuid4
 
 from firebase_admin import storage
-from fastapi import Depends, FastAPI, File, HTTPException, Header, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Header, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from database import db
 from bulk_approval_service import approve_low_severity_flags
 from record_merge_service import merge_record_cluster
+from scrubbing_pipeline import scrub_provider_records
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ app.add_middleware(
 
 ADMIN_ROLES = frozenset({"admin", "super-admin"})
 EDITOR_ROLES = frozenset({"editor", "admin", "super-admin"})
+FIRESTORE_PAGE_SIZE = 500
 
 
 def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
@@ -164,13 +166,13 @@ async def dashboard_summary():
 
         for company_doc in companies_ref.stream():
             flags_ref = company_doc.reference.collection("flags")
-            for flag_doc in flags_ref.stream():
-                flag = flag_doc.to_dict() or {}
-                if flag.get("resolved"):
-                    continue
-                category = str(flag.get("category", "")).lower()
-                if category in flag_counts:
-                    flag_counts[category] += 1
+            for category in flag_counts:
+                unresolved_flags = (
+                    flags_ref.where("resolved", "==", False)
+                    .where("category", "==", category)
+                    .stream()
+                )
+                flag_counts[category] += sum(1 for _ in unresolved_flags)
 
         total_flags = sum(flag_counts.values())
 
@@ -456,6 +458,7 @@ async def upload_company_file(
 
     # Run the CPU-bound pandas ingestion off the event loop so concurrent requests aren't serialized behind it.
     ingestion_summary = await asyncio.to_thread(_get_ingest(), io.BytesIO(file_bytes))
+    scrubbed_records = await scrub_provider_records(ingestion_summary.get("records", []))
 
     def _upload_to_storage() -> None:
         bucket = storage.bucket()
@@ -480,6 +483,7 @@ async def upload_company_file(
         "preview_data": ingestion_summary["preview_data"],
         "inferred_schema": ingestion_summary["inferred_schema"],
         "duplicate_clusters": ingestion_summary.get("duplicate_clusters", []),
+        "records": scrubbed_records,
         "peak_memory_mb": ingestion_summary["peak_memory_mb"],
     }
 
@@ -676,12 +680,29 @@ async def approve_low_severity_flags_endpoint(
 
 
 @app.get("/api/companies/{company_id}/export_data")
-async def export_company_data(company_id: str):
+async def export_company_data(
+    company_id: str,
+    page_size: int = Query(FIRESTORE_PAGE_SIZE, ge=1, le=1000),
+    cursor: str | None = Query(default=None),
+):
     """Return processed records for the Data Review and export staging workflows."""
     try:
         records_ref = db.collection("companies").document(company_id).collection("records")
-        records = [doc.to_dict() for doc in records_ref.stream()]
-        return {"records": records}
+        records_query = records_ref.order_by("__name__")
+        if cursor:
+            cursor_snapshot = records_ref.document(cursor).get()
+            if not cursor_snapshot.exists:
+                raise HTTPException(status_code=400, detail="Invalid export cursor.")
+            records_query = records_query.start_after(cursor_snapshot)
+
+        documents = list(records_query.limit(page_size + 1).stream())
+        has_more = len(documents) > page_size
+        documents = documents[:page_size]
+        next_cursor = documents[-1].id if has_more else None
+        response = {"records": [doc.to_dict() for doc in documents]}
+        if next_cursor:
+            response["next_cursor"] = next_cursor
+        return response
 
     except HTTPException:
         raise
