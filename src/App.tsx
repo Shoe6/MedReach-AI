@@ -1635,7 +1635,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       const recordsToUpload = parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
       const mergeResponse = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/records/merge`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ records: recordsToUpload }),
       })
       if (!mergeResponse.ok) throw new Error(await mergeResponse.text())
