@@ -1586,6 +1586,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       formData.append('file', file, file.name)
       const uploadResponse = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/upload_file', {
         method: 'POST',
+        headers: { 'X-User-Role': role },
         body: formData,
       })
       if (!uploadResponse.ok) throw new Error(await uploadResponse.text())
@@ -1593,7 +1594,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       console.log("Parsed Payload:", recordsToUpload);
       const mergeResponse = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/records/merge', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ records: recordsToUpload }),
       })
       if (!mergeResponse.ok) throw new Error(await mergeResponse.text())
