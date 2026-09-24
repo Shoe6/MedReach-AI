@@ -1517,13 +1517,11 @@ type UploadState =
   | 'processing'   // server-side parse / column detection
   | 'done'
   | 'error-type'   // wrong file extension
-  | 'error-size'   // > 50 MB
   | 'error-parse'  // malformed CSV (row-level error)
   | 'error-network' // connection dropped mid-upload
 
-// Simulated chunked upload — tracks chunk index and total chunks
+// Simulated chunked upload — tracks chunk index and total chunks (demo scenarios only)
 const CHUNK_SIZE_MB = 5
-const MAX_FILE_MB = 50
 
 interface ParseError {
   row: number
@@ -1579,48 +1577,74 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const { setMeta } = useUploadMeta()
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [fileName,    setFileName]    = useState('')
-  const [fileSize,    setFileSize]    = useState(0)   // bytes
+  const [fileSize,    setFileSize]    = useState(0)   // MB
   const [chunksDone,  setChunksDone]  = useState(0)
   const [chunksTotal, setChunksTotal] = useState(0)
   const [retryCount,  setRetryCount]  = useState(0)
   const [uploadError, setUploadError] = useState('')
+  const [isRealUpload, setIsRealUpload] = useState(false)
+  const [uploadPct,    setUploadPct]    = useState(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const xhrRef = useRef<XMLHttpRequest | null>(null)
+  const pendingFileRef = useRef<File | null>(null)
 
   const totalPct = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0
 
+  // Direct client-to-GCS PUT against a signed URL, reporting real byte-level progress.
+  const putFileToSignedUrl = (file: File, uploadUrl: string) => new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhrRef.current = xhr
+    xhr.open('PUT', uploadUrl, true)
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
+    xhr.timeout = 30 * 60 * 1000 // large files can take a while on slow connections
+    xhr.upload.onprogress = event => {
+      if (event.lengthComputable) setUploadPct(Math.round((event.loaded / event.total) * 100))
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve()
+      else reject(new Error(`Storage upload failed (HTTP ${xhr.status})`))
+    }
+    xhr.onerror = () => reject(new Error('Network error — the connection dropped mid-upload.'))
+    xhr.ontimeout = () => reject(new Error('Upload timed out — the connection was too slow or was interrupted.'))
+    xhr.onabort = () => reject(new Error('Upload was cancelled.'))
+    xhr.send(file)
+  })
+
   const uploadRealFile = async (file: File) => {
+    pendingFileRef.current = file
     setFileName(file.name)
     setFileSize(file.size / (1024 * 1024))
     setUploadError('')
+    setIsRealUpload(true)
+    setUploadPct(0)
     setUploadState('uploading')
 
     try {
-      const recordsToUpload = parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
-      setChunksDone(1)
-      setChunksTotal(1)
+      const urlRes = await fetch(`${API_BASE_URL}/api/upload/generate-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
+        body: JSON.stringify({ company_id: 'demo-company', filename: file.name, content_type: file.type || 'text/csv' }),
+      })
+      if (!urlRes.ok) throw new Error((await urlRes.text()) || 'Could not obtain an upload URL')
+      const { upload_url: uploadUrl } = await urlRes.json()
+
+      await putFileToSignedUrl(file, uploadUrl)
+      xhrRef.current = null
       setUploadState('processing')
 
-      const formData = new FormData()
-      formData.append('file', file, file.name)
-      const uploadResponse = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/upload_file`, {
-        method: 'POST',
-        body: formData,
-      })
-      if (!uploadResponse.ok) throw new Error(await uploadResponse.text())
-
-      console.log("Parsed Payload:", recordsToUpload);
+      const recordsToUpload = parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
       const mergeResponse = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/records/merge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ records: recordsToUpload }),
       })
       if (!mergeResponse.ok) throw new Error(await mergeResponse.text())
-      await new Promise(resolve => setTimeout(resolve, 500))
 
       setMeta({ fileName: file.name, fileSize: file.size, rowCount: recordsToUpload.length, fileType: 'CSV', uploadedAt: new Date().toLocaleString() })
       setUploadState('done')
       onNavigate('data-review')
     } catch (error) {
+      xhrRef.current = null
       setUploadError(error instanceof Error ? error.message : 'Upload failed')
       setUploadState('error-network')
     }
@@ -1629,6 +1653,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   // ── core upload simulator ──────────────────────────────────────────────────
   const runUpload = (name: string, sizeMB: number, rowCount = 10412, fileType = 'CSV') => {
     const total = Math.max(1, Math.ceil(sizeMB / CHUNK_SIZE_MB))
+    setIsRealUpload(false)
     setFileName(name)
     setFileSize(sizeMB)
     setChunksDone(0)
@@ -1652,14 +1677,18 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const cancelUpload = (e: React.MouseEvent) => {
     e.stopPropagation()
     clearInterval(intervalRef.current!)
+    xhrRef.current?.abort()
+    xhrRef.current = null
     setUploadState('idle')
     setChunksDone(0)
     setChunksTotal(0)
+    setUploadPct(0)
   }
 
   const retryUpload = () => {
     setRetryCount(r => r + 1)
-    runUpload(fileName, fileSize)
+    if (isRealUpload && pendingFileRef.current) uploadRealFile(pendingFileRef.current)
+    else runUpload(fileName, fileSize)
   }
 
   // ── file validation ────────────────────────────────────────────────────────
@@ -1669,19 +1698,12 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       setUploadState('error-type')
       return
     }
-    if (sizeMB > MAX_FILE_MB) {
-      setFileName(name)
-      setFileSize(sizeMB)
-      setUploadState('error-size')
-      return
-    }
     runUpload(name, sizeMB)
   }
 
   // ── demo triggers — click zone picks one of several scenarios ─────────────
   const triggerNormal  = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; runUpload('Q2_HCP_Oncology.csv', 12) }
   const triggerBadType  = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; setFileName('BadFormat_HCP_List.pdf'); setUploadState('error-type') }
-  const triggerTooLarge = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; setFileName('Massive_NPI_Export_2026.csv'); setFileSize(67); setUploadState('error-size') }
   const triggerParse    = () => {
     if (uploadState === 'uploading' || uploadState === 'processing') return
     runUpload('Corrupted_HCP_March.csv', 8)
@@ -1704,9 +1726,6 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     if (!file.name.endsWith('.csv') && !file.name.endsWith('.xlsx')) {
       setFileName(file.name); setUploadState('error-type'); e.currentTarget.value = ''; return
     }
-    if (sizeMB > MAX_FILE_MB) {
-      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); e.currentTarget.value = ''; return
-    }
     if (ext === 'CSV') uploadRealFile(file)
     else runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
     e.currentTarget.value = ''
@@ -1720,16 +1739,14 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     const dt = e.dataTransfer
     // DataTransferItem gives us filename+size during dragover in most browsers
     let name = ''
-    let sizeMB = 0
     try {
       if (dt.items && dt.items.length > 0) {
         const item = dt.items[0]
         const f = item.kind === 'file' ? (item as unknown as { getAsFile(): File | null }).getAsFile?.() : null
-        if (f) { name = f.name; sizeMB = f.size / (1024 * 1024) }
+        if (f) name = f.name
       }
       if (!name && dt.files && dt.files.length > 0) {
         name = dt.files[0].name
-        sizeMB = dt.files[0].size / (1024 * 1024)
       }
     } catch { /* browser may restrict file access during dragover */ }
 
@@ -1738,12 +1755,6 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       if (!lname.endsWith('.csv') && !lname.endsWith('.xlsx')) {
         setFileName(name)
         setUploadState('error-type')
-        return
-      }
-      if (sizeMB > MAX_FILE_MB) {
-        setFileName(name)
-        setFileSize(sizeMB)
-        setUploadState('error-size')
         return
       }
     }
@@ -1758,9 +1769,6 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     const ext = file.name.split('.').pop()?.toUpperCase() || 'CSV'
     if (!file.name.toLowerCase().endsWith('.csv') && !file.name.toLowerCase().endsWith('.xlsx')) {
       setFileName(file.name); setUploadState('error-type'); return
-    }
-    if (sizeMB > MAX_FILE_MB) {
-      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); return
     }
     if (ext === 'CSV') uploadRealFile(file)
     else runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
@@ -1791,7 +1799,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         subtitle="Import HCP datasets for cleaning and analysis"
         actions={
           <span className="text-[11px] px-3 py-1 rounded-[6px]" style={{ background: C.lightTint, color: C.navy }}>
-            Max file size: 50 MB · CSV or XLSX
+            CSV or XLSX · No file size limit
           </span>
         }
       />
@@ -1801,7 +1809,6 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         <span className="text-[11px] font-bold" style={{ color: C.navy }}>Test scenarios:</span>
         <button onClick={triggerNormal}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.success,  color: 'white', borderColor: C.success  }}>✓ Normal upload</button>
         <button onClick={triggerBadType}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.danger,   color: 'white', borderColor: C.danger   }}>✕ Wrong file type (.pdf)</button>
-        <button onClick={triggerTooLarge} className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.danger,   color: 'white', borderColor: C.danger   }}>✕ File too large (67 MB)</button>
         <button onClick={triggerParse}    className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.warning,  color: 'white', borderColor: C.warning  }}>⚠ Parse error (corrupt CSV)</button>
         <button onClick={triggerNetworkError} className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: '#6B7280', color: 'white', borderColor: '#6B7280'  }}>⚡ Network drop</button>
       </div>
@@ -1812,11 +1819,11 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           className={`border-2 border-dashed rounded-[6px] transition-all cursor-pointer select-none`}
           style={{
             borderColor: uploadState === 'dragging' ? C.corpBlue
-              : (uploadState === 'error-type' || uploadState === 'error-size' || uploadState === 'error-parse' || uploadState === 'error-network') ? C.danger
+              : (uploadState === 'error-type' || uploadState === 'error-parse' || uploadState === 'error-network') ? C.danger
               : uploadState === 'done' ? C.success
               : C.border,
             background: uploadState === 'dragging' ? 'rgba(46,134,171,0.04)'
-              : (uploadState === 'error-type' || uploadState === 'error-size') ? 'rgba(192,57,43,0.03)'
+              : uploadState === 'error-type' ? 'rgba(192,57,43,0.03)'
               : 'transparent',
             padding: '48px 32px',
           }}
@@ -1844,7 +1851,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               <p className="text-[15px] font-semibold mb-1" style={{ color: uploadState === 'dragging' ? C.corpBlue : C.navy }}>
                 {uploadState === 'dragging' ? 'Drop to upload' : 'Drag CSV or XLSX here, or click to browse'}
               </p>
-              <p className="text-[12px]" style={{ color: C.midText }}>Supports CSV, XLSX · Max 50 MB · Up to 1 M rows</p>
+              <p className="text-[12px]" style={{ color: C.midText }}>Supports CSV, XLSX · Up to 1 M rows</p>
               {uploadState === 'dragging' && (
                 <Badge tier={1} color="info" className="mt-3">Release to begin upload</Badge>
               )}
@@ -1945,43 +1952,6 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             </div>
           )}
 
-          {/* ── STATE: error — file too large ───────────────────────────── */}
-          {uploadState === 'error-size' && (
-            <div className="max-w-sm mx-auto text-center">
-              <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
-                style={{ background: '#FEE2E2', color: C.danger }}>
-                {Icon.alertTriangle}
-              </div>
-              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>File exceeds 50 MB limit</p>
-              <p className="text-[13px] mb-1" style={{ color: C.darkText }}>
-                <span className="mono font-semibold">{fileName}</span>
-                <span className="ml-2 text-[11px] font-semibold px-2 py-0.5 rounded-[4px]"
-                  style={{ background: '#FEE2E2', color: C.danger }}>
-                  {fileSize.toFixed(1)} MB
-                </span>
-              </p>
-              <p className="text-[12px] mb-2" style={{ color: C.midText }}>
-                Your file is <strong>{(fileSize - MAX_FILE_MB).toFixed(1)} MB over the limit</strong>. Split the file into chunks under 50 MB and upload each separately, or contact support to request a limit increase.
-              </p>
-              {/* Visual size indicator */}
-              <div className="mt-3 mb-5 px-8">
-                <div className="progress-track" style={{ height: 8 }}>
-                  <div className="progress-fill" style={{ width: '100%', background: C.danger }} />
-                </div>
-                <div className="flex justify-between text-[10px] mt-1" style={{ color: C.midText }}>
-                  <span>0 MB</span>
-                  <span style={{ color: C.danger, fontWeight: 700 }}>Limit: 50 MB</span>
-                  <span style={{ color: C.danger }}>{fileSize.toFixed(1)} MB</span>
-                </div>
-              </div>
-              <div className="flex gap-2 justify-center" onClick={e => e.stopPropagation()}>
-                <Btn variant="primary" size="sm" onClick={() => setUploadState('idle')}>
-                  Upload a different file
-                </Btn>
-              </div>
-            </div>
-          )}
-
           {/* ── STATE: error — malformed CSV / parse error ───────────────── */}
           {uploadState === 'error-parse' && (
             <div className="max-w-lg mx-auto" onClick={e => e.stopPropagation()}>
@@ -2047,7 +2017,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               </p>
               {/* Partial progress bar */}
               <div className="progress-track mb-4 mx-8" style={{ height: 8 }}>
-                <div className="progress-fill" style={{ width: `${totalPct}%`, background: C.warning }} />
+                <div className="progress-fill" style={{ width: `${isRealUpload ? uploadPct : totalPct}%`, background: C.warning }} />
               </div>
               {retryCount > 0 && (
                 <p className="text-[11px] mb-3" style={{ color: C.midText }}>Retry attempt {retryCount}</p>
@@ -2078,7 +2048,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               </div>
             ))}
             <div className="flex items-center gap-2 text-[11px]" style={{ color: C.midText }}>
-              <span className="px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.lightTint, color: C.navy }}>50 MB</span>
+              <span className="px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.lightTint, color: C.navy }}>No limit</span>
               Max file size
             </div>
           </div>

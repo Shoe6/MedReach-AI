@@ -3,7 +3,7 @@ import csv
 import io
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from firebase_admin import storage
@@ -390,6 +390,45 @@ async def download_session_pdf(session_id: str):
         raise HTTPException(status_code=500, detail="reportlab is not installed. Run: pip install reportlab")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
+
+
+# ── Signed URL direct-to-GCS upload ────────────────────────────────────────────
+
+class GenerateUploadUrlRequest(BaseModel):
+    company_id: str
+    filename: str
+    content_type: str | None = None
+
+
+@app.post("/api/upload/generate-url")
+async def generate_upload_url(
+    payload: GenerateUploadUrlRequest,
+    _role: str = Depends(require_editor_or_above),
+):
+    """Return a v4 signed URL so the client can PUT the raw file straight to GCS."""
+    original_filename = os.path.basename(payload.filename.replace("\\", "/"))
+    if not original_filename:
+        raise HTTPException(status_code=400, detail="A file name is required.")
+
+    upload_id = str(uuid4())
+    storage_path = f"companies/{payload.company_id}/uploads/{upload_id}_{original_filename}"
+    content_type = payload.content_type or "application/octet-stream"
+
+    def _sign() -> str:
+        blob = storage.bucket().blob(storage_path)
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=30),
+            method="PUT",
+            content_type=content_type,
+        )
+
+    try:
+        upload_url = await asyncio.to_thread(_sign)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {e}") from e
+
+    return {"upload_id": upload_id, "upload_url": upload_url, "storage_path": storage_path}
 
 
 # ── Company file upload ───────────────────────────────────────────────────────
