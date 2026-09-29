@@ -512,6 +512,18 @@ async def get_company_dashboard_metrics(company_id: str):
         ) from exc
 
 
+@app.get("/api/companies/{company_name}/records")
+async def get_company_records(company_name: str):
+    """Return an empty records collection for the company dashboard."""
+    return {"company_name": company_name, "records": []}
+
+
+@app.get("/api/companies/{company_name}/provider_walkthrough")
+async def get_company_provider_walkthrough(company_name: str):
+    """Return an empty provider walkthrough collection for the dashboard."""
+    return {"company_name": company_name, "records": []}
+
+
 @app.post("/api/companies/{company_id}/users/invite", status_code=201)
 async def invite_company_user(
     company_id: str,
