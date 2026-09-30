@@ -83,6 +83,7 @@ async def stream_scrubbed_gcs_csv(
     *,
     bucket_name: str = DEFAULT_GCS_BUCKET,
     batch_size: int = DEFAULT_GCS_CHUNK_SIZE,
+    validate_npi: bool = True,
     client: storage.Client | None = None,
 ) -> AsyncIterator[list[dict[str, Any]]]:
     """Stream a GCS CSV and yield scrubbed record batches without retaining the file."""
@@ -101,7 +102,10 @@ async def stream_scrubbed_gcs_csv(
             if frame is None:
                 break
             records = frame.to_dict(orient="records")
-            yield await scrub_provider_records(records)
+            if validate_npi:
+                yield await scrub_provider_records(records)
+            else:
+                yield await asyncio.to_thread(_run_local_scrubbing, records)
 
 
 __all__ = [

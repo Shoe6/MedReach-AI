@@ -2,19 +2,20 @@ import csv
 import io
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from firebase_admin import storage
-from fastapi import Depends, FastAPI, File, HTTPException, Header, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Header, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google.cloud import storage as gcs_storage
 from pydantic import BaseModel
 
+from auth import require_role
 from database import db
 from record_merge_service import merge_record_cluster
-from scrubbing_pipeline import scrub_provider_records
+from scrubbing_pipeline import DEFAULT_GCS_CHUNK_SIZE, scrub_provider_records, stream_scrubbed_gcs_csv
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,10 @@ app.add_middleware(
 
 ADMIN_ROLES = frozenset({"admin", "super-admin"})
 EDITOR_ROLES = frozenset({"editor", "admin", "super-admin"})
+PROCESSING_ROLES = ("editor", "admin", "super-admin")
+require_authenticated_editor = require_role(PROCESSING_ROLES)
 FIRESTORE_PAGE_SIZE = 500
+UPLOAD_BUCKET = "medreach-ai-uploads"
 
 
 def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
@@ -231,16 +235,31 @@ class SignedUrlPayload(BaseModel):
     content_type: str = "text/csv"
 
 
+class ProcessUploadPayload(BaseModel):
+    object_name: str
+    skip_npi_validation: bool = False
+    delete_source_on_success: bool = False
+
+
 @app.post("/api/uploads/generate-signed-url")
-async def generate_signed_upload_url(payload: SignedUrlPayload):
-    """Generate a short-lived V4 URL for a raw upload to Cloud Storage."""
+async def generate_signed_upload_url(
+    payload: SignedUrlPayload,
+    user: dict = Depends(require_authenticated_editor),
+):
+    """Generate an owner-scoped short-lived V4 URL for a raw CSV upload."""
     filename = payload.filename.strip()
     if not filename or filename in {".", ".."} or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="A valid filename without path components is required.")
+    if payload.content_type != "text/csv":
+        raise HTTPException(status_code=400, detail="Only text/csv uploads are supported.")
 
-    object_name = f"raw_uploads/{filename}"
+    owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
+    if not owner_uid:
+        raise HTTPException(status_code=401, detail="Authenticated user is missing a UID.")
+
+    object_name = f"raw_uploads/{owner_uid}/{uuid4()}_{filename}"
     try:
-        bucket = gcs_storage.Client().bucket("medreach-ai-uploads")
+        bucket = gcs_storage.Client().bucket(UPLOAD_BUCKET)
         blob = bucket.blob(object_name)
         signed_url = blob.generate_signed_url(
             version="v4",
@@ -256,6 +275,145 @@ async def generate_signed_upload_url(payload: SignedUrlPayload):
         "signed_url": signed_url,
         "object_name": object_name,
         "expires_in": 900,
+    }
+
+
+async def _process_uploaded_csv_job(
+    job_id: str,
+    object_name: str,
+    *,
+    skip_npi_validation: bool,
+    delete_source_on_success: bool,
+) -> None:
+    job_ref = db.collection("processing_jobs").document(job_id)
+    total_records = 0
+    completed_batches = 0
+    max_batch_records = 0
+
+    try:
+        job_ref.update({"status": "processing", "started_at": datetime.now(timezone.utc).isoformat()})
+        async for records in stream_scrubbed_gcs_csv(
+            object_name,
+            bucket_name=UPLOAD_BUCKET,
+            batch_size=DEFAULT_GCS_CHUNK_SIZE,
+            validate_npi=not skip_npi_validation,
+        ):
+            batch_records = len(records)
+            total_records += batch_records
+            completed_batches += 1
+            max_batch_records = max(max_batch_records, batch_records)
+
+            if completed_batches % 20 == 0:
+                job_ref.update(
+                    {
+                        "completed_batches": completed_batches,
+                        "records_processed": total_records,
+                        "max_batch_records": max_batch_records,
+                    }
+                )
+
+        if delete_source_on_success:
+            gcs_storage.Client().bucket(UPLOAD_BUCKET).blob(object_name).delete()
+
+        job_ref.update(
+            {
+                "status": "completed",
+                "completed_batches": completed_batches,
+                "records_processed": total_records,
+                "max_batch_records": max_batch_records,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    except Exception as exc:
+        logger.exception("CSV processing job %s failed", job_id)
+        job_ref.update(
+            {
+                "status": "failed",
+                "error": f"Processing failed ({type(exc).__name__}).",
+                "completed_batches": completed_batches,
+                "records_processed": total_records,
+                "max_batch_records": max_batch_records,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+
+@app.post("/api/companies/{company_id}/uploads/process", status_code=202)
+async def start_company_upload_processing(
+    company_id: str,
+    payload: ProcessUploadPayload,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(require_authenticated_editor),
+):
+    """Queue an owner-scoped GCS CSV for bounded, asynchronous scrubbing."""
+    owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
+    role = str(user.get("role") or "").strip().lower()
+    object_name = payload.object_name.strip()
+    owner_prefix = f"raw_uploads/{owner_uid}/"
+
+    if not owner_uid:
+        raise HTTPException(status_code=401, detail="Authenticated user is missing a UID.")
+    if not object_name.startswith(owner_prefix):
+        raise HTTPException(status_code=403, detail="The upload does not belong to the authenticated user.")
+    if not object_name.lower().endswith(".csv") or ".." in object_name.split("/"):
+        raise HTTPException(status_code=400, detail="A valid staged CSV object is required.")
+    if payload.skip_npi_validation and role not in ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="Skipping NPI validation is limited to administrators.")
+
+    job_id = str(uuid4())
+    job_ref = db.collection("processing_jobs").document(job_id)
+    job_ref.set(
+        {
+            "job_id": job_id,
+            "company_id": company_id,
+            "owner_uid": owner_uid,
+            "object_name": object_name,
+            "status": "queued",
+            "batch_size": DEFAULT_GCS_CHUNK_SIZE,
+            "skip_npi_validation": payload.skip_npi_validation,
+            "completed_batches": 0,
+            "records_processed": 0,
+            "max_batch_records": 0,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    background_tasks.add_task(
+        _process_uploaded_csv_job,
+        job_id,
+        object_name,
+        skip_npi_validation=payload.skip_npi_validation,
+        delete_source_on_success=payload.delete_source_on_success,
+    )
+    return {"job_id": job_id, "company_id": company_id, "status": "queued"}
+
+
+@app.get("/api/companies/{company_id}/uploads/process/{job_id}")
+async def get_company_upload_processing_status(
+    company_id: str,
+    job_id: str,
+    user: dict = Depends(require_authenticated_editor),
+):
+    """Return processing status only to the user who staged the source object."""
+    owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
+    snapshot = db.collection("processing_jobs").document(job_id).get()
+    job = snapshot.to_dict() if snapshot.exists else None
+    if not job or job.get("owner_uid") != owner_uid or job.get("company_id") != company_id:
+        raise HTTPException(status_code=404, detail="Processing job not found.")
+
+    return {
+        key: job.get(key)
+        for key in (
+            "job_id",
+            "company_id",
+            "status",
+            "batch_size",
+            "completed_batches",
+            "records_processed",
+            "max_batch_records",
+            "skip_npi_validation",
+            "error",
+        )
+        if key in job
     }
 
 
