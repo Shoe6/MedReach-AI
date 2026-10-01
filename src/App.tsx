@@ -2846,8 +2846,18 @@ function DataReviewScreen() {
   const isTrue = (value: unknown) => value === true || value === -1 || ['true', '1', 'merged'].includes(String(value).toLowerCase())
   const processedOutliers = processedRecords.filter(record => record.anomaly_flag === -1 || record.anomaly_flag === '-1' || record.is_anomaly === true || record.is_anomaly === 'true').length
   const processedDuplicates = processedRecords.filter(record => isTrue(record.is_duplicate) || isTrue(record.merged_from_sources) || record.deduplication_status === 'merged').length
-  const processedPII = processedRecords.filter(record => !String(record.email || record.email_address || '').trim() || !String(record.phone || record.phone_number || '').trim()).length
-  const processedNPIValidation = processedRecords.filter(record => !String(record.npi || record.NPI || '').trim() || !String(record.payer_name || record.payerName || '').trim()).length
+  // Prefer the backend's PII/NPI detectors (pii_flagged, npi_status) when present;
+  // fall back to raw-field completeness only for records the scrubber never touched.
+  const processedPII = processedRecords.filter(record => {
+    if (record.pii_flagged !== undefined) return isTrue(record.pii_flagged)
+    if (Array.isArray(record.pii_detections)) return record.pii_detections.length > 0
+    return !String(record.email || record.email_address || '').trim() || !String(record.phone || record.phone_number || '').trim()
+  }).length
+  const processedNPIValidation = processedRecords.filter(record => {
+    const status = safeText(record.npi_status) ?? safeText(record.validation_status)
+    if (status) return status.toLowerCase() !== 'active'
+    return !String(record.npi || record.NPI || '').trim() || !String(record.payer_name || record.payerName || '').trim()
+  }).length
   const unresolvedDataFlags = processedOutliers + processedDuplicates + processedPII + processedNPIValidation
 
   const scoreCategory = (

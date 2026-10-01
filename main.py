@@ -998,7 +998,12 @@ async def merge_company_records(company_id: str, payload: dict, _role: str = Dep
         if not isinstance(records, list) or not records:
             raise HTTPException(status_code=422, detail="'records' must be a non-empty list.")
 
-        merged = merge_record_cluster(records, master_record_id=master_record_id)
+        # Run PII/NPI/anomaly detection before persisting so Data Review reflects
+        # real quality signals instead of raw-field heuristics (this endpoint is
+        # the one the real upload flow calls; other upload paths already scrub).
+        scrubbed_records = await scrub_provider_records(records)
+
+        merged = merge_record_cluster(scrubbed_records, master_record_id=master_record_id)
         master = merged["master_record"]
 
         records_ref = db.collection("companies").document(company_id).collection("records")
