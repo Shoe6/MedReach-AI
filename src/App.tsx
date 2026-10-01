@@ -5,6 +5,15 @@ import RecordDetailDashboard from './RecordDetailDashboard'
 
 // Backend base URL — empty string means calls are relative (proxied via Firebase Hosting rewrites in prod)
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
+
+// Carries the HTTP status code alongside a fetch failure so callers can branch on 403/404/etc.
+class HttpError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip as RechartTooltip,
   Cell, CartesianGrid, Legend, PieChart, Pie,
@@ -1517,11 +1526,15 @@ type UploadState =
   | 'processing'   // server-side parse / column detection
   | 'done'
   | 'error-type'   // wrong file extension
+  | 'error-size'   // exceeds MAX_FILE_BYTES
   | 'error-parse'  // malformed CSV (row-level error)
-  | 'error-network' // connection dropped mid-upload
+  | 'error-forbidden' // 403 — caller lacks Editor role or higher
+  | 'error-network' // connection dropped, timed out, or other server error mid-upload
 
 // Simulated chunked upload — tracks chunk index and total chunks (demo scenarios only)
 const CHUNK_SIZE_MB = 5
+// Client-side dropzone ceiling — backend chunking is memory-safe up to this size (National NPI dataset).
+const MAX_FILE_BYTES = 1073741824 // 1 GB
 
 interface ParseError {
   row: number
@@ -1570,7 +1583,7 @@ function parseCsvRecords(
   return rows.map(values => Object.fromEntries(headers.map((header, index) => [header, values[index]?.trim() || ''])))
 }
 
-function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => void; showToast: (type: ToastType, message: string) => void }) {
   const { role } = useRole()
   const canDeleteDatasets = isAdminRole(role)
   const deleteDatasetTooltip = 'Only Admin users can delete datasets.'
@@ -1625,7 +1638,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ company_id: 'demo-company', filename: file.name, content_type: file.type || 'text/csv' }),
       })
-      if (!urlRes.ok) throw new Error((await urlRes.text()) || 'Could not obtain an upload URL')
+      if (!urlRes.ok) throw new HttpError(urlRes.status, (await urlRes.text()) || 'Could not obtain an upload URL')
       const { upload_url: uploadUrl } = await urlRes.json()
 
       await putFileToSignedUrl(file, uploadUrl)
@@ -1638,14 +1651,24 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ records: recordsToUpload }),
       })
-      if (!mergeResponse.ok) throw new Error(await mergeResponse.text())
+      if (!mergeResponse.ok) throw new HttpError(mergeResponse.status, await mergeResponse.text())
 
       setMeta({ fileName: file.name, fileSize: file.size, rowCount: recordsToUpload.length, fileType: 'CSV', uploadedAt: new Date().toLocaleString() })
       setUploadState('done')
       onNavigate('data-review')
     } catch (error) {
       xhrRef.current = null
-      setUploadError(error instanceof Error ? error.message : 'Upload failed')
+      if (error instanceof HttpError && error.status === 403) {
+        setUploadError('Unauthorized: Editor role required to upload data. Ask an Admin to upgrade your access.')
+        setUploadState('error-forbidden')
+        showToast('error', 'Unauthorized: Editor role required')
+        return
+      }
+      if (error instanceof HttpError && error.status === 404) {
+        setUploadError('Upload service not found (404) — the endpoint may be misconfigured. Please contact support.')
+      } else {
+        setUploadError(error instanceof Error ? error.message : 'Upload failed')
+      }
       setUploadState('error-network')
     }
   }
@@ -1726,6 +1749,9 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     if (!file.name.endsWith('.csv') && !file.name.endsWith('.xlsx')) {
       setFileName(file.name); setUploadState('error-type'); e.currentTarget.value = ''; return
     }
+    if (file.size > MAX_FILE_BYTES) {
+      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); e.currentTarget.value = ''; return
+    }
     if (ext === 'CSV') uploadRealFile(file)
     else runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
     e.currentTarget.value = ''
@@ -1770,6 +1796,9 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     if (!file.name.toLowerCase().endsWith('.csv') && !file.name.toLowerCase().endsWith('.xlsx')) {
       setFileName(file.name); setUploadState('error-type'); return
     }
+    if (file.size > MAX_FILE_BYTES) {
+      setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); return
+    }
     if (ext === 'CSV') uploadRealFile(file)
     else runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
   }
@@ -1799,7 +1828,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         subtitle="Import HCP datasets for cleaning and analysis"
         actions={
           <span className="text-[11px] px-3 py-1 rounded-[6px]" style={{ background: C.lightTint, color: C.navy }}>
-            CSV or XLSX · No file size limit
+            CSV or XLSX · Up to 1 GB
           </span>
         }
       />
@@ -1819,7 +1848,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           className={`border-2 border-dashed rounded-[6px] transition-all cursor-pointer select-none`}
           style={{
             borderColor: uploadState === 'dragging' ? C.corpBlue
-              : (uploadState === 'error-type' || uploadState === 'error-parse' || uploadState === 'error-network') ? C.danger
+              : (uploadState === 'error-type' || uploadState === 'error-size' || uploadState === 'error-parse' || uploadState === 'error-forbidden' || uploadState === 'error-network') ? C.danger
               : uploadState === 'done' ? C.success
               : C.border,
             background: uploadState === 'dragging' ? 'rgba(46,134,171,0.04)'
@@ -1952,6 +1981,28 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             </div>
           )}
 
+          {/* ── STATE: error — file exceeds 1GB limit ─────────────────────── */}
+          {uploadState === 'error-size' && (
+            <div className="max-w-sm mx-auto text-center" onClick={e => e.stopPropagation()}>
+              <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ background: '#FEE2E2', color: C.danger }}>
+                {Icon.alertTriangle}
+              </div>
+              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>File too large</p>
+              <p className="text-[13px] mb-1" style={{ color: C.darkText }}>
+                <span className="mono font-semibold">{fileName}</span> ({(fileSize / 1024).toFixed(2)} GB)
+              </p>
+              <p className="text-[12px] mb-5" style={{ color: C.midText }}>
+                MedReach AI accepts files up to <strong>1 GB</strong>. Split the dataset into smaller batches and try again.
+              </p>
+              <div className="flex gap-2 justify-center">
+                <Btn variant="primary" size="sm" onClick={() => setUploadState('idle')}>
+                  Try a different file
+                </Btn>
+              </div>
+            </div>
+          )}
+
           {/* ── STATE: error — malformed CSV / parse error ───────────────── */}
           {uploadState === 'error-parse' && (
             <div className="max-w-lg mx-auto" onClick={e => e.stopPropagation()}>
@@ -1996,6 +2047,25 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
                 </Btn>
                 <Btn variant="ghost" size="sm" onClick={() => setUploadState('idle')}>
                   Upload corrected file
+                </Btn>
+              </div>
+            </div>
+          )}
+
+          {/* ── STATE: error — 403 Forbidden ──────────────────────────────── */}
+          {uploadState === 'error-forbidden' && (
+            <div className="max-w-sm mx-auto text-center" onClick={e => e.stopPropagation()}>
+              <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ background: '#FEE2E2', color: C.danger }}>
+                {Icon.shield}
+              </div>
+              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>Unauthorized: Editor role required</p>
+              <p className="text-[12px] mb-5" style={{ color: C.midText }}>
+                {uploadError || 'Your current role does not have permission to upload data. Ask an Admin to upgrade your access to Editor or higher.'}
+              </p>
+              <div className="flex gap-2 justify-center">
+                <Btn variant="primary" size="sm" onClick={() => setUploadState('idle')}>
+                  Dismiss
                 </Btn>
               </div>
             </div>
@@ -2048,7 +2118,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               </div>
             ))}
             <div className="flex items-center gap-2 text-[11px]" style={{ color: C.midText }}>
-              <span className="px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.lightTint, color: C.navy }}>No limit</span>
+              <span className="px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.lightTint, color: C.navy }}>1 GB</span>
               Max file size
             </div>
           </div>
@@ -2635,6 +2705,7 @@ function DataReviewScreen() {
   const [selectedRecord, setSelectedRecord] = useState<Record<string, unknown> | null>(null)
   const [recordsLoading, setRecordsLoading] = useState(true)
   const [recordsError, setRecordsError] = useState<string | null>(null)
+  const [recordsStatus, setRecordsStatus] = useState<number | null>(null)
   const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
@@ -2661,7 +2732,7 @@ function DataReviewScreen() {
     const loadProcessedRecords = async () => {
       try {
         const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/export_data`)
-        if (!response.ok) throw new Error(`Export request failed (${response.status})`)
+        if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
         const contentType = response.headers.get('content-type') || ''
         if (contentType.includes('json')) {
           const data = await response.json() as ExportResponse
@@ -2678,6 +2749,7 @@ function DataReviewScreen() {
           }))
         }
       } catch (error) {
+        setRecordsStatus(error instanceof HttpError ? error.status : null)
         setRecordsError(error instanceof Error ? error.message : 'Unable to load processed records')
       } finally {
         setRecordsLoading(false)
@@ -2813,6 +2885,26 @@ function DataReviewScreen() {
     { id: 'outliers',   label: 'Statistical Outliers',  count: processedOutliers },
     { id: 'validation', label: 'NPI Validation',        count: processedNPIValidation },
   ] as const
+
+  // 404 from export_data means the company has no processed dataset yet — show an empty
+  // state instead of a dashboard full of misleading zeros.
+  if (!recordsLoading && recordsStatus === 404) {
+    return (
+      <div className="p-8">
+        <SectionHeader title="Data Review" subtitle="Review and resolve data quality flags before export" />
+        <Card className="max-w-md mx-auto text-center py-10">
+          <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+            style={{ background: C.lightTint, color: C.midText }}>
+            {Icon.dashboard}
+          </div>
+          <p className="text-[15px] font-bold mb-1" style={{ color: C.navy }}>No data available</p>
+          <p className="text-[12px]" style={{ color: C.midText }}>
+            No processed records were found for this company yet. Upload a dataset to populate the data review dashboard.
+          </p>
+        </Card>
+      </div>
+    )
+  }
 
   return (
     <div className="p-8">
@@ -6436,7 +6528,7 @@ export default function App() {
       case 'register': return <RegisterScreen onNavigate={navigate} />
       case 'forgot-password': return <ForgotPasswordScreen onNavigate={navigate} />
       case 'dashboard': return <DashboardScreen onNavigate={navigate} />
-      case 'upload': return <UploadScreen onNavigate={navigate} />
+      case 'upload': return <UploadScreen onNavigate={navigate} showToast={showToast} />
       case 'column-mapping': return <ColumnMappingScreen onNavigate={navigate} />
       case 'data-review': return <DataReviewScreen />
       case 'query': return <QueryScreen />
