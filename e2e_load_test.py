@@ -1,20 +1,13 @@
-"""Load-test the authenticated, 500-row GCS provider-processing pipeline.
-
-Required environment variables:
-  FIREBASE_API_KEY (not needed when using the Auth emulator)
-  E2E_AUTH_EMAIL
-  E2E_AUTH_PASSWORD
-  MEDREACH_SERVER_PID (PID of the FastAPI worker to monitor)
-
-The Firebase user must have an admin or super-admin role claim because this
-load test skips external NPI lookups while measuring CSV processing memory.
-"""
+"""Load-test the local, 500-row provider-processing pipeline without credentials."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import os
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -30,52 +23,48 @@ MINIMUM_FILE_SIZE = 50 * MIB
 POLL_INTERVAL_SECONDS = 2.0
 
 
-def _firebase_sign_in(session: requests.Session) -> str:
-    email = os.environ.get("E2E_AUTH_EMAIL")
-    password = os.environ.get("E2E_AUTH_PASSWORD")
-    if not email or not password:
-        raise RuntimeError(
-            "Set E2E_AUTH_EMAIL and E2E_AUTH_PASSWORD to a Firebase test account."
-        )
+def _start_local_server() -> tuple[subprocess.Popen, str]:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
 
-    emulator_host = os.environ.get("FIREBASE_AUTH_EMULATOR_HOST")
-    api_key = os.environ.get("FIREBASE_API_KEY") or (
-        "fake-api-key" if emulator_host else None
+    base_url = f"http://127.0.0.1:{port}"
+    server_env = os.environ.copy()
+    server_env["MEDREACH_E2E_LOCAL_MODE"] = "1"
+    server_env["ENVIRONMENT"] = "development"
+    server_process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--log-level",
+            "warning",
+        ],
+        cwd=Path(__file__).resolve().parent,
+        env=server_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
     )
-    if not api_key:
-        raise RuntimeError(
-            "Set FIREBASE_API_KEY or configure FIREBASE_AUTH_EMULATOR_HOST."
-        )
 
-    auth_origin = (
-        f"http://{emulator_host}"
-        if emulator_host and "://" not in emulator_host
-        else emulator_host
-    )
-    auth_origin = auth_origin or "https://identitytoolkit.googleapis.com"
-    if emulator_host:
-        auth_url = (
-            f"{auth_origin}/identitytoolkit.googleapis.com/"
-            "v1/accounts:signInWithPassword"
-            f"?key={quote(api_key, safe='')}"
-        )
-    else:
-        auth_url = (
-            f"{auth_origin}/v1/accounts:signInWithPassword"
-            f"?key={quote(api_key, safe='')}"
-        )
-    response = session.post(
-        auth_url,
-        json={"email": email, "password": password, "returnSecureToken": True},
-        timeout=20,
-    )
-    if not response.ok:
-        raise RuntimeError(f"Firebase sign-in failed with HTTP {response.status_code}.")
+    for _ in range(60):
+        if server_process.poll() is not None:
+            raise RuntimeError("The local FastAPI test server exited during startup.")
+        try:
+            response = requests.get(f"{base_url}/openapi.json", timeout=1)
+            if response.ok:
+                return server_process, base_url
+        except requests.RequestException:
+            pass
+        time.sleep(0.5)
 
-    token = response.json().get("idToken")
-    if not token:
-        raise RuntimeError("Firebase sign-in response did not include an ID token.")
-    return token
+    server_process.terminate()
+    server_process.wait(timeout=10)
+    raise TimeoutError("The local FastAPI test server did not become ready.")
 
 
 def generate_synthetic_csv(
@@ -166,22 +155,16 @@ def _response_json(response: requests.Response, operation: str) -> dict:
 
 
 def run_load_test(args: argparse.Namespace) -> dict:
-    if args.server_pid <= 0:
-        raise RuntimeError(
-            "Set MEDREACH_SERVER_PID or pass --server-pid for the FastAPI worker."
-        )
-
-    base_url = args.base_url.rstrip("/")
+    server_process, base_url = _start_local_server()
     session = requests.Session()
-    session.headers["Authorization"] = f"Bearer {_firebase_sign_in(session)}"
     company_id = quote(args.company_id, safe="")
     filename = f"e2e_provider_load_{uuid4().hex}.csv"
-    monitor = ServerMemoryMonitor(args.server_pid)
+    monitor = ServerMemoryMonitor(server_process.pid)
 
-    with tempfile.TemporaryDirectory(prefix="medreach-e2e-") as temp_dir:
-        csv_path = Path(temp_dir) / filename
+    try:
         monitor.start()
-        try:
+        with tempfile.TemporaryDirectory(prefix="medreach-e2e-") as temp_dir:
+            csv_path = Path(temp_dir) / filename
             row_count, file_size = generate_synthetic_csv(
                 csv_path, args.minimum_size_mib * MIB
             )
@@ -191,7 +174,7 @@ def run_load_test(args: argparse.Namespace) -> dict:
             )
 
             signed_response = session.post(
-                f"{base_url}/api/uploads/generate-signed-url",
+                f"{base_url}/api/upload/generate-url",
                 json={"filename": filename, "content_type": "text/csv"},
                 timeout=30,
             )
@@ -212,7 +195,7 @@ def run_load_test(args: argparse.Namespace) -> dict:
                 )
             if not upload_response.ok:
                 raise RuntimeError(
-                    "Cloud Storage upload failed with "
+                    "Local streamed upload failed with "
                     f"HTTP {upload_response.status_code}."
                 )
 
@@ -221,6 +204,7 @@ def run_load_test(args: argparse.Namespace) -> dict:
                 json={
                     "object_name": object_name,
                     "skip_npi_validation": True,
+                    "skip_content_analysis": True,
                     "delete_source_on_success": True,
                 },
                 timeout=30,
@@ -257,8 +241,15 @@ def run_load_test(args: argparse.Namespace) -> dict:
                 raise TimeoutError(
                     f"Processing job {job_id} did not complete before the timeout."
                 )
-        finally:
-            monitor.stop()
+    finally:
+        monitor.stop()
+        if server_process.poll() is None:
+            server_process.terminate()
+            try:
+                server_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server_process.kill()
+                server_process.wait(timeout=10)
 
     if monitor.process_exited:
         raise RuntimeError("The FastAPI worker exited during the load test.")
@@ -290,17 +281,8 @@ def run_load_test(args: argparse.Namespace) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--base-url",
-        default=os.environ.get("MEDREACH_API_URL", "http://127.0.0.1:8000"),
-    )
-    parser.add_argument(
         "--company-id",
         default=os.environ.get("MEDREACH_COMPANY_ID", "load-test-company"),
-    )
-    parser.add_argument(
-        "--server-pid",
-        type=int,
-        default=int(os.environ.get("MEDREACH_SERVER_PID", "0")),
     )
     parser.add_argument("--minimum-size-mib", type=int, default=50)
     parser.add_argument("--timeout-seconds", type=int, default=1800)

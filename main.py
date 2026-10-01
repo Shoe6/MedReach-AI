@@ -1,12 +1,15 @@
 import csv
+import ipaddress
 import io
 import logging
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from firebase_admin import storage
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Header, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Header, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from google.cloud import storage as gcs_storage
@@ -15,7 +18,12 @@ from pydantic import BaseModel
 from auth import require_role
 from database import db
 from record_merge_service import merge_record_cluster
-from scrubbing_pipeline import DEFAULT_GCS_CHUNK_SIZE, scrub_provider_records, stream_scrubbed_gcs_csv
+from scrubbing_pipeline import (
+    DEFAULT_GCS_CHUNK_SIZE,
+    scrub_provider_records,
+    stream_scrubbed_gcs_csv,
+    stream_scrubbed_local_csv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +48,60 @@ PROCESSING_ROLES = ("editor", "admin", "super-admin")
 require_authenticated_editor = require_role(PROCESSING_ROLES)
 FIRESTORE_PAGE_SIZE = 500
 UPLOAD_BUCKET = "medreach-ai-uploads"
+LOCAL_E2E_MODE = os.getenv("MEDREACH_E2E_LOCAL_MODE") == "1"
+LOCAL_E2E_UID = "local-e2e-user"
+LOCAL_E2E_UPLOAD_DIR = Path(tempfile.gettempdir()) / "medreach-e2e-uploads"
+LOCAL_E2E_UPLOADS: dict[str, Path] = {}
+LOCAL_E2E_UPLOAD_TOKENS: dict[str, str] = {}
+LOCAL_E2E_JOBS: dict[str, dict] = {}
+
+if LOCAL_E2E_MODE and os.getenv("ENVIRONMENT", "").lower() != "development":
+    raise RuntimeError("Local E2E auth bypass requires ENVIRONMENT=development.")
+
+
+def _local_e2e_identity(request: Request) -> dict[str, str]:
+    client_host = request.client.host if request.client else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not LOCAL_E2E_MODE or not is_loopback:
+        raise HTTPException(status_code=403, detail="Local E2E access is restricted to loopback clients.")
+    return {"uid": LOCAL_E2E_UID, "role": "admin"}
+
+
+if LOCAL_E2E_MODE:
+    app.dependency_overrides[require_authenticated_editor] = _local_e2e_identity
+
+
+class _InMemoryJobSnapshot:
+    def __init__(self, data: dict | None):
+        self.exists = data is not None
+        self._data = data
+
+    def to_dict(self) -> dict | None:
+        return dict(self._data) if self._data is not None else None
+
+
+class _InMemoryJobReference:
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+
+    def set(self, data: dict) -> None:
+        LOCAL_E2E_JOBS[self.job_id] = dict(data)
+
+    def update(self, data: dict) -> None:
+        LOCAL_E2E_JOBS.setdefault(self.job_id, {}).update(data)
+
+    def get(self) -> _InMemoryJobSnapshot:
+        data = LOCAL_E2E_JOBS.get(self.job_id)
+        return _InMemoryJobSnapshot(dict(data) if data is not None else None)
+
+
+def _processing_job_reference(job_id: str):
+    if LOCAL_E2E_MODE:
+        return _InMemoryJobReference(job_id)
+    return db.collection("processing_jobs").document(job_id)
 
 
 def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
@@ -238,15 +300,18 @@ class SignedUrlPayload(BaseModel):
 class ProcessUploadPayload(BaseModel):
     object_name: str
     skip_npi_validation: bool = False
+    skip_content_analysis: bool = False
     delete_source_on_success: bool = False
 
 
+@app.post("/api/upload/generate-url", include_in_schema=False)
 @app.post("/api/uploads/generate-signed-url")
 async def generate_signed_upload_url(
     payload: SignedUrlPayload,
+    request: Request,
     user: dict = Depends(require_authenticated_editor),
 ):
-    """Generate an owner-scoped short-lived V4 URL for a raw CSV upload."""
+    """Generate an owner-scoped upload URL for a raw CSV upload."""
     filename = payload.filename.strip()
     if not filename or filename in {".", ".."} or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="A valid filename without path components is required.")
@@ -257,7 +322,18 @@ async def generate_signed_upload_url(
     if not owner_uid:
         raise HTTPException(status_code=401, detail="Authenticated user is missing a UID.")
 
-    object_name = f"raw_uploads/{owner_uid}/{uuid4()}_{filename}"
+    upload_token = str(uuid4())
+    object_name = f"raw_uploads/{owner_uid}/{upload_token}_{filename}"
+    if LOCAL_E2E_MODE:
+        LOCAL_E2E_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        LOCAL_E2E_UPLOADS[object_name] = LOCAL_E2E_UPLOAD_DIR / f"{upload_token}.csv"
+        LOCAL_E2E_UPLOAD_TOKENS[upload_token] = object_name
+        return {
+            "signed_url": f"{str(request.base_url).rstrip('/')}/api/e2e/local-uploads/{upload_token}",
+            "object_name": object_name,
+            "expires_in": 900,
+        }
+
     try:
         bucket = gcs_storage.Client().bucket(UPLOAD_BUCKET)
         blob = bucket.blob(object_name)
@@ -278,26 +354,67 @@ async def generate_signed_upload_url(
     }
 
 
+@app.put("/api/e2e/local-uploads/{upload_token}", include_in_schema=False)
+async def receive_local_e2e_upload(upload_token: str, request: Request):
+    """Stream a local-only test upload to disk without buffering the request."""
+    client_host = request.client.host if request.client else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not LOCAL_E2E_MODE or not is_loopback:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    object_name = LOCAL_E2E_UPLOAD_TOKENS.get(upload_token)
+    file_path = LOCAL_E2E_UPLOADS.get(object_name or "")
+    if not object_name or file_path is None:
+        raise HTTPException(status_code=404, detail="Local upload URL not found.")
+
+    uploaded_bytes = 0
+    try:
+        with file_path.open("wb") as output_file:
+            async for chunk in request.stream():
+                output_file.write(chunk)
+                uploaded_bytes += len(chunk)
+    except Exception:
+        file_path.unlink(missing_ok=True)
+        raise
+
+    return {"object_name": object_name, "uploaded_bytes": uploaded_bytes}
+
+
 async def _process_uploaded_csv_job(
     job_id: str,
     object_name: str,
     *,
     skip_npi_validation: bool,
+    skip_content_analysis: bool = False,
     delete_source_on_success: bool,
+    local_file: Path | None = None,
 ) -> None:
-    job_ref = db.collection("processing_jobs").document(job_id)
+    job_ref = _processing_job_reference(job_id)
     total_records = 0
     completed_batches = 0
     max_batch_records = 0
 
     try:
         job_ref.update({"status": "processing", "started_at": datetime.now(timezone.utc).isoformat()})
-        async for records in stream_scrubbed_gcs_csv(
-            object_name,
-            bucket_name=UPLOAD_BUCKET,
-            batch_size=DEFAULT_GCS_CHUNK_SIZE,
-            validate_npi=not skip_npi_validation,
-        ):
+        batches = (
+            stream_scrubbed_local_csv(
+                local_file,
+                batch_size=DEFAULT_GCS_CHUNK_SIZE,
+                validate_npi=not skip_npi_validation,
+                analyze_records=not skip_content_analysis,
+            )
+            if local_file is not None
+            else stream_scrubbed_gcs_csv(
+                object_name,
+                bucket_name=UPLOAD_BUCKET,
+                batch_size=DEFAULT_GCS_CHUNK_SIZE,
+                validate_npi=not skip_npi_validation,
+            )
+        )
+        async for records in batches:
             batch_records = len(records)
             total_records += batch_records
             completed_batches += 1
@@ -313,7 +430,12 @@ async def _process_uploaded_csv_job(
                 )
 
         if delete_source_on_success:
-            gcs_storage.Client().bucket(UPLOAD_BUCKET).blob(object_name).delete()
+            if local_file is not None:
+                local_file.unlink(missing_ok=True)
+                LOCAL_E2E_UPLOADS.pop(object_name, None)
+                LOCAL_E2E_UPLOAD_TOKENS.pop(Path(object_name).name.split("_", 1)[0], None)
+            else:
+                gcs_storage.Client().bucket(UPLOAD_BUCKET).blob(object_name).delete()
 
         job_ref.update(
             {
@@ -350,6 +472,7 @@ async def start_company_upload_processing(
     role = str(user.get("role") or "").strip().lower()
     object_name = payload.object_name.strip()
     owner_prefix = f"raw_uploads/{owner_uid}/"
+    local_file = LOCAL_E2E_UPLOADS.get(object_name) if LOCAL_E2E_MODE else None
 
     if not owner_uid:
         raise HTTPException(status_code=401, detail="Authenticated user is missing a UID.")
@@ -357,11 +480,15 @@ async def start_company_upload_processing(
         raise HTTPException(status_code=403, detail="The upload does not belong to the authenticated user.")
     if not object_name.lower().endswith(".csv") or ".." in object_name.split("/"):
         raise HTTPException(status_code=400, detail="A valid staged CSV object is required.")
+    if LOCAL_E2E_MODE and local_file is None:
+        raise HTTPException(status_code=404, detail="Local staged upload not found.")
     if payload.skip_npi_validation and role not in ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Skipping NPI validation is limited to administrators.")
+    if payload.skip_content_analysis and (not LOCAL_E2E_MODE or role not in ADMIN_ROLES):
+        raise HTTPException(status_code=403, detail="Skipping content analysis is limited to local E2E mode.")
 
     job_id = str(uuid4())
-    job_ref = db.collection("processing_jobs").document(job_id)
+    job_ref = _processing_job_reference(job_id)
     job_ref.set(
         {
             "job_id": job_id,
@@ -371,6 +498,7 @@ async def start_company_upload_processing(
             "status": "queued",
             "batch_size": DEFAULT_GCS_CHUNK_SIZE,
             "skip_npi_validation": payload.skip_npi_validation,
+            "skip_content_analysis": payload.skip_content_analysis,
             "completed_batches": 0,
             "records_processed": 0,
             "max_batch_records": 0,
@@ -382,7 +510,9 @@ async def start_company_upload_processing(
         job_id,
         object_name,
         skip_npi_validation=payload.skip_npi_validation,
+        skip_content_analysis=payload.skip_content_analysis,
         delete_source_on_success=payload.delete_source_on_success,
+        local_file=local_file,
     )
     return {"job_id": job_id, "company_id": company_id, "status": "queued"}
 
@@ -395,7 +525,7 @@ async def get_company_upload_processing_status(
 ):
     """Return processing status only to the user who staged the source object."""
     owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
-    snapshot = db.collection("processing_jobs").document(job_id).get()
+    snapshot = _processing_job_reference(job_id).get()
     job = snapshot.to_dict() if snapshot.exists else None
     if not job or job.get("owner_uid") != owner_uid or job.get("company_id") != company_id:
         raise HTTPException(status_code=404, detail="Processing job not found.")
@@ -411,6 +541,7 @@ async def get_company_upload_processing_status(
             "records_processed",
             "max_batch_records",
             "skip_npi_validation",
+            "skip_content_analysis",
             "error",
         )
         if key in job

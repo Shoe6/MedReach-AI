@@ -271,3 +271,103 @@ def test_background_processing_job_tracks_streamed_batch_totals():
     assert reference.data["completed_batches"] == 2
     assert reference.data["records_processed"] == 537
     assert reference.data["max_batch_records"] == 500
+
+
+def test_local_e2e_upload_runs_without_firebase_or_gcs():
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    csv_payload = (
+        b"NPI,First Name,Last Name,Taxonomy Code\n"
+        b"9000000001,Local,ProviderOne,207Q00000X\n"
+        b"9000000002,Local,ProviderTwo,207Q00000X\n"
+    )
+
+    async def exercise_local_flow(upload_dir):
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            signed = await client.post(
+                "/api/upload/generate-url",
+                json={"filename": "providers.csv", "content_type": "text/csv"},
+            )
+            assert signed.status_code == 200, signed.text
+            signed_payload = signed.json()
+            assert signed_payload["signed_url"].startswith(
+                "http://testserver/api/e2e/local-uploads/"
+            )
+
+            upload = await client.put(signed_payload["signed_url"], content=csv_payload)
+            assert upload.status_code == 200, upload.text
+            assert upload.json()["uploaded_bytes"] == len(csv_payload)
+
+            queued = await client.post(
+                "/api/companies/local-e2e/uploads/process",
+                json={
+                    "object_name": signed_payload["object_name"],
+                    "skip_npi_validation": True,
+                    "skip_content_analysis": True,
+                    "delete_source_on_success": True,
+                },
+            )
+            assert queued.status_code == 202, queued.text
+
+            status = await client.get(
+                f"/api/companies/local-e2e/uploads/process/{queued.json()['job_id']}"
+            )
+            assert status.status_code == 200, status.text
+            assert status.json()["status"] == "completed"
+            assert status.json()["records_processed"] == 2
+            assert status.json()["max_batch_records"] == 2
+
+    dependency_key = main_module.require_authenticated_editor
+    previous_override = app.dependency_overrides.get(dependency_key)
+    previous_local_mode = main_module.LOCAL_E2E_MODE
+    previous_upload_dir = main_module.LOCAL_E2E_UPLOAD_DIR
+    try:
+        with TemporaryDirectory() as temp_dir:
+            main_module.LOCAL_E2E_MODE = True
+            main_module.LOCAL_E2E_UPLOAD_DIR = Path(temp_dir)
+            main_module.LOCAL_E2E_UPLOADS.clear()
+            main_module.LOCAL_E2E_UPLOAD_TOKENS.clear()
+            main_module.LOCAL_E2E_JOBS.clear()
+            app.dependency_overrides[dependency_key] = lambda: {
+                "uid": main_module.LOCAL_E2E_UID,
+                "role": "admin",
+            }
+            asyncio.run(exercise_local_flow(Path(temp_dir)))
+    finally:
+        main_module.LOCAL_E2E_MODE = previous_local_mode
+        main_module.LOCAL_E2E_UPLOAD_DIR = previous_upload_dir
+        main_module.LOCAL_E2E_UPLOADS.clear()
+        main_module.LOCAL_E2E_UPLOAD_TOKENS.clear()
+        main_module.LOCAL_E2E_JOBS.clear()
+        if previous_override is None:
+            app.dependency_overrides.pop(dependency_key, None)
+        else:
+            app.dependency_overrides[dependency_key] = previous_override
+
+
+def test_local_e2e_auth_bypass_rejects_non_loopback_clients():
+    from fastapi import HTTPException, Request
+
+    previous_local_mode = main_module.LOCAL_E2E_MODE
+    request_scope = {
+        "type": "http",
+        "headers": [],
+        "method": "POST",
+        "path": "/api/upload/generate-url",
+        "query_string": b"",
+        "server": ("127.0.0.1", 8000),
+        "client": ("192.0.2.1", 12345),
+        "scheme": "http",
+    }
+    try:
+        main_module.LOCAL_E2E_MODE = True
+        try:
+            main_module._local_e2e_identity(Request(request_scope))
+        except HTTPException as exc:
+            assert exc.status_code == 403
+        else:
+            raise AssertionError("The local E2E auth bypass accepted a non-loopback client.")
+    finally:
+        main_module.LOCAL_E2E_MODE = previous_local_mode

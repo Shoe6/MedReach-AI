@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -96,16 +97,46 @@ async def stream_scrubbed_gcs_csv(
     blob = storage_client.bucket(bucket_name).blob(object_name)
 
     with blob.open("rb", chunk_size=4 * 1024 * 1024) as stream:
-        csv_batches = iter(pd.read_csv(stream, chunksize=batch_size, low_memory=False))
-        while True:
-            frame = await asyncio.to_thread(next, csv_batches, None)
-            if frame is None:
-                break
-            records = frame.to_dict(orient="records")
-            if validate_npi:
-                yield await scrub_provider_records(records)
-            else:
-                yield await asyncio.to_thread(_run_local_scrubbing, records)
+        async for batch in _scrub_csv_stream(stream, batch_size, validate_npi):
+            yield batch
+
+
+async def stream_scrubbed_local_csv(
+    file_path: str | Path,
+    *,
+    batch_size: int = DEFAULT_GCS_CHUNK_SIZE,
+    validate_npi: bool = False,
+    analyze_records: bool = True,
+) -> AsyncIterator[list[dict[str, Any]]]:
+    """Stream a local CSV in bounded batches for isolated development load tests."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be greater than zero")
+
+    with Path(file_path).open("rb") as stream:
+        async for batch in _scrub_csv_stream(
+            stream, batch_size, validate_npi, analyze_records
+        ):
+            yield batch
+
+
+async def _scrub_csv_stream(
+    stream,
+    batch_size: int,
+    validate_npi: bool,
+    analyze_records: bool = True,
+) -> AsyncIterator[list[dict[str, Any]]]:
+    csv_batches = iter(pd.read_csv(stream, chunksize=batch_size, low_memory=False))
+    while True:
+        frame = await asyncio.to_thread(next, csv_batches, None)
+        if frame is None:
+            break
+        records = frame.to_dict(orient="records")
+        if not analyze_records:
+            yield records
+        elif validate_npi:
+            yield await scrub_provider_records(records)
+        else:
+            yield await asyncio.to_thread(_run_local_scrubbing, records)
 
 
 __all__ = [
@@ -114,4 +145,5 @@ __all__ = [
     "OFFLINE_NPI_STATUS",
     "scrub_provider_records",
     "stream_scrubbed_gcs_csv",
+    "stream_scrubbed_local_csv",
 ]
