@@ -104,10 +104,10 @@ def test_authenticated_gcs_processing_jobs_are_owner_scoped():
         def __init__(self):
             self.data = None
 
-        def set(self, data):
+        def set(self, data, **kwargs):
             self.data = dict(data)
 
-        def update(self, data):
+        def update(self, data, **kwargs):
             self.data.update(data)
 
         def get(self):
@@ -227,7 +227,7 @@ def test_background_processing_job_tracks_streamed_batch_totals():
         def __init__(self):
             self.data = {}
 
-        def update(self, updates):
+        def update(self, updates, **kwargs):
             self.data.update(updates)
 
     class FakeCollection:
@@ -271,3 +271,25 @@ def test_background_processing_job_tracks_streamed_batch_totals():
     assert reference.data["completed_batches"] == 2
     assert reference.data["records_processed"] == 537
     assert reference.data["max_batch_records"] == 500
+
+
+def test_local_generate_upload_url_skips_gcs_signing_and_accepts_put():
+    assert main_module.USE_EMULATOR, "This test assumes emulator/dev mode (no real GCS credentials)."
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            url_response = await client.post(
+                "/api/upload/generate-url",
+                json={"company_id": "demo-company", "filename": "providers.csv", "content_type": "text/csv"},
+                headers={"X-User-Role": "editor"},
+            )
+            assert url_response.status_code == 200, url_response.text
+            payload = url_response.json()
+            assert payload["upload_url"].startswith("http://testserver/api/local-uploads/")
+
+            put_response = await client.put(payload["upload_url"], content=b"npi,first_name\n1234567890,Jane\n")
+            assert put_response.status_code == 200, put_response.text
+            assert put_response.json()["uploaded_bytes"] > 0
+
+    asyncio.run(exercise())

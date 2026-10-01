@@ -1,5 +1,8 @@
+import time
+
 from fastapi.testclient import TestClient
 
+import main as main_module
 from database import db
 from main import app
 
@@ -133,3 +136,65 @@ def test_merge_records_endpoint_logs_and_returns_execution_error(monkeypatch, ca
     assert response.status_code == 500
     assert response.json()["detail"] == "database unavailable"
     assert "Failed to merge company records" in caplog.text
+
+
+class _UnreachableNode:
+    """Mimics the Firestore client's chained collection()/document() calls,
+    raising only when a write is actually attempted."""
+
+    def collection(self, *args, **kwargs):
+        return self
+
+    def document(self, *args, **kwargs):
+        return self
+
+    def set(self, *args, **kwargs):
+        raise ConnectionError("[Errno 10061] Connection refused")
+
+
+def test_merge_records_endpoint_fails_fast_when_firestore_unreachable(monkeypatch):
+    monkeypatch.setattr(main_module, "db", _UnreachableNode())
+    monkeypatch.setattr(main_module, "ALLOW_OFFLINE_FIRESTORE_WRITES", False)
+
+    payload = {
+        "records": [
+            {"record_id": "r1", "name": "Provider One"},
+            {"record_id": "r2", "name": "Provider Two"},
+        ],
+        "master_record_id": "r1",
+    }
+
+    started = time.monotonic()
+    response = client.post(
+        "/api/companies/unreachable-company/records/merge",
+        json=payload,
+        headers={"X-User-Role": "admin"},
+    )
+    elapsed = time.monotonic() - started
+
+    assert response.status_code == 503
+    assert "Firestore is unreachable" in response.json()["detail"]
+    assert elapsed < 5, f"Expected a fast failure, took {elapsed:.1f}s"
+
+
+def test_merge_records_endpoint_skips_write_when_offline_bypass_enabled(monkeypatch):
+    monkeypatch.setattr(main_module, "db", _UnreachableNode())
+    monkeypatch.setattr(main_module, "USE_EMULATOR", True)
+    monkeypatch.setattr(main_module, "ALLOW_OFFLINE_FIRESTORE_WRITES", True)
+
+    payload = {
+        "records": [
+            {"record_id": "r1", "name": "Provider One"},
+            {"record_id": "r2", "name": "Provider Two"},
+        ],
+        "master_record_id": "r1",
+    }
+
+    response = client.post(
+        "/api/companies/offline-bypass-company/records/merge",
+        json=payload,
+        headers={"X-User-Role": "admin"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["merged_record"]["record_id"] == "r1"
