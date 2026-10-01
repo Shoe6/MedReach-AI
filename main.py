@@ -10,6 +10,8 @@ from firebase_admin import storage
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Header, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+import google.auth
+from google.auth.transport import requests as google_auth_requests
 from google.cloud import storage as gcs_storage
 from pydantic import BaseModel
 
@@ -42,6 +44,19 @@ PROCESSING_ROLES = ("editor", "admin", "super-admin")
 require_authenticated_editor = require_role(PROCESSING_ROLES)
 FIRESTORE_PAGE_SIZE = 500
 UPLOAD_BUCKET = "medreach-ai-uploads"
+IS_CLOUD_RUN = bool(os.environ.get("K_SERVICE"))
+
+
+def _iam_signing_kwargs() -> dict:
+    """On Cloud Run the attached service account has no private key, so
+    generate_signed_url must be told to sign via the IAM credentials API.
+    Local/dev runs use emulators and never reach real GCS, so skip this.
+    """
+    if not IS_CLOUD_RUN:
+        return {}
+    credentials, _ = google.auth.default()
+    credentials.refresh(google_auth_requests.Request())
+    return {"service_account_email": credentials.service_account_email, "access_token": credentials.token}
 
 
 def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
@@ -268,6 +283,7 @@ async def generate_signed_upload_url(
             expiration=timedelta(minutes=15),
             method="PUT",
             content_type=payload.content_type,
+            **_iam_signing_kwargs(),
         )
     except Exception as exc:
         logger.exception("Failed to generate signed upload URL")
@@ -615,6 +631,7 @@ async def generate_upload_url(
             expiration=timedelta(minutes=30),
             method="PUT",
             content_type=content_type,
+            **_iam_signing_kwargs(),
         )
 
     try:
