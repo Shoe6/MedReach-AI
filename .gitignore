@@ -2,9 +2,12 @@
 __pycache__/
 node_modules/
 .env
+.env.*
+!.env.example
 serviceAccountKey.json
 serviceAccountKey*.json
 dist/
+.firebase/
 DAC_NationalDownloadableFile.csv
 DOC_Data_Dictionary.pdf
 Facility_Affiliation.csv

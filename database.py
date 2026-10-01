@@ -16,7 +16,7 @@ if USE_EMULATOR:
 
 storage_bucket = os.environ.get(
 	"FIREBASE_STORAGE_BUCKET",
-	"demo-medreach-ai.appspot.com" if USE_EMULATOR else None,
+	"demo-medreach-ai.appspot.com" if USE_EMULATOR else "medreach-ai-uploads",
 )
 
 if not firebase_admin._apps:
