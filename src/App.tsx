@@ -2789,11 +2789,15 @@ function DataReviewScreen() {
   const piiFlags = processedRecords.flatMap((record, index) => {
     const flags: { id: number; record: string; field: string; type: string; severity: string; nullPct: number; originalRecord: Record<string, unknown> }[] = []
     const recordName = `${String(record.first_name || '')} ${String(record.last_name || '')}`.trim() || String(record.provider_id || record.npi || `Record ${index + 1}`)
+    const missingFields: string[] = []
     if (!String(record.email || record.email_address || '').trim()) {
-      flags.push({ id: index * 2, record: recordName, field: 'Email', type: 'Personal Identifier', severity: 'High', nullPct: 100, originalRecord: record })
+      missingFields.push('Email')
     }
     if (!String(record.phone || record.phone_number || '').trim()) {
-      flags.push({ id: index * 2 + 1, record: recordName, field: 'Phone', type: 'Personal Identifier', severity: 'High', nullPct: 100, originalRecord: record })
+      missingFields.push('Phone')
+    }
+    if (missingFields.length > 0) {
+      flags.push({ id: index, record: recordName, field: missingFields.join(', '), type: 'Personal Identifier', severity: 'High', nullPct: 100, originalRecord: record })
     }
     return flags
   })
