@@ -1,4 +1,4 @@
-import { useState, useEffect, ReactNode } from 'react'
+import { useState, useEffect, useCallback, ReactNode } from 'react'
 
 // ─── COLOR PALETTE (matches App.tsx) ──────────────────────────────────────────
 const C = {
@@ -111,35 +111,35 @@ export function ExecutiveMetricCards({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // Fetch metrics on component mount
-  useEffect(() => {
-    const fetchMetrics = async () => {
-      setLoading(true)
-      setError(null)
-      try {
-        const response = await globalThis.fetch(
-          `${apiBaseUrl}/api/companies/${encodeURIComponent(companyId)}/dashboard_metrics`
-        )
-        
-        if (!response.ok) {
-          throw new Error(`Failed to fetch metrics: ${response.statusText}`)
-        }
-        
-        const data: DashboardMetrics = await response.json()
-        setMetrics(data)
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-        setError(errorMessage)
-        globalThis.console.error('Failed to fetch dashboard metrics:', err)
-      } finally {
-        setLoading(false)
-      }
-    }
+  const fetchMetrics = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const response = await globalThis.fetch(
+        `${apiBaseUrl}/api/companies/${encodeURIComponent(companyId)}/dashboard_metrics`
+      )
 
+      if (!response.ok) {
+        throw new Error(`Failed to fetch metrics: ${response.statusText}`)
+      }
+
+      const data: DashboardMetrics = await response.json()
+      setMetrics(data)
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+      setError(errorMessage)
+      globalThis.console.error('Failed to fetch dashboard metrics:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [companyId, apiBaseUrl])
+
+  // Fetch metrics on component mount (and whenever the target company/API changes)
+  useEffect(() => {
     if (companyId) {
       fetchMetrics()
     }
-  }, [companyId, apiBaseUrl])
+  }, [companyId, fetchMetrics])
 
   // Show skeleton loaders while loading
   if (loading) {
@@ -160,13 +160,23 @@ export function ExecutiveMetricCards({
           <div className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: '#FEE2E2', color: C.danger }}>
             {Icon.alertTriangle}
           </div>
-          <div>
-            <p className="text-[14px] font-bold mb-1" style={{ color: C.danger }}>
-              Unable to load executive metrics
-            </p>
-            <p className="text-[12px]" style={{ color: C.darkText }}>
-              {error || 'No data available for this company.'}
-            </p>
+          <div className="flex-1 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-[14px] font-bold mb-1" style={{ color: C.danger }}>
+                Unable to load executive metrics
+              </p>
+              <p className="text-[12px]" style={{ color: C.darkText }}>
+                {error || 'No data available for this company.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={fetchMetrics}
+              className="text-[12px] font-bold px-3 py-1.5 rounded-[6px] flex-shrink-0"
+              style={{ color: C.navy, border: `1px solid ${C.border}`, background: 'white' }}
+            >
+              Retry
+            </button>
           </div>
         </div>
       </div>

@@ -34,7 +34,13 @@ app = FastAPI(title="MedReach AI Backend", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    # Vite auto-increments the port (5174, 5175, ...) if 5173 is already taken by
+    # another running instance, so allow the common local-dev port range too.
+    allow_origins=[
+        f"http://{host}:{port}"
+        for host in ("localhost", "127.0.0.1")
+        for port in range(5173, 5178)
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1005,10 +1011,12 @@ async def merge_company_records(company_id: str, payload: dict, _role: str = Dep
 
         merged = merge_record_cluster(scrubbed_records, master_record_id=master_record_id)
         master = merged["master_record"]
+        merged_at = datetime.now(timezone.utc).isoformat()
 
         records_ref = db.collection("companies").document(company_id).collection("records")
         master_id = str(master.get("record_id") or master_record_id or uuid4())
         master["record_id"] = master_id
+        master["merged_at"] = merged_at
         await _firestore_write(
             lambda: records_ref.document(master_id).set(
                 master, retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS
@@ -1019,6 +1027,7 @@ async def merge_company_records(company_id: str, payload: dict, _role: str = Dep
         for archived_record in merged["archived_records"]:
             archived_id = str(archived_record.get("record_id") or uuid4())
             archived_record["record_id"] = archived_id
+            archived_record["merged_at"] = merged_at
             await _firestore_write(
                 lambda archived_record=archived_record, archived_id=archived_id: records_ref.document(
                     archived_id
