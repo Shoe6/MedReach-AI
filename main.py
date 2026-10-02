@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from auth import require_role
 from database import db, USE_EMULATOR
+from data_health_score_service import calculate_data_health
 from bulk_approval_service import approve_low_severity_flags
 from record_merge_service import merge_record_cluster
 from scrubbing_pipeline import DEFAULT_GCS_CHUNK_SIZE, scrub_provider_records, stream_scrubbed_gcs_csv
@@ -841,19 +842,23 @@ async def upload_company_file(
 
 @app.get("/api/companies/{company_id}/dashboard_metrics")
 async def get_company_dashboard_metrics(company_id: str):
-    """Return executive metrics aggregated from the company's upload metadata.
+    """Score processed records, falling back to legacy upload metadata when absent.
 
     Firestore reads are offloaded to a thread and bounded by a short, retry-free
     deadline so an unreachable emulator can't block the event loop (and every
     other in-flight request) for the default ~60s gRPC deadline.
     """
-    def _fetch_uploads():
-        query = db.collection("companies").document(company_id).collection("uploads")
-        return list(query.stream(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS))
+    def _fetch_data():
+        company = db.collection("companies").document(company_id)
+        records = [document.to_dict() or {} for document in company.collection("records").stream(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)]
+        if records:
+            return records, []
+        uploads = list(company.collection("uploads").stream(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS))
+        return [], uploads
 
     try:
-        uploads = await asyncio.wait_for(
-            asyncio.to_thread(_fetch_uploads), timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS + 1
+        records, uploads = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_data), timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS + 1
         )
     except Exception:
         logger.warning("Firestore unreachable while fetching dashboard metrics for '%s'.", company_id)
@@ -863,6 +868,17 @@ async def get_company_dashboard_metrics(company_id: str):
             "data_health_score": 0.0,
             "unresolved_validation_flags": 0,
             "source": "offline_fallback",
+        }
+
+    if records:
+        scores = calculate_data_health(records)
+        return {
+            "company_id": company_id,
+            "total_healthcare_professionals": scores["record_count"],
+            "data_health_score": scores["quality_score"],
+            "unresolved_validation_flags": scores["flag_count"],
+            "pending_npi_count": scores["pending_npi_count"],
+            "score_categories": scores["score_categories"],
         }
 
     total_hcp = 0

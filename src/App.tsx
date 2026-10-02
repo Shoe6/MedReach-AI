@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, createContext, useContext, Fragment, type 
 import { useNavigate, useLocation } from 'react-router-dom'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
 import RecordDetailDashboard from './RecordDetailDashboard'
-import { contactFlags, hasReviewField, npiOutcome, reviewName, reviewScores, reviewValue } from './dataReview'
+import { contactFlags, hasReviewField, npiOutcome, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
 
 // Backend base URL — empty string means calls are relative (proxied via Firebase Hosting rewrites in prod)
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
@@ -2716,11 +2716,15 @@ function DataReviewScreen() {
   const [recordsLoading, setRecordsLoading] = useState(true)
   const [recordsError, setRecordsError] = useState<string | null>(null)
   const [recordsStatus, setRecordsStatus] = useState<number | null>(null)
-  const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
+  const [tab, setTab] = useState<'pii' | 'contacts' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
   // Map of PII id -> action ('anonymized'|'removed'|'override'|'approved')
-  const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override' | 'approved'>>(new Map())
+  const [resolvedPrivacy, setResolvedPrivacy] = useState<Map<number, 'anonymized' | 'removed' | 'override' | 'approved'>>(new Map())
+  const [resolvedContacts, setResolvedContacts] = useState<Map<number, 'anonymized' | 'removed' | 'override' | 'approved'>>(new Map())
+  const [resolvedPII, setResolvedPII] = tab === 'contacts'
+    ? [resolvedContacts, setResolvedContacts] as const
+    : [resolvedPrivacy, setResolvedPrivacy] as const
   // NPI validation resolution — lifted into ValidationContext so ExportScreen can gate export
   const { resolvedVal, setResolvedVal } = useValidation()
   // Outlier resolution — lifted into OutlierContext so Analytics + Export can read tagged records
@@ -2799,7 +2803,7 @@ function DataReviewScreen() {
 
   const severityRank = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
 
-  const piiFlags = contactFlags(processedRecords)
+  const piiFlags = tab === 'contacts' ? contactFlags(processedRecords) : privacyFlags(processedRecords)
 
   const VALIDATION_ERRORS = processedRecords.flatMap((record, index) => npiOutcome(record) === 'invalid' ? [{
     id: index,
@@ -2853,13 +2857,12 @@ function DataReviewScreen() {
 
   const scores = reviewScores(processedRecords)
   const TOTAL_ROWS = scores.total
-  const isTrue = (value: unknown) => value === true || value === -1 || ['true', '1', 'merged'].includes(String(value).toLowerCase())
   const processedOutliers = scores.outliers
   const processedDuplicates = scores.duplicates
   const processedPII = scores.contacts
-  const processedPrivacy = processedRecords.filter(record => isTrue(record.pii_flagged) || (Array.isArray(record.pii_detections) && record.pii_detections.length > 0)).length
+  const processedPrivacy = scores.privacy
   const processedNPIValidation = scores.invalidNpis
-  const unresolvedDataFlags = processedOutliers + processedDuplicates + processedPII + processedNPIValidation
+  const unresolvedDataFlags = processedOutliers + processedDuplicates + processedPII + processedNPIValidation + processedPrivacy
 
   const npiPoints = scores.npiPoints
   const piiPoints = scores.contactPoints
@@ -2869,7 +2872,8 @@ function DataReviewScreen() {
   const quality = scores.quality
 
   const tabs = [
-    { id: 'pii',        label: 'Contact Issues',       count: processedPII },
+    { id: 'pii',        label: 'PII / PHI',             count: processedPrivacy },
+    { id: 'contacts',   label: 'Contact Completeness',  count: processedPII },
     { id: 'duplicates', label: 'Duplicates',            count: processedDuplicates },
     { id: 'outliers',   label: 'Statistical Outliers',  count: processedOutliers },
     { id: 'validation', label: 'NPI Validation',        count: processedNPIValidation },
@@ -2920,7 +2924,7 @@ function DataReviewScreen() {
         <Banner type="warning">Provisional score: {scores.pendingNpis.toLocaleString()} of {TOTAL_ROWS.toLocaleString()} NPIs await registry validation. Unavailable validation is not counted as an error.</Banner>
       )}
       {processedPrivacy > 0 && (
-        <Banner type="warning">Sensitive identifiers detected in {processedPrivacy.toLocaleString()} records. Privacy review remains required; identifier presence alone does not reduce data quality.</Banner>
+        <Banner type="warning">PII / PHI detected in {processedPrivacy.toLocaleString()} records. These records reduce the dedicated 20-point privacy score.</Banner>
       )}
 
       {/* ── Data Health Score bar ── */}
@@ -2931,10 +2935,11 @@ function DataReviewScreen() {
         const totalFlags = unresolvedDataFlags
 
         const segments = [
-          { label: 'NPI Validation', pts: npiPoints,  max: 30, resolved: 0, total: processedNPIValidation, color: C.navy },
-          { label: 'Contact Completeness', pts: piiPoints, max: 25, resolved: 0, total: processedPII,    color: C.corpBlue },
-          { label: 'Duplicates',     pts: dupPoints,  max: 25, resolved: 0, total: processedDuplicates,   color: C.teal },
+          { label: 'NPI Validation', pts: npiPoints,  max: 20, resolved: 0, total: processedNPIValidation, color: C.navy },
+          { label: 'Contact Completeness', pts: piiPoints, max: 20, resolved: 0, total: processedPII,    color: C.corpBlue },
+          { label: 'Duplicates',     pts: dupPoints,  max: 20, resolved: 0, total: processedDuplicates,   color: C.teal },
           { label: 'Outliers',       pts: outPoints,  max: 20, resolved: 0, total: processedOutliers,     color: '#5C85C4' },
+          { label: 'PII / PHI', pts: scores.privacyPoints, max: 20, resolved: 0, total: processedPrivacy, color: C.danger },
         ]
 
         return (
@@ -2993,7 +2998,7 @@ function DataReviewScreen() {
             </div>
 
             {/* Per-category sub-bars */}
-            <div className="grid grid-cols-4 gap-3 mt-4 pt-4 border-t border-[#EDF2F7]">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3 mt-4 pt-4 border-t border-[#EDF2F7]">
               {segments.map(seg => {
                 const pct = Math.round((seg.pts / seg.max) * 100)
                 return (
@@ -3001,7 +3006,7 @@ function DataReviewScreen() {
                     <div className="flex justify-between items-center mb-1">
                       <span className="text-[10px] font-semibold" style={{ color: C.midText }}>{seg.label}</span>
                       <span className="text-[10px] font-bold mono" style={{ color: seg.color }}>
-                        {Math.round(seg.pts * 10) / 10}<span style={{ color: C.midText, fontWeight: 400 }}>/{seg.max}</span>
+                        {Math.round(seg.pts * 10) / 10}<span style={{ color: C.midText, fontWeight: 400 }}> / {seg.max} pts</span>
                       </span>
                     </div>
                     <div className="progress-track" style={{ height: 6 }}>
@@ -3026,7 +3031,7 @@ function DataReviewScreen() {
       })()}
 
       {/* Tabs */}
-      <div className="border-b-2 border-[#EDF2F7] mb-6 flex gap-1">
+      <div className="border-b-2 border-[#EDF2F7] mb-6 flex flex-wrap gap-1">
         {tabs.map(t => (
           <button
             key={t.id}
@@ -3051,9 +3056,9 @@ function DataReviewScreen() {
       </div>
 
       {/* ── PII / PHI FLAGS TAB ──────────────────────────────────────────────── */}
-      {tab === 'pii' && (
+      {(tab === 'pii' || tab === 'contacts') && (
         <Card>
-          <NullSummaryBar tab="pii" records={processedRecords} />
+          {tab === 'contacts' && <NullSummaryBar tab="pii" records={processedRecords} />}
 
           {(() => {
             const lowSeverityIds = sortedPII.filter(f => f.severity === 'Low' && !resolvedPII.has(f.id)).map(f => f.id)
@@ -3111,9 +3116,9 @@ function DataReviewScreen() {
                 </th>
                 <SortTh label="Record"   sortKey="record"   current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
                 <SortTh label="Field"    sortKey="field"    current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
-                <th>Issue Type</th>
+                <th>{tab === 'pii' ? 'PII / PHI Type' : 'Issue Type'}</th>
                 <SortTh label="Severity" sortKey="severity" current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
-                <SortTh label="Null %"   sortKey="nullPct"  current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                {tab === 'contacts' && <SortTh label="Null %" sortKey="nullPct" current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />}
                 <th>Action</th>
               </tr>
             </thead>
@@ -3131,7 +3136,7 @@ function DataReviewScreen() {
                           setSelected(s)
                         }} />
                     </td>
-                    <td className="font-medium"><span onClick={(event) => { event.stopPropagation(); setSelectedRecord(f.originalRecord || f); console.log("Bottom table name clicked! Selected:", f.originalRecord || f) }} style={{ cursor: 'pointer', color: '#0066cc', textDecoration: 'underline', fontWeight: 'bold' }}>{f.record}</span></td>
+                    <td className="font-medium"><span onClick={(event) => { event.stopPropagation(); setSelectedRecord(f.originalRecord) }} style={{ cursor: 'pointer', color: '#0066cc', textDecoration: 'underline', fontWeight: 'bold' }}>{f.record}</span></td>
                     <td className="mono">{f.field}</td>
                     <td>{f.type}</td>
                     <td>
@@ -3139,7 +3144,7 @@ function DataReviewScreen() {
                         {f.severity}
                       </Badge>
                     </td>
-                    <td><NullPctBadge pct={f.nullPct} /></td>
+                    {tab === 'contacts' && <td><NullPctBadge pct={f.nullPct} /></td>}
                     <td>
                       {resolved ? (
                         action === 'anonymized' ? <Badge tier={1} color="success">Anonymized</Badge>
