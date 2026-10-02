@@ -3,9 +3,12 @@ import firebase_admin
 from dotenv import load_dotenv
 from firebase_admin import credentials, firestore, storage
 
-load_dotenv()
-
 IS_CLOUD_RUN = bool(os.environ.get("K_SERVICE"))
+if IS_CLOUD_RUN:
+	for variable in ("FIRESTORE_EMULATOR_HOST", "FIREBASE_AUTH_EMULATOR_HOST", "FIREBASE_STORAGE_EMULATOR_HOST", "STORAGE_EMULATOR_HOST"):
+		os.environ.pop(variable, None)
+else:
+	load_dotenv()
 USE_EMULATOR = not IS_CLOUD_RUN and os.environ.get("USE_FIRESTORE_EMULATOR", "true").lower() != "false"
 
 if USE_EMULATOR:

@@ -40,6 +40,9 @@ app.add_middleware(
         f"http://{host}:{port}"
         for host in ("localhost", "127.0.0.1")
         for port in range(5173, 5178)
+    ] + [
+        "https://medreachai-679aa.web.app",
+        "https://medreachai-679aa.firebaseapp.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -57,7 +60,7 @@ GCS_SIGNING_TIMEOUT_SECONDS = 10
 LOCAL_UPLOAD_DIR = Path(tempfile.gettempdir()) / "medreach-local-uploads"
 LOCAL_UPLOAD_PATHS: dict[str, Path] = {}
 FIRESTORE_WRITE_TIMEOUT_SECONDS = 3.0
-ALLOW_OFFLINE_FIRESTORE_WRITES = os.getenv("MEDREACH_ALLOW_OFFLINE_FIRESTORE", "false").strip().lower() in (
+ALLOW_OFFLINE_FIRESTORE_WRITES = not IS_CLOUD_RUN and os.getenv("MEDREACH_ALLOW_OFFLINE_FIRESTORE", "false").strip().lower() in (
     "1",
     "true",
     "yes",
@@ -180,7 +183,7 @@ async def health_check():
             asyncio.to_thread(lambda: list(db.collections())),
             timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
         )
-        return {"status": "healthy", "database": "emulator_connected"}
+        return {"status": "healthy", "database": "emulator_connected" if USE_EMULATOR else "firestore_connected"}
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
