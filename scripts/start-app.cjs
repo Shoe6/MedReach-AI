@@ -9,13 +9,15 @@ const services = [
     name: 'Firebase emulators',
     port: 4000,
     command: commandShell || 'firebase',
-    args: commandShell ? ['/d', '/s', '/c', 'firebase emulators:start'] : ['emulators:start'],
+    args: commandShell
+      ? ['/d', '/s', '/c', 'firebase emulators:start --only auth,firestore']
+      : ['emulators:start', '--only', 'auth,firestore'],
   },
   {
     name: 'FastAPI',
-    port: 8000,
+    port: 8010,
     command: path.join(root, 'backend-dev', 'venv', 'Scripts', 'python.exe'),
-    args: ['-m', 'uvicorn', 'main:app', '--port', '8000'],
+    args: ['-m', 'uvicorn', 'main:app', '--port', '8010'],
   },
   {
     name: 'Vite frontend',

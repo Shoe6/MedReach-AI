@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, createContext, useContext, Fragment, type 
 import { useNavigate, useLocation } from 'react-router-dom'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
 import RecordDetailDashboard from './RecordDetailDashboard'
+import { contactFlags, hasReviewField, npiOutcome, reviewName, reviewScores, reviewValue } from './dataReview'
 
 // Backend base URL — empty string means calls are relative (proxied via Firebase Hosting rewrites in prod)
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
@@ -1544,6 +1545,7 @@ interface ParseError {
 
 interface ExportResponse {
   records: Record<string, unknown>[]
+  next_cursor?: string
 }
 
 const MOCK_PARSE_ERRORS: ParseError[] = [
@@ -2668,16 +2670,24 @@ function NullPctBadge({ pct }: { pct: number }) {
 // ── Null completeness summary bar ─────────────────────────────────────────────
 function NullSummaryBar({ tab, records = [] }: { tab: string; records?: Record<string, unknown>[] }) {
   const totalRecords = records.length || 1
-  const emailNullCount = records.filter(record => !record.email).length
-  const phoneNullCount = records.filter(record => !record.phone).length
-  const emailNullPercent = Math.round((emailNullCount / totalRecords) * 100)
-  const phoneNullPercent = Math.round((phoneNullCount / totalRecords) * 100)
+  const emailSupplied = hasReviewField(records, 'email')
+  const phoneSupplied = hasReviewField(records, 'phone')
+  const emailNullCount = records.filter(record => !reviewValue(record, 'email')).length
+  const phoneNullCount = records.filter(record => !reviewValue(record, 'phone')).length
+  const emailNullPercent = Math.round((emailNullCount / totalRecords) * 1000) / 10
+  const phoneNullPercent = Math.round((phoneNullCount / totalRecords) * 1000) / 10
   const fields = tab === 'pii'
     ? [
-        { field: 'Email', nullPct: emailNullPercent },
-        { field: 'Phone', nullPct: phoneNullPercent },
+        { field: 'Email', nullPct: emailSupplied ? emailNullPercent : null },
+        { field: 'Phone', nullPct: phoneSupplied ? phoneNullPercent : null },
       ]
-    : NULL_SUMMARIES[tab]
+    : tab === 'validation'
+      ? [
+          { field: 'NPI Number', nullPct: Math.round(records.filter(record => !reviewValue(record, 'npi')).length / totalRecords * 1000) / 10 },
+          { field: 'Specialty', nullPct: Math.round(records.filter(record => !String(record.specialty || record.pri_spec || '').trim()).length / totalRecords * 1000) / 10 },
+          { field: 'State', nullPct: Math.round(records.filter(record => !String(record.state || record.State || '').trim()).length / totalRecords * 1000) / 10 },
+        ]
+      : NULL_SUMMARIES[tab]
   if (!fields) return null
   return (
     <div className="flex flex-wrap gap-4 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
@@ -2686,12 +2696,12 @@ function NullSummaryBar({ tab, records = [] }: { tab: string; records?: Record<s
         <div key={f.field} className="flex flex-col gap-0.5" style={{ minWidth: 90 }}>
           <div className="flex items-center justify-between gap-2">
             <span className="text-[10px]" style={{ color: C.midText }}>{f.field}</span>
-            <NullPctBadge pct={f.nullPct} />
+            {f.nullPct === null ? <span className="text-[10px]" style={{ color: C.midText }}>Not supplied</span> : <NullPctBadge pct={f.nullPct} />}
           </div>
           <div className="progress-track" style={{ height: 4 }}>
             <div className="progress-fill" style={{
-              width: `${100 - f.nullPct}%`,
-              background: f.nullPct === 0 ? C.success : f.nullPct <= 5 ? C.warning : C.danger,
+              width: `${f.nullPct === null ? 0 : 100 - f.nullPct}%`,
+              background: f.nullPct === null ? C.border : f.nullPct === 0 ? C.success : f.nullPct <= 5 ? C.warning : C.danger,
             }} />
           </div>
         </div>
@@ -2731,23 +2741,26 @@ function DataReviewScreen() {
   useEffect(() => {
     const loadProcessedRecords = async () => {
       try {
-        const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/export_data`)
-        if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
-        const contentType = response.headers.get('content-type') || ''
-        if (contentType.includes('json')) {
-          const data = await response.json() as ExportResponse
-          console.log("Backend Export Response:", data);
-          if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
-          setProcessedRecords(data.records)
-        } else {
-          const payload = await response.text()
-          const [headerLine, ...lines] = payload.trim().split(/\r?\n/)
-          const headers = headerLine ? headerLine.split(',') : []
-          setProcessedRecords(lines.filter(Boolean).map(line => {
-            const values = line.split(',')
-            return Object.fromEntries(headers.map((header, index) => [header, values[index] || '']))
-          }))
-        }
+        const records: Record<string, unknown>[] = []
+        const cursors = new Set<string>()
+        let cursor: string | undefined
+        do {
+          const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+          const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
+          if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
+          if ((response.headers.get('content-type') || '').includes('json')) {
+            const data = await response.json() as ExportResponse
+            if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
+            records.push(...data.records)
+            cursor = data.next_cursor
+            if (cursor && cursors.has(cursor)) throw new Error('Export returned a repeated pagination cursor')
+            if (cursor) cursors.add(cursor)
+          } else {
+            records.push(...parseCsvRecords(await response.text(), { header: true, skipEmptyLines: true }))
+            cursor = undefined
+          }
+        } while (cursor)
+        setProcessedRecords(records)
       } catch (error) {
         setRecordsStatus(error instanceof HttpError ? error.status : null)
         setRecordsError(error instanceof Error ? error.message : 'Unable to load processed records')
@@ -2786,21 +2799,17 @@ function DataReviewScreen() {
 
   const severityRank = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
 
-  const piiFlags = processedRecords.flatMap((record, index) => {
-    const flags: { id: number; record: string; field: string; type: string; severity: string; nullPct: number; originalRecord: Record<string, unknown> }[] = []
-    const recordName = `${String(record.first_name || '')} ${String(record.last_name || '')}`.trim() || String(record.provider_id || record.npi || `Record ${index + 1}`)
-    const missingFields: string[] = []
-    if (!String(record.email || record.email_address || '').trim()) {
-      missingFields.push('Email')
-    }
-    if (!String(record.phone || record.phone_number || '').trim()) {
-      missingFields.push('Phone')
-    }
-    if (missingFields.length > 0) {
-      flags.push({ id: index, record: recordName, field: missingFields.join(', '), type: 'Personal Identifier', severity: 'High', nullPct: 100, originalRecord: record })
-    }
-    return flags
-  })
+  const piiFlags = contactFlags(processedRecords)
+
+  const VALIDATION_ERRORS = processedRecords.flatMap((record, index) => npiOutcome(record) === 'invalid' ? [{
+    id: index,
+    record: reviewName(record, index),
+    npi: reviewValue(record, 'npi'),
+    specialty: String(record.specialty || record.pri_spec || 'Not reported'),
+    state: String(record.state || record.State || 'Not reported'),
+    issue: String(record.npi_status || record.validation_status || 'Missing or malformed NPI'),
+    issueType: 'Invalid', severity: 'High', nullPct: reviewValue(record, 'npi') ? 0 : 100,
+  }] : [])
 
   // ── sorted data ──────────────────────────────────────────────────────────
   const sortedPII = [...piiFlags].sort((a, b) => {
@@ -2842,59 +2851,25 @@ function DataReviewScreen() {
     return 0
   })
 
-  // ── Data Health Score (0–100) ───────────────────────────────────────────
-  // Each category contributes a weighted share. Within each category flags are
-  // weighted by severity so resolving High > Medium > Low flags scores more.
-  // Base score of 100 is penalised by unresolved flags, then capped 0–100.
-  const TOTAL_ROWS = processedRecords.length
+  const scores = reviewScores(processedRecords)
+  const TOTAL_ROWS = scores.total
   const isTrue = (value: unknown) => value === true || value === -1 || ['true', '1', 'merged'].includes(String(value).toLowerCase())
-  const processedOutliers = processedRecords.filter(record => record.anomaly_flag === -1 || record.anomaly_flag === '-1' || record.is_anomaly === true || record.is_anomaly === 'true').length
-  const processedDuplicates = processedRecords.filter(record => isTrue(record.is_duplicate) || isTrue(record.merged_from_sources) || record.deduplication_status === 'merged').length
-  // Prefer the backend's PII/NPI detectors (pii_flagged, npi_status) when present;
-  // fall back to raw-field completeness only for records the scrubber never touched.
-  const processedPII = processedRecords.filter(record => {
-    if (record.pii_flagged !== undefined) return isTrue(record.pii_flagged)
-    if (Array.isArray(record.pii_detections)) return record.pii_detections.length > 0
-    return !String(record.email || record.email_address || '').trim() || !String(record.phone || record.phone_number || '').trim()
-  }).length
-  const processedNPIValidation = processedRecords.filter(record => {
-    const status = safeText(record.npi_status) ?? safeText(record.validation_status)
-    if (status) return status.toLowerCase() !== 'active'
-    return !String(record.npi || record.NPI || '').trim() || !String(record.payer_name || record.payerName || '').trim()
-  }).length
+  const processedOutliers = scores.outliers
+  const processedDuplicates = scores.duplicates
+  const processedPII = scores.contacts
+  const processedPrivacy = processedRecords.filter(record => isTrue(record.pii_flagged) || (Array.isArray(record.pii_detections) && record.pii_detections.length > 0)).length
+  const processedNPIValidation = scores.invalidNpis
   const unresolvedDataFlags = processedOutliers + processedDuplicates + processedPII + processedNPIValidation
 
-  const scoreCategory = (
-    flags: { severity: string; id: number }[],
-    resolved: Map<number, unknown>,
-    weight: number               // max points this category can contribute
-  ) => {
-    if (flags.length === 0) return weight
-    const sev = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
-    const totalWeight  = flags.reduce((a, f) => a + sev(f.severity), 0)
-    const earnedWeight = flags
-      .filter(f => resolved.has(f.id))
-      .reduce((a, f) => a + sev(f.severity), 0)
-    return (earnedWeight / totalWeight) * weight
-  }
+  const npiPoints = scores.npiPoints
+  const piiPoints = scores.contactPoints
+  const dupPoints = scores.duplicatePoints
+  const outPoints = scores.outlierPoints
 
-  // Category weights: NPI (30) > PII (25) > Duplicates (25) > Outliers (20)
-  const liveRatio = TOTAL_ROWS === 0 ? 0 : Math.min(1, unresolvedDataFlags / TOTAL_ROWS)
-  const npiPoints = TOTAL_ROWS > 0 ? 30 * (1 - processedNPIValidation / TOTAL_ROWS) : 0
-  const piiPoints = TOTAL_ROWS > 0 ? 25 * (1 - processedPII / TOTAL_ROWS) : 0
-  const dupPoints = TOTAL_ROWS > 0 ? 25 * (1 - processedDuplicates / TOTAL_ROWS) : 0
-  const outPoints = TOTAL_ROWS > 0 ? 20 * (1 - processedOutliers / TOTAL_ROWS) : 0
-
-  // Flag-density penalty: reduce base by up to 5 pts if many flags per 1k rows
-  const totalFlags = unresolvedDataFlags
-  const densityPenalty = liveRatio * 100
-
-  const quality = Math.min(100, Math.max(0,
-    Math.round(100 - densityPenalty)
-  ))
+  const quality = scores.quality
 
   const tabs = [
-    { id: 'pii',        label: 'PII / PHI Flags',      count: processedPII },
+    { id: 'pii',        label: 'Contact Issues',       count: processedPII },
     { id: 'duplicates', label: 'Duplicates',            count: processedDuplicates },
     { id: 'outliers',   label: 'Statistical Outliers',  count: processedOutliers },
     { id: 'validation', label: 'NPI Validation',        count: processedNPIValidation },
@@ -2941,6 +2916,13 @@ function DataReviewScreen() {
 
       <RecordDetailDashboard records={processedRecords} selectedRecord={selectedRecord} onSelectRecord={setSelectedRecord} />
 
+      {scores.pendingNpis > 0 && (
+        <Banner type="warning">Provisional score: {scores.pendingNpis.toLocaleString()} of {TOTAL_ROWS.toLocaleString()} NPIs await registry validation. Unavailable validation is not counted as an error.</Banner>
+      )}
+      {processedPrivacy > 0 && (
+        <Banner type="warning">Sensitive identifiers detected in {processedPrivacy.toLocaleString()} records. Privacy review remains required; identifier presence alone does not reduce data quality.</Banner>
+      )}
+
       {/* ── Data Health Score bar ── */}
       {(() => {
         const scoreColor = quality >= 85 ? C.success : quality >= 65 ? C.corpBlue : quality >= 45 ? C.warning : C.danger
@@ -2950,7 +2932,7 @@ function DataReviewScreen() {
 
         const segments = [
           { label: 'NPI Validation', pts: npiPoints,  max: 30, resolved: 0, total: processedNPIValidation, color: C.navy },
-          { label: 'PII / PHI',      pts: piiPoints,  max: 25, resolved: 0, total: processedPII,           color: C.corpBlue },
+          { label: 'Contact Completeness', pts: piiPoints, max: 25, resolved: 0, total: processedPII,    color: C.corpBlue },
           { label: 'Duplicates',     pts: dupPoints,  max: 25, resolved: 0, total: processedDuplicates,   color: C.teal },
           { label: 'Outliers',       pts: outPoints,  max: 20, resolved: 0, total: processedOutliers,     color: '#5C85C4' },
         ]
@@ -2960,7 +2942,7 @@ function DataReviewScreen() {
             {/* Header row */}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-3">
-                <span className="text-[13px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Health Score</span>
+                <span className="text-[13px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Health Score{scores.pendingNpis > 0 ? ' (Provisional)' : ''}</span>
                 <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
                   style={{ background: quality >= 85 ? '#E8F5EF' : quality >= 65 ? '#EBF4FA' : quality >= 45 ? '#FEF3C7' : '#FEE2E2',
                            color: scoreColor }}>
@@ -3129,7 +3111,7 @@ function DataReviewScreen() {
                 </th>
                 <SortTh label="Record"   sortKey="record"   current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
                 <SortTh label="Field"    sortKey="field"    current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
-                <th>PII / PHI Type</th>
+                <th>Issue Type</th>
                 <SortTh label="Severity" sortKey="severity" current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
                 <SortTh label="Null %"   sortKey="nullPct"  current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
                 <th>Action</th>
@@ -3591,6 +3573,9 @@ function DataReviewScreen() {
                 <strong>Export blocked:</strong> {openHigh.length} High-severity NPI error{openHigh.length > 1 ? 's' : ''} ({openHigh.map(v => v.issueType).join(', ')}) must be resolved before dataset export is permitted. Remove the record or submit an Override with justification.
               </Banner>
             )
+            if (scores.pendingNpis > 0) return (
+              <Banner type="warning">Registry validation is incomplete. No confirmed High-severity NPI errors are currently reported.</Banner>
+            )
             if (resolvedVal.size === VALIDATION_ERRORS.length) return (
               <Banner type="success">All NPI validation errors resolved — dataset export is unlocked.</Banner>
             )
@@ -3599,8 +3584,8 @@ function DataReviewScreen() {
             )
           })()}
 
-          <Banner type="warning">NPI Registry is temporarily unavailable. 847 records marked pending. Will auto-retry in 5 minutes.</Banner>
-          <NullSummaryBar tab="validation" />
+          {scores.pendingNpis > 0 && <Banner type="warning">{scores.pendingNpis.toLocaleString()} NPIs await registry validation. They are not confirmed errors.</Banner>}
+          <NullSummaryBar tab="validation" records={processedRecords} />
 
           {(() => {
             const lowSeverityIds = VALIDATION_ERRORS.filter(v => v.severity === 'Low' && !resolvedVal.has(v.id)).map(v => v.id)
