@@ -31,6 +31,11 @@ def _get_ingest():
     from ingestion import ingest_csv_chunks
     return ingest_csv_chunks
 
+def _get_duplicate_detector():
+    """Lazy import so the app can start even when pandas is not installed."""
+    from ingestion import detect_duplicate_clusters
+    return detect_duplicate_clusters
+
 app = FastAPI(title="MedReach AI Backend", version="1.0")
 
 app.add_middleware(
@@ -1027,6 +1032,15 @@ async def merge_company_records(company_id: str, payload: dict, _role: str = Dep
         # real quality signals instead of raw-field heuristics (this endpoint is
         # the one the real upload flow calls; other upload paths already scrub).
         scrubbed_records = await scrub_provider_records(records)
+
+        # Duplicate-cluster detection was previously only computed by the legacy
+        # multipart /upload_file path and never reached Firestore here, so every
+        # record from the real upload flow silently reported zero duplicates.
+        duplicate_row_indexes: set[int] = set()
+        for cluster in _get_duplicate_detector()(scrubbed_records):
+            duplicate_row_indexes.update(entry["row_index"] for entry in cluster["records"])
+        for index, record in enumerate(scrubbed_records):
+            record["is_duplicate"] = index in duplicate_row_indexes
 
         merged = merge_record_cluster(scrubbed_records, master_record_id=master_record_id)
         master = merged["master_record"]
