@@ -166,7 +166,9 @@ export function ExecutiveMetricCards({
                 Unable to load executive metrics
               </p>
               <p className="text-[12px]" style={{ color: C.darkText }}>
-                {error || 'No data available for this company.'}
+                {metrics === null && !error
+                  ? 'No data available for this company yet.'
+                  : "We couldn't reach the server. Check your connection and try again."}
               </p>
             </div>
             <button
