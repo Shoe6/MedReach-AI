@@ -1882,7 +1882,7 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
               <p className="text-[15px] font-semibold mb-1" style={{ color: uploadState === 'dragging' ? C.corpBlue : C.navy }}>
                 {uploadState === 'dragging' ? 'Drop to upload' : 'Drag CSV or XLSX here, or click to browse'}
               </p>
-              <p className="text-[12px]" style={{ color: C.midText }}>Supports CSV, XLSX · Up to 1 M rows</p>
+              <p className="text-[12px]" style={{ color: C.midText }}>Supports CSV, XLSX · Up to 1 GB per file</p>
               {uploadState === 'dragging' && (
                 <Badge tier={1} color="info" className="mt-3">Release to begin upload</Badge>
               )}

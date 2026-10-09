@@ -115,6 +115,32 @@ def test_merge_records_endpoint_persists_every_incoming_record():
     }
 
 
+def test_merge_records_endpoint_flags_true_duplicate_clusters_only():
+    """Regression test: the real upload flow (records/merge) previously never set
+    is_duplicate at all, so the Duplicates category/tab always read zero for
+    genuinely uploaded data. Same NPI twice should be flagged; a distinct NPI
+    should not."""
+    company_id = "test-merge-duplicate-flagging-company"
+    payload = {
+        "records": [
+            {"record_id": "dup-1", "npi": "1111111111", "name": "Provider A"},
+            {"record_id": "dup-2", "npi": "1111111111", "name": "Provider A Clone"},
+            {"record_id": "unique-1", "npi": "2222222222", "name": "Provider B"},
+        ],
+    }
+
+    response = client.post(f"/api/companies/{company_id}/records/merge", json=payload, headers={"X-User-Role": "admin"})
+
+    assert response.status_code == 200, response.text
+    records = {
+        record.to_dict()["record_id"]: record.to_dict()
+        for record in db.collection("companies").document(company_id).collection("records").stream()
+    }
+    assert records["dup-1"]["is_duplicate"] is True
+    assert records["dup-2"]["is_duplicate"] is True
+    assert records["unique-1"]["is_duplicate"] is False
+
+
 def test_merge_records_endpoint_requires_records_field():
     response = client.post("/api/companies/test-merge-company/records/merge", json={}, headers={"X-User-Role": "admin"})
 
