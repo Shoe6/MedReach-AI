@@ -4803,59 +4803,118 @@ function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
 
 // ─── DATA HEATMAP ─────────────────────────────────────────────────────────────
 
-const HEATMAP_FIELDS: {
+type CellStatus = 'complete' | 'partial' | 'invalid' | 'pending' | 'missing'
+
+interface HeatmapField {
+  key: string
   name: string
   required: boolean
-  nullPct: number         // % of records where field is missing
-  invalidPct: number      // % of records where field fails validation
-  partialPct: number      // % partially filled
-}[] = [
-  { name: 'NPI',        required: true,  nullPct: 0,  invalidPct: 4,  partialPct: 0  },
-  { name: 'First Name', required: true,  nullPct: 0,  invalidPct: 0,  partialPct: 1  },
-  { name: 'Last Name',  required: true,  nullPct: 0,  invalidPct: 0,  partialPct: 0  },
-  { name: 'Specialty',  required: false, nullPct: 3,  invalidPct: 2,  partialPct: 4  },
-  { name: 'State',      required: false, nullPct: 2,  invalidPct: 1,  partialPct: 0  },
-  { name: 'Email',      required: false, nullPct: 14, invalidPct: 6,  partialPct: 3  },
-  { name: 'Phone',      required: false, nullPct: 18, invalidPct: 3,  partialPct: 8  },
-  { name: 'ZIP Code',   required: false, nullPct: 9,  invalidPct: 2,  partialPct: 5  },
-  { name: 'DEA #',      required: false, nullPct: 31, invalidPct: 1,  partialPct: 4  },
-  { name: 'Address',    required: false, nullPct: 22, invalidPct: 0,  partialPct: 11 },
-]
-
-type CellStatus = 'complete' | 'partial' | 'invalid' | 'missing'
-
-// Deterministic cell generator so grid is stable across renders
-function makeCellStatus(fieldIdx: number, recIdx: number): CellStatus {
-  const f = HEATMAP_FIELDS[fieldIdx]
-  // use a simple hash of indices for deterministic "random"
-  const h = ((fieldIdx * 31 + recIdx * 17) % 100)
-  if (h < f.nullPct)                          return 'missing'
-  if (h < f.nullPct + f.invalidPct)           return 'invalid'
-  if (h < f.nullPct + f.invalidPct + f.partialPct) return 'partial'
-  return 'complete'
+  nullPct: number
+  invalidPct: number
+  partialPct: number
+  pendingPct: number
+  completePct: number
 }
 
-const HEATMAP_RECORDS = Array.from({ length: 30 }, (_, i) => ({
-  id: `#${4800 + i}`,
-  lastName: ['Morrison','Chen','Patel','Torres','Brennan','Tanaka','Nguyen','Davis','Park','Santos',
-             'Williams','Kim','Okafor','Ruiz','Wang','Johnson','Lee','Brown','Garcia','Martinez',
-             'Anderson','Taylor','Thomas','Jackson','White','Harris','Martin','Thompson','Robinson','Clark'][i],
-  values: HEATMAP_FIELDS.map((_, fi) => makeCellStatus(fi, i)),
-}))
+interface HeatmapRecord {
+  id: string
+  name: string
+  values: CellStatus[]
+}
 
-// Per-field aggregated health (used in column summary row)
-const FIELD_HEALTH: (typeof HEATMAP_FIELDS[number] & { completePct: number })[] =
-  HEATMAP_FIELDS.map(f => ({
-    ...f,
-    completePct: 100 - f.nullPct - f.invalidPct - f.partialPct,
-  }))
+const HEATMAP_METADATA_FIELDS = new Set([
+  'record_id', 'merged_at', 'pii_detections', 'pii_flagged', 'anomaly_flag',
+  'detection_model_used', 'npi_status', 'validation_status',
+])
 
-function DataHeatmapScreen() {
+const HEATMAP_FIELD_LABELS: Record<string, string> = {
+  npi: 'NPI', first_name: 'First Name', last_name: 'Last Name',
+  specialty: 'Specialty', pri_spec: 'Specialty', state: 'State',
+  email: 'Email', email_address: 'Email', phone: 'Phone', phone_number: 'Phone',
+  zip: 'ZIP Code', zip_code: 'ZIP Code', dea: 'DEA #', dea_number: 'DEA #', address: 'Address',
+}
+
+function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => void }) {
+  const [records, setRecords] = useState<Record<string, unknown>[]>([])
+  const [recordsLoading, setRecordsLoading] = useState(true)
+  const [recordsError, setRecordsError] = useState<string | null>(null)
+  const [recordsStatus, setRecordsStatus] = useState<number | null>(null)
   const [hover, setHover] = useState<{ r: number; c: number } | null>(null)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [filterField, setFilterField] = useState<string>('All fields')
   const [filterStatus, setFilterStatus] = useState<CellStatus | 'all'>('all')
   const [viewMode, setViewMode] = useState<'matrix' | 'field' | 'chart'>('matrix')
+
+  useEffect(() => {
+    let active = true
+    const loadRecords = async () => {
+      try {
+        const loadedRecords: Record<string, unknown>[] = []
+        const cursors = new Set<string>()
+        let cursor: string | undefined
+        do {
+          const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+          const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
+          if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
+          if ((response.headers.get('content-type') || '').includes('json')) {
+            const data = await response.json() as ExportResponse
+            if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
+            loadedRecords.push(...data.records)
+            cursor = data.next_cursor
+            if (cursor && cursors.has(cursor)) throw new Error('Export returned a repeated pagination cursor')
+            if (cursor) cursors.add(cursor)
+          } else {
+            loadedRecords.push(...parseCsvRecords(await response.text(), { header: true, skipEmptyLines: true }))
+            cursor = undefined
+          }
+        } while (cursor)
+        if (active) setRecords(loadedRecords)
+      } catch (error) {
+        if (active) {
+          setRecordsStatus(error instanceof HttpError ? error.status : null)
+          setRecordsError(error instanceof Error ? error.message : 'Unable to load processed records')
+        }
+      } finally {
+        if (active) setRecordsLoading(false)
+      }
+    }
+    void loadRecords()
+    return () => { active = false }
+  }, [])
+
+  const fieldKeys = [...new Set(records.flatMap(record => Object.keys(record)))].filter(key =>
+    !HEATMAP_METADATA_FIELDS.has(key.toLowerCase()) && !key.toLowerCase().startsWith('validation_')
+  )
+  const normalizedField = (key: string) => key.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const heatmapRecords: HeatmapRecord[] = records.map((record, index) => ({
+    id: String(record.record_id || record.provider_id || reviewValue(record, 'npi') || `Record ${index + 1}`),
+    name: reviewName(record, index),
+    values: fieldKeys.map(key => {
+      const value = record[key]
+      if (value === null || value === undefined || !String(value).trim()) return 'missing'
+      if (normalizedField(key) === 'npi') {
+        const outcome = npiOutcome(record)
+        if (outcome === 'invalid') return 'invalid'
+        if (outcome === 'pending') return 'pending'
+      }
+      return 'complete'
+    }),
+  }))
+  const heatmapFields: HeatmapField[] = fieldKeys.map((key, fieldIndex) => {
+    const statuses = heatmapRecords.map(record => record.values[fieldIndex])
+    const count = (status: CellStatus) => statuses.filter(value => value === status).length
+    const percent = (status: CellStatus) => records.length ? Math.round(count(status) / records.length * 100) : 0
+    return {
+      key,
+      name: HEATMAP_FIELD_LABELS[key.toLowerCase()] || key,
+      required: ['npi', 'firstname', 'lastname'].includes(normalizedField(key)),
+      nullPct: percent('missing'),
+      invalidPct: percent('invalid'),
+      partialPct: percent('partial'),
+      pendingPct: percent('pending'),
+      completePct: percent('complete'),
+    }
+  })
 
   const onCellEnter = (r: number, c: number) => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
@@ -4867,26 +4926,50 @@ function DataHeatmapScreen() {
   }
 
   const cellColor = (s: CellStatus) =>
-    s === 'complete' ? C.success : s === 'partial' ? C.warning : s === 'invalid' ? C.danger : '#CBD5E0'
+    s === 'complete' ? C.success : s === 'partial' ? C.warning : s === 'invalid' ? C.danger : s === 'pending' ? C.corpBlue : '#CBD5E0'
 
   const cellLabel = (s: CellStatus) =>
-    s === 'complete' ? 'Complete' : s === 'partial' ? 'Partial / truncated' : s === 'invalid' ? 'Validation failure' : 'Missing / null'
+    s === 'complete' ? 'Complete' : s === 'partial' ? 'Partial' : s === 'invalid' ? 'Validation failure' : s === 'pending' ? 'Validation pending' : 'Missing / null'
 
   // filter which columns to show
   const visibleFields = filterField === 'All fields'
-    ? HEATMAP_FIELDS.map((_, i) => i)
-    : [HEATMAP_FIELDS.findIndex(f => f.name === filterField)]
+    ? heatmapFields.map((_, i) => i)
+    : [heatmapFields.findIndex(f => f.key === filterField)]
 
   // filter which rows to show
   const visibleRecords = filterStatus === 'all'
-    ? HEATMAP_RECORDS
-    : HEATMAP_RECORDS.filter(rec =>
-        visibleFields.some(fi => rec.values[fi] === filterStatus)
+    ? heatmapRecords.map((record, index) => ({ record, index }))
+    : heatmapRecords.flatMap((record, index) =>
+        visibleFields.some(fi => record.values[fi] === filterStatus) ? [{ record, index }] : []
       )
 
-  const hoverField = hover !== null ? HEATMAP_FIELDS[hover.c] : null
-  const hoverRec   = hover !== null ? HEATMAP_RECORDS[hover.r] : null
-  const hoverStatus = hover !== null ? HEATMAP_RECORDS[hover.r]?.values[hover.c] : null
+  const hoverField = hover !== null ? heatmapFields[hover.c] : null
+  const hoverRec   = hover !== null ? heatmapRecords[hover.r] : null
+  const hoverStatus = hover !== null ? heatmapRecords[hover.r]?.values[hover.c] : null
+
+  if (recordsLoading) return (
+    <div className="p-8">
+      <SectionHeader title="Data Quality Heatmap" subtitle="Loading processed records and validation results" />
+      <Card className="text-center py-10"><p className="text-[13px]" style={{ color: C.midText }}>Loading dataset…</p></Card>
+    </div>
+  )
+
+  if (recordsError || recordsStatus === 404 || records.length === 0) return (
+    <div className="p-8">
+      <SectionHeader title="Data Quality Heatmap" subtitle="Field completeness and validation status across processed records" />
+      <Card className="max-w-md mx-auto text-center py-10">
+        <p className="text-[15px] font-bold mb-1" style={{ color: C.navy }}>
+          {recordsError ? 'Unable to load data' : 'No data available'}
+        </p>
+        <p className="text-[12px] mb-4" style={{ color: C.midText }}>
+          {recordsError
+            ? recordsError
+            : 'Upload a CSV dataset to see its field completeness and backend validation results here.'}
+        </p>
+        <Btn variant="primary" onClick={() => onNavigate('upload')} icon={Icon.upload}>Upload Data</Btn>
+      </Card>
+    </div>
+  )
 
   return (
     <div className="p-8">
@@ -4925,7 +5008,7 @@ function DataHeatmapScreen() {
             <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Legend:</span>
             {([
               { status: 'complete', label: 'Complete' },
-              { status: 'partial',  label: 'Partial' },
+              { status: 'pending',  label: 'Validation pending' },
               { status: 'invalid',  label: 'Validation failure' },
               { status: 'missing',  label: 'Missing / null' },
             ] as { status: CellStatus; label: string }[]).map(l => (
@@ -4958,10 +5041,10 @@ function DataHeatmapScreen() {
               value={filterField}
               onChange={e => setFilterField(e.target.value)}>
               <option>All fields</option>
-              {HEATMAP_FIELDS.map(f => <option key={f.name}>{f.name}</option>)}
+              {heatmapFields.map(f => <option key={f.key} value={f.key}>{f.name}</option>)}
             </select>
             <span className="text-[11px]" style={{ color: C.midText }}>
-              Showing <strong>{visibleRecords.length}</strong> of {HEATMAP_RECORDS.length} records
+              Showing <strong>{visibleRecords.length}</strong> of {heatmapRecords.length} records
             </span>
           </div>
         </div>
@@ -4985,7 +5068,7 @@ function DataHeatmapScreen() {
         {hover && hoverField && hoverRec && hoverStatus ? (<>
           <div style={{ minWidth: 140 }}>
             <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Record</p>
-            <p className="text-[13px] font-bold mono" style={{ color: C.navy }}>{hoverRec.id} — {hoverRec.lastName}</p>
+            <p className="text-[13px] font-bold mono" style={{ color: C.navy }}>{hoverRec.id} — {hoverRec.name}</p>
           </div>
           <div style={{ minWidth: 90 }}>
             <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Field</p>
@@ -5038,20 +5121,20 @@ function DataHeatmapScreen() {
                     <th key={fi} className="px-1 py-1 text-center"
                       style={{ minWidth: 52, borderBottom: `2px solid #EDF2F7` }}>
                       <div className="flex flex-col items-center gap-0.5">
-                        <span className="text-[9px] font-bold" style={{ color: HEATMAP_FIELDS[fi].required ? C.warning : C.navy }}>
-                          {HEATMAP_FIELDS[fi].name}
-                          {HEATMAP_FIELDS[fi].required && ' *'}
+                        <span className="text-[9px] font-bold" style={{ color: heatmapFields[fi].required ? C.warning : C.navy }}>
+                          {heatmapFields[fi].name}
+                          {heatmapFields[fi].required && ' *'}
                         </span>
                         {/* Column health bar */}
                         <div className="progress-track" style={{ width: 36, height: 3 }}>
                           <div className="progress-fill" style={{
-                            width: `${FIELD_HEALTH[fi].completePct}%`,
-                            background: FIELD_HEALTH[fi].completePct >= 90 ? C.success
-                              : FIELD_HEALTH[fi].completePct >= 70 ? C.warning : C.danger,
+                            width: `${heatmapFields[fi].completePct}%`,
+                            background: heatmapFields[fi].completePct >= 90 ? C.success
+                              : heatmapFields[fi].completePct >= 70 ? C.warning : C.danger,
                           }} />
                         </div>
                         <span className="text-[8px] mono" style={{ color: C.midText }}>
-                          {FIELD_HEALTH[fi].completePct}%
+                          {heatmapFields[fi].completePct}%
                         </span>
                       </div>
                     </th>
@@ -5064,18 +5147,17 @@ function DataHeatmapScreen() {
                 </tr>
               </thead>
               <tbody>
-                {visibleRecords.map((rec, ri) => {
-                  const actualRi = HEATMAP_RECORDS.indexOf(rec)
+                {visibleRecords.map(({ record: rec, index: actualRi }, ri) => {
                   const rowStatuses = visibleFields.map(fi => rec.values[fi])
                   const rowComplete = rowStatuses.filter(s => s === 'complete').length
-                  const rowHealth = Math.round((rowComplete / rowStatuses.length) * 100)
+                  const rowHealth = rowStatuses.length ? Math.round((rowComplete / rowStatuses.length) * 100) : 0
                   return (
                     <tr key={rec.id} style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC' }}>
                       {/* Record ID — sticky */}
                       <td className="px-2 py-0.5 sticky left-0 z-10 text-[10px]"
                         style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC' }}>
                         <span className="mono font-semibold" style={{ color: C.navy }}>{rec.id}</span>
-                        <span className="ml-1.5" style={{ color: C.midText }}>{rec.lastName}</span>
+                        <span className="ml-1.5" style={{ color: C.midText }}>{rec.name}</span>
                       </td>
                       {/* Field cells */}
                       {visibleFields.map(fi => {
@@ -5123,7 +5205,7 @@ function DataHeatmapScreen() {
                     FIELD TOTALS
                   </td>
                   {visibleFields.map(fi => {
-                    const f = HEATMAP_FIELDS[fi]
+                    const f = heatmapFields[fi]
                     return (
                       <td key={fi} className="px-1 py-2 text-center">
                         <div className="flex flex-col items-center gap-0.5">
@@ -5146,14 +5228,15 @@ function DataHeatmapScreen() {
       {/* ── VIEW: RECHARTS CHART ─────────────────────────────────────────── */}
       {viewMode === 'chart' && (() => {
         // Build per-field data for both charts
-        const fieldChartData = HEATMAP_FIELDS.map((f, fi) => ({
+        const fieldChartData = heatmapFields.map(f => ({
           name: f.name.length > 8 ? f.name.slice(0, 8) + '…' : f.name,
           fullName: f.name,
-          complete: FIELD_HEALTH[fi].completePct,
+          complete: f.completePct,
           partial:  f.partialPct,
           invalid:  f.invalidPct,
+          pending:  f.pendingPct,
           missing:  f.nullPct,
-          health:   FIELD_HEALTH[fi].completePct,
+          health:   f.completePct,
         }))
 
         const healthColor = (pct: number) =>
@@ -5167,7 +5250,7 @@ function DataHeatmapScreen() {
             <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
               <p className="font-bold mb-1" style={{ color: C.navy }}>{d.fullName}</p>
               <p style={{ color: C.success }}>✅ Complete: {d.complete}%</p>
-              <p style={{ color: C.warning }}>⚠ Partial: {d.partial}%</p>
+              <p style={{ color: C.corpBlue }}>◷ Validation pending: {d.pending}%</p>
               <p style={{ color: C.danger }}>✗ Invalid: {d.invalid}%</p>
               <p style={{ color: '#A0AEC0' }}>○ Missing: {d.missing}%</p>
             </div>
@@ -5234,7 +5317,7 @@ function DataHeatmapScreen() {
                     <RechartTooltip content={<StackTooltip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
                     <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 11, paddingTop: 12, color: C.midText }} />
                     <Bar dataKey="complete" name="Complete" stackId="a" fill={C.success} />
-                    <Bar dataKey="partial"  name="Partial"  stackId="a" fill={C.warning} />
+                    <Bar dataKey="pending"  name="Validation pending" stackId="a" fill={C.corpBlue} />
                     <Bar dataKey="invalid"  name="Invalid"  stackId="a" fill={C.danger}  />
                     <Bar dataKey="missing"  name="Missing"  stackId="a" fill="#CBD5E0" radius={[4, 4, 0, 0]} />
                   </BarChart>
@@ -5248,12 +5331,12 @@ function DataHeatmapScreen() {
       {/* ── VIEW: FIELD SUMMARY ───────────────────────────────────────────── */}
       {viewMode === 'field' && (
         <div className="flex flex-col gap-3">
-          {HEATMAP_FIELDS.map((f, fi) => {
-            const isHoveredField = filterField === f.name || filterField === 'All fields'
+          {heatmapFields.map(f => {
+            const isHoveredField = filterField === f.key || filterField === 'All fields'
             return (
-              <Card key={f.name}
+              <Card key={f.key}
                 className={`transition-all ${!isHoveredField ? 'opacity-40' : ''}`}
-                onClick={() => setFilterField(filterField === f.name ? 'All fields' : f.name)}>
+                onClick={() => setFilterField(filterField === f.key ? 'All fields' : f.key)}>
                 <div className="flex items-center gap-4">
                   {/* Field name */}
                   <div style={{ width: 120, flexShrink: 0 }}>
@@ -5264,15 +5347,16 @@ function DataHeatmapScreen() {
                   {/* Stacked completion bar */}
                   <div className="flex-1">
                     <div className="flex rounded-[4px] overflow-hidden" style={{ height: 20 }}>
-                      <div title={`${FIELD_HEALTH[fi].completePct}% complete`} style={{ width: `${FIELD_HEALTH[fi].completePct}%`, background: C.success }} />
+                      <div title={`${f.completePct}% complete`} style={{ width: `${f.completePct}%`, background: C.success }} />
                       <div title={`${f.partialPct}% partial`}  style={{ width: `${f.partialPct}%`,  background: C.warning }} />
                       <div title={`${f.invalidPct}% invalid`}  style={{ width: `${f.invalidPct}%`,  background: C.danger }} />
+                      <div title={`${f.pendingPct}% validation pending`} style={{ width: `${f.pendingPct}%`, background: C.corpBlue }} />
                       <div title={`${f.nullPct}% null`}        style={{ width: `${f.nullPct}%`,     background: '#CBD5E0' }} />
                     </div>
                     <div className="flex gap-4 mt-1">
                       {[
-                        { label: `${FIELD_HEALTH[fi].completePct}% complete`, color: C.success },
-                        { label: `${f.partialPct}% partial`,  color: C.warning },
+                        { label: `${f.completePct}% complete`, color: C.success },
+                        { label: `${f.pendingPct}% pending`, color: C.corpBlue },
                         { label: `${f.invalidPct}% invalid`,  color: C.danger  },
                         { label: `${f.nullPct}% null`,        color: '#A0AEC0' },
                       ].map(seg => (
@@ -5288,21 +5372,21 @@ function DataHeatmapScreen() {
                     <div>
                       <p className="text-[10px]" style={{ color: C.midText }}>Null count</p>
                       <p className="text-[14px] font-bold mono" style={{ color: f.nullPct > 10 ? C.danger : C.midText }}>
-                        {Math.round(f.nullPct / 100 * HEATMAP_RECORDS.length)}
-                        <span className="text-[10px] font-normal"> / {HEATMAP_RECORDS.length}</span>
+                        {Math.round(f.nullPct / 100 * heatmapRecords.length)}
+                        <span className="text-[10px] font-normal"> / {heatmapRecords.length}</span>
                       </p>
                     </div>
                     <div>
                       <p className="text-[10px]" style={{ color: C.midText }}>Validation failures</p>
                       <p className="text-[14px] font-bold mono" style={{ color: f.invalidPct > 0 ? C.danger : C.success }}>
-                        {Math.round(f.invalidPct / 100 * HEATMAP_RECORDS.length)}
-                        <span className="text-[10px] font-normal"> / {HEATMAP_RECORDS.length}</span>
+                        {Math.round(f.invalidPct / 100 * heatmapRecords.length)}
+                        <span className="text-[10px] font-normal"> / {heatmapRecords.length}</span>
                       </p>
                     </div>
                     <div>
                       <p className="text-[10px]" style={{ color: C.midText }}>Health score</p>
-                      <p className="text-[14px] font-bold mono" style={{ color: FIELD_HEALTH[fi].completePct >= 90 ? C.success : FIELD_HEALTH[fi].completePct >= 70 ? C.warning : C.danger }}>
-                        {FIELD_HEALTH[fi].completePct}%
+                      <p className="text-[14px] font-bold mono" style={{ color: f.completePct >= 90 ? C.success : f.completePct >= 70 ? C.warning : C.danger }}>
+                        {f.completePct}%
                       </p>
                     </div>
                   </div>
@@ -6541,7 +6625,7 @@ export default function App() {
       case 'compliance-review': return <ComplianceReviewScreen />
       case 'financial-disclosures': return <FinancialDisclosureScreen />
       case 'analytics': return <AnalyticsScreen onNavigate={navigate} />
-      case 'data-heatmap': return <DataHeatmapScreen />
+      case 'data-heatmap': return <DataHeatmapScreen onNavigate={navigate} />
       case 'export': return <ExportScreen onNavigate={navigate} />
       case 'team': return <TeamScreen showToast={showToast} />
       case 'audit-log': return <AuditLogScreen />
