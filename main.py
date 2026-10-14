@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from auth import require_role
 from database import db, USE_EMULATOR
 from data_health_score_service import calculate_data_health
+from nlp_query_router import router as nlp_query_router
 from bulk_approval_service import approve_low_severity_flags
 from record_merge_service import merge_record_cluster
 from scrubbing_pipeline import DEFAULT_GCS_CHUNK_SIZE, scrub_provider_records, stream_scrubbed_gcs_csv
@@ -54,6 +55,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(nlp_query_router)
 
 ADMIN_ROLES = frozenset({"admin", "super-admin"})
 EDITOR_ROLES = frozenset({"editor", "admin", "super-admin"})
