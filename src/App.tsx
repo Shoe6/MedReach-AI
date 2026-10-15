@@ -5229,7 +5229,7 @@ function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => voi
       {viewMode === 'chart' && (() => {
         // Build per-field data for both charts
         const fieldChartData = heatmapFields.map(f => ({
-          name: f.name.length > 8 ? f.name.slice(0, 8) + '…' : f.name,
+          name: f.name.length > 14 ? f.name.slice(0, 14) + '…' : f.name,
           fullName: f.name,
           complete: f.completePct,
           partial:  f.partialPct,
@@ -5241,6 +5241,10 @@ function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => voi
 
         const healthColor = (pct: number) =>
           pct >= 90 ? C.success : pct >= 70 ? C.warning : C.danger
+
+        // Guarantee each bar enough width for its angled label; scroll horizontally once
+        // the field count exceeds what the card can show at a readable size.
+        const chartMinWidth = Math.max(fieldChartData.length * 56, 100)
 
         // Custom tooltip for health bar
         const HealthTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof fieldChartData[0] }> }) => {
@@ -5274,11 +5278,12 @@ function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => voi
             {/* Chart 1 – Field health score (color-coded bar per field) */}
             <Card>
               <p className="text-[13px] font-bold mb-4" style={{ color: C.navy }}>Field Health Score (% Complete)</p>
-              <div style={{ height: 260 }}>
+              <div style={{ height: 300, overflowX: 'auto' }}>
+                <div style={{ height: '100%', minWidth: `${chartMinWidth}px` }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 24 }}>
+                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 64 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
-                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} angle={-45} textAnchor="end" height={80} />
                     <YAxis domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} width={38} />
                     <RechartTooltip content={<HealthTooltip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
                     {/* Threshold reference lines via custom label not available in simple BarChart, keep it clean */}
@@ -5289,6 +5294,7 @@ function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => voi
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
+                </div>
               </div>
               {/* Threshold legend */}
               <div className="flex items-center gap-6 mt-2 justify-end">
@@ -5308,20 +5314,22 @@ function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => voi
             {/* Chart 2 – Stacked breakdown per field */}
             <Card>
               <p className="text-[13px] font-bold mb-4" style={{ color: C.navy }}>Field Quality Breakdown (Stacked %)</p>
-              <div style={{ height: 260 }}>
+              <div style={{ height: 300, overflowX: 'auto' }}>
+                <div style={{ height: '100%', minWidth: `${chartMinWidth}px` }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 24 }}>
+                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 64 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
-                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} angle={-45} textAnchor="end" height={80} />
                     <YAxis domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} width={38} />
                     <RechartTooltip content={<StackTooltip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
-                    <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 11, paddingTop: 12, color: C.midText }} />
+                    <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 11, paddingTop: 28, color: C.midText }} />
                     <Bar dataKey="complete" name="Complete" stackId="a" fill={C.success} />
                     <Bar dataKey="pending"  name="Validation pending" stackId="a" fill={C.corpBlue} />
                     <Bar dataKey="invalid"  name="Invalid"  stackId="a" fill={C.danger}  />
                     <Bar dataKey="missing"  name="Missing"  stackId="a" fill="#CBD5E0" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
+                </div>
               </div>
             </Card>
           </div>
