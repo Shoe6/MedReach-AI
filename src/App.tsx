@@ -3762,24 +3762,65 @@ const SUGGESTED_QUERIES = [
   'List all records updated in the last 30 days',
 ]
 
-const QUERY_RESULT = [
-  { npi: '1234567890', name: 'James Morrison, MD', specialty: 'Cardiology', state: 'FL', email: 'j.morrison@floridahealth.com', status: 'Active' },
-  { npi: '8847261039', name: 'Patricia Wang, MD', specialty: 'Cardiology', state: 'FL', email: 'pwang@tampacc.org', status: 'Active' },
-  { npi: '3312889401', name: 'David Okafor, DO', specialty: 'Cardiology', state: 'FL', email: 'dokafor@baptist.com', status: 'Pending' },
-]
+const NLP_QUERY_DATASET_ID = 'raw_registry_input.csv'
+
+interface NLPQueryResponse {
+  success: boolean
+  applied_query?: string
+  results?: Record<string, unknown>[]
+  total_matches?: number
+  returned_count?: number
+  error?: string
+}
+
+type QueryErrorKind = 'auth' | 'not-understood' | 'server' | 'network'
 
 function QueryScreen() {
+  const { role } = useRole()
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
-  const [results, setResults] = useState<typeof QUERY_RESULT | null>(null)
+  const [results, setResults] = useState<Record<string, unknown>[] | null>(null)
+  const [appliedQuery, setAppliedQuery] = useState<string | null>(null)
+  const [totalMatches, setTotalMatches] = useState<number | null>(null)
+  const [error, setError] = useState<{ kind: QueryErrorKind; message: string } | null>(null)
   const [showQuery, setShowQuery] = useState(false)
 
-  const run = (q: string) => {
+  const run = async (q: string) => {
     setQuery(q)
     setLoading(true)
     setResults(null)
-    setTimeout(() => { setLoading(false); setResults(QUERY_RESULT) }, 1400)
+    setAppliedQuery(null)
+    setError(null)
+
+    try {
+      const response = await globalThis.fetch(`${API_BASE_URL}/api/dataset/nlp-search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
+        body: JSON.stringify({ query: q, dataset_id: NLP_QUERY_DATASET_ID }),
+      })
+      const body = await response.json().catch(() => null) as NLPQueryResponse | null
+
+      if (response.status === 401 || response.status === 403) {
+        setError({ kind: 'auth', message: body?.error || 'You are not authorized to run natural-language queries.' })
+        return
+      }
+      if (!response.ok || !body?.success) {
+        const kind: QueryErrorKind = response.status === 422 ? 'not-understood' : 'server'
+        setError({ kind, message: body?.error || `Query failed (HTTP ${response.status}).` })
+        return
+      }
+
+      setResults(body.results ?? [])
+      setAppliedQuery(body.applied_query ?? null)
+      setTotalMatches(body.total_matches ?? body.results?.length ?? 0)
+    } catch {
+      setError({ kind: 'network', message: "Couldn't reach the server. Check your connection and try again." })
+    } finally {
+      setLoading(false)
+    }
   }
+
+  const resultColumns = results && results.length > 0 ? Object.keys(results[0]) : []
 
   return (
     <div className="p-8">
@@ -3802,7 +3843,7 @@ function QueryScreen() {
           <Btn variant="primary" onClick={() => query && run(query)}>Run Query</Btn>
         </div>
 
-        {!results && !loading && (
+        {!results && !loading && !error && (
           <div className="mt-4">
             <p className="text-[12px] mb-2 font-semibold" style={{ color: C.midText }}>Try these queries:</p>
             <div className="flex flex-wrap gap-2">
@@ -3822,54 +3863,77 @@ function QueryScreen() {
         <Card>
           <div className="flex items-center gap-3 py-8 justify-center">
             <span style={{ color: C.corpBlue }}>{Icon.spinner}</span>
-            <span className="text-[13px] pulse" style={{ color: C.midText }}>Running your query against 10,412 records...</span>
+            <span className="text-[13px] pulse" style={{ color: C.midText }}>Running your query against your dataset...</span>
           </div>
         </Card>
       )}
 
-      {results && (
+      {/* ── STATE: error ─────────────────────────────────────────────────── */}
+      {error && !loading && (
+        <Card>
+          <div className="flex items-start gap-4 py-4">
+            <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0" style={{ background: '#FEE2E2', color: C.danger }}>
+              {Icon.alertTriangle}
+            </div>
+            <div className="flex-1">
+              <p className="text-[14px] font-bold mb-1" style={{ color: C.danger }}>
+                {error.kind === 'auth' && 'Unauthorized'}
+                {error.kind === 'not-understood' && "Couldn't understand that question"}
+                {error.kind === 'server' && 'Query failed'}
+                {error.kind === 'network' && 'Connection error'}
+              </p>
+              <p className="text-[12px]" style={{ color: C.darkText }}>{error.message}</p>
+            </div>
+            <Btn variant="ghost" size="sm" onClick={() => query && run(query)}>Try again</Btn>
+          </div>
+        </Card>
+      )}
+
+      {results && !loading && (
         <Card>
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">
               <h3 className="text-[14px] font-bold" style={{ color: C.navy }}>Results</h3>
-              <Badge tier={1} color="info">{results.length} records</Badge>
+              <Badge tier={1} color="info">{totalMatches ?? results.length} records</Badge>
               <span className="text-[12px]" style={{ color: C.midText }}>for "{query}"</span>
             </div>
-            <button onClick={() => setShowQuery(!showQuery)} className="text-[12px] hover:underline" style={{ color: C.corpBlue }}>
-              {showQuery ? 'Hide query ▲' : 'View generated query ▼'}
-            </button>
+            {appliedQuery && (
+              <button onClick={() => setShowQuery(!showQuery)} className="text-[12px] hover:underline" style={{ color: C.corpBlue }}>
+                {showQuery ? 'Hide query ▲' : 'View generated query ▼'}
+              </button>
+            )}
           </div>
 
-          {showQuery && (
+          {showQuery && appliedQuery && (
             <div className="mb-4 p-3 rounded-[6px] border border-[#EDF2F7]" style={{ background: '#F7FAFC' }}>
               <p className="text-[11px] font-semibold mb-2" style={{ color: C.midText }}>Generated pandas filter:</p>
-              <pre className="mono text-[11px]" style={{ color: C.darkText }}>
-{`df = df[
-  (df['specialty'] == 'Cardiology') &
-  (df['state'] == 'FL') &
-  (df['npi_status'] == 'Active')
-]`}
-              </pre>
+              <pre className="mono text-[11px]" style={{ color: C.darkText, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{appliedQuery}</pre>
             </div>
           )}
 
-          <table className="data-table w-full border-collapse">
-            <thead>
-              <tr><th>NPI</th><th>Name</th><th>Specialty</th><th>State</th><th>Email</th><th>Status</th></tr>
-            </thead>
-            <tbody>
-              {results.map(r => (
-                <tr key={r.npi}>
-                  <td className="mono">{r.npi}</td>
-                  <td className="font-medium">{r.name}</td>
-                  <td>{r.specialty}</td>
-                  <td>{r.state}</td>
-                  <td style={{ color: C.corpBlue }}>{r.email}</td>
-                  <td><Badge tier={1} color={r.status === 'Active' ? 'success' : 'warning'}>{r.status}</Badge></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {results.length === 0 ? (
+            <div className="text-center py-10">
+              <p className="text-[13px] font-semibold mb-1" style={{ color: C.navy }}>No matching records</p>
+              <p className="text-[12px]" style={{ color: C.midText }}>Try rephrasing the question or asking about a different field.</p>
+            </div>
+          ) : (
+            <table className="data-table w-full border-collapse">
+              <thead>
+                <tr>{resultColumns.map(col => <th key={col}>{col}</th>)}</tr>
+              </thead>
+              <tbody>
+                {results.map((r, i) => (
+                  <tr key={i}>
+                    {resultColumns.map(col => (
+                      <td key={col} className={col.toLowerCase().includes('npi') ? 'mono' : undefined}>
+                        {r[col] === null || r[col] === undefined || r[col] === '' ? '—' : String(r[col])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </Card>
       )}
     </div>
