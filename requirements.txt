@@ -10,8 +10,9 @@ cffi==2.1.1
 charset-normalizer==3.4.9
 click==8.4.2
 colorama==0.4.6
-cryptography==50.0.0
+cryptography>=48.0.1,<49.0.0
 dnspython==2.8.0
+python-dotenv==1.0.1
 email-validator==2.3.0
 fastapi==0.141.1
 firebase_admin==7.5.0
@@ -22,6 +23,7 @@ google-cloud-core==2.6.0
 google-cloud-firestore==2.28.0
 google-cloud-storage==3.13.0
 google-crc32c==1.8.0
+google-genai==2.30.1
 google-resumable-media==2.10.0
 googleapis-common-protos==1.75.0
 grpcio==1.83.0
@@ -37,7 +39,7 @@ iniconfig==2.3.0
 mccabe==0.7.0
 msgpack==1.2.1
 mypy_extensions==1.1.0
-numpy==2.5.2
+numpy>=1.19.0,<2.5.0
 packaging==26.3
 pandas==3.0.5
 presidio-analyzer==2.2.364
@@ -57,7 +59,8 @@ pyflakes==3.4.0
 Pygments==2.21.0
 PyJWT==2.13.0
 pytest==9.1.1
-pytest-asyncio==1.3.0
+pytest-asyncio
+tenacity>=8.2.3,<10.0.0
 python-dateutil==2.9.0.post0
 python-multipart==0.0.32
 pytokens==0.4.1
@@ -70,3 +73,5 @@ tzdata==2026.3
 urllib3==2.7.0
 uvicorn==0.52.1
 reportlab==5.0.1
+scikit-learn==1.9.1
+psutil>=5.9.0,<8.0.0

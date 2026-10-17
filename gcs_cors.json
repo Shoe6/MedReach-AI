@@ -1,0 +1,11 @@
+[
+  {
+    "origin": [
+      "https://medreachai-679aa.web.app",
+      "http://localhost:3000"
+    ],
+    "method": ["PUT", "OPTIONS"],
+    "responseHeader": ["Content-Type"],
+    "maxAgeSeconds": 3600
+  }
+]

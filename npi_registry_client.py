@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Sequence
 
 import httpx
+from tenacity import RetryError
+
+from http_retry import retry_transient_http_call
 
 
 class CMSNPIRegistryClient:
@@ -33,42 +37,31 @@ class CMSNPIRegistryClient:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
+    @retry_transient_http_call
+    async def _request_npi(self, npi: str) -> dict[str, Any]:
+        response = await self._client.get(
+            self.base_url,
+            params={"number": str(npi), "version": "2.1"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        results = payload.get("results") or []
+        return results[0] if results else {}
+
     async def fetch_npi(self, npi: str) -> dict[str, Any]:
-        """Fetch a single NPI record with retry + timeout handling."""
+        """Fetch a single NPI record with transient retry and offline fallback."""
         if not npi or not str(npi).strip():
             raise ValueError("NPI value is required.")
 
-        last_error: Exception | None = None
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                response = await self._client.get(
-                    self.base_url,
-                    params={"number": str(npi), "version": "2.1"},
-                )
-
-                if response.status_code == 429:
-                    retry_after = response.headers.get("Retry-After")
-                    delay = float(retry_after) if retry_after else min(2**attempt, 5)
-                    await asyncio.sleep(delay)
-                    continue
-
-                response.raise_for_status()
-                payload = response.json()
-
-                results = payload.get("results") or []
-                if not results:
-                    return {}
-                return results[0]
-
-            except (httpx.TimeoutException, httpx.HTTPError, ValueError) as exc:
-                last_error = exc
-                if attempt == self.max_retries:
-                    break
-                await asyncio.sleep(min(2**attempt, 5))
-
-        if last_error is not None:
-            raise RuntimeError(f"Failed to fetch NPI {npi}: {last_error}") from last_error
-        raise RuntimeError(f"Failed to fetch NPI {npi} without a specific error.")
+        try:
+            return await self._request_npi(npi)
+        except RetryError as exc:
+            logging.getLogger(__name__).error(
+                "CMS API offline after 3 attempts while fetching NPI %s: %s",
+                npi,
+                exc.last_attempt.exception(),
+            )
+            return {}
 
     async def fetch_many(self, npis: Sequence[str]) -> list[dict[str, Any]]:
         """Fetch multiple NPIs using chunking so the client stays under the 20 rps cap."""

@@ -46,13 +46,12 @@ async def get_dashboard_metrics(company_id: str) -> DashboardMetrics:
         DashboardMetrics: Aggregated metrics for the company
     """
     company_ref = db.collection("companies").document(company_id)
-    uploads = [doc.to_dict() or {} for doc in company_ref.collection("uploads").stream()]
-
     total_hcp = 0
     health_scores = []
     total_flags = 0
 
-    for upload in uploads:
+    for upload_document in company_ref.collection("uploads").stream():
+        upload = upload_document.to_dict() or {}
         metadata = upload.get("metadata") or {}
         total_hcp += int(metadata.get("record_count", upload.get("record_count", 0)) or 0)
 

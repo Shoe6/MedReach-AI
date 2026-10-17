@@ -13,4 +13,13 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  server: {
+    proxy: {
+      // Forward relative /api calls to the local FastAPI backend during dev.
+      '/api': {
+        target: 'http://127.0.0.1:8010',
+        changeOrigin: true,
+      },
+    },
+  },
 })

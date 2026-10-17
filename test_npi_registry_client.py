@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from unittest.mock import patch
 
@@ -6,6 +7,26 @@ import httpx
 import pytest
 
 from npi_registry_client import CMSNPIRegistryClient
+
+
+@pytest.mark.asyncio
+async def test_fetch_npi_retries_three_times_and_returns_offline_fallback(caplog):
+    client = CMSNPIRegistryClient()
+    attempts = 0
+
+    async def timeout_get(self, url, params=None):
+        nonlocal attempts
+        attempts += 1
+        raise httpx.TimeoutException("CMS request timed out")
+
+    with patch.object(httpx.AsyncClient, "get", new=timeout_get):
+        with caplog.at_level(logging.ERROR, logger="npi_registry_client"):
+            result = await client.fetch_npi("1234567890")
+
+    assert result == {}
+    assert attempts == 3
+    assert "CMS API offline" in caplog.text
+    await client.close()
 
 
 @pytest.mark.asyncio

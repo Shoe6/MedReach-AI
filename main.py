@@ -1,18 +1,29 @@
+import asyncio
 import csv
 import io
 import logging
 import os
-from datetime import datetime
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from firebase_admin import storage
-from fastapi import Depends, FastAPI, File, HTTPException, Header, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Header, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+import google.auth
+from google.auth.transport import requests as google_auth_requests
+from google.cloud import storage as gcs_storage
 from pydantic import BaseModel
 
-from database import db
+from auth import require_role
+from database import db, USE_EMULATOR
+from data_health_score_service import calculate_data_health
+from nlp_query_router import router as nlp_query_router
+from bulk_approval_service import approve_low_severity_flags
 from record_merge_service import merge_record_cluster
+from scrubbing_pipeline import DEFAULT_GCS_CHUNK_SIZE, scrub_provider_records, stream_scrubbed_gcs_csv
 
 logger = logging.getLogger(__name__)
 
@@ -21,18 +32,96 @@ def _get_ingest():
     from ingestion import ingest_csv_chunks
     return ingest_csv_chunks
 
+def _get_duplicate_detector():
+    """Lazy import so the app can start even when pandas is not installed."""
+    from ingestion import detect_duplicate_clusters
+    return detect_duplicate_clusters
+
 app = FastAPI(title="MedReach AI Backend", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    # Vite auto-increments the port (5174, 5175, ...) if 5173 is already taken by
+    # another running instance, so allow the common local-dev port range too.
+    allow_origins=[
+        f"http://{host}:{port}"
+        for host in ("localhost", "127.0.0.1")
+        for port in range(5173, 5178)
+    ] + [
+        "https://medreachai-679aa.web.app",
+        "https://medreachai-679aa.firebaseapp.com",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(nlp_query_router)
+
 ADMIN_ROLES = frozenset({"admin", "super-admin"})
 EDITOR_ROLES = frozenset({"editor", "admin", "super-admin"})
+PROCESSING_ROLES = ("editor", "admin", "super-admin")
+require_authenticated_editor = require_role(PROCESSING_ROLES)
+FIRESTORE_PAGE_SIZE = 500
+UPLOAD_BUCKET = "medreach-ai-uploads"
+IS_CLOUD_RUN = bool(os.environ.get("K_SERVICE"))
+GCS_SIGNING_TIMEOUT_SECONDS = 10
+LOCAL_UPLOAD_DIR = Path(tempfile.gettempdir()) / "medreach-local-uploads"
+LOCAL_UPLOAD_PATHS: dict[str, Path] = {}
+FIRESTORE_WRITE_TIMEOUT_SECONDS = 3.0
+ALLOW_OFFLINE_FIRESTORE_WRITES = not IS_CLOUD_RUN and os.getenv("MEDREACH_ALLOW_OFFLINE_FIRESTORE", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+async def _firestore_write(write_fn, *, context: str):
+    """Run a blocking Firestore write with a short timeout.
+
+    The default gRPC deadline can block the event loop for ~60s when the
+    emulator is unreachable, so bound the wait ourselves. If the emulator is
+    unreachable and MEDREACH_ALLOW_OFFLINE_FIRESTORE=1, skip the write so the
+    rest of the pipeline (e.g. CSV chunking) can still be tested locally;
+    otherwise fail fast with a clear error.
+    """
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(write_fn), timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        if USE_EMULATOR and ALLOW_OFFLINE_FIRESTORE_WRITES:
+            logger.warning("Skipping Firestore write (%s) — emulator unreachable: %s", context, exc)
+            return None
+        hint = (
+            "Start the Firestore emulator (`firebase emulators:start --only firestore`), "
+            "or set MEDREACH_ALLOW_OFFLINE_FIRESTORE=1 to skip database writes in local dev."
+            if USE_EMULATOR
+            else "Check Firestore connectivity and credentials."
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Firestore is unreachable while {context}. {hint}",
+        ) from exc
+
+
+async def _firestore_write_best_effort(write_fn, *, context: str) -> None:
+    """Attempt a Firestore write with a short timeout; never raises, so a
+    background job keeps running even when Firestore is unreachable."""
+    try:
+        await asyncio.wait_for(asyncio.to_thread(write_fn), timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.warning("Skipping Firestore update (%s): %s", context, exc)
+
+
+def _iam_signing_kwargs() -> dict:
+    """On Cloud Run the attached service account has no private key, so
+    generate_signed_url must be told to sign via the IAM credentials API.
+    Local/dev runs use emulators and never reach real GCS, so skip this.
+    """
+    if not IS_CLOUD_RUN:
+        return {}
+    credentials, _ = google.auth.default()
+    credentials.refresh(google_auth_requests.Request())
+    return {"service_account_email": credentials.service_account_email, "access_token": credentials.token}
 
 
 def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
@@ -99,8 +188,11 @@ async def validate_csv_upload(file: UploadFile) -> None:
 async def health_check():
     """Verify the server is running and the database is accessible."""
     try:
-        list(db.collections())
-        return {"status": "healthy", "database": "emulator_connected"}
+        await asyncio.wait_for(
+            asyncio.to_thread(lambda: list(db.collections())),
+            timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
+        )
+        return {"status": "healthy", "database": "emulator_connected" if USE_EMULATOR else "firestore_connected"}
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
@@ -116,8 +208,12 @@ async def dashboard_summary():
         records_this_week   - records ingested in the last 7 days
         unresolved_flags    - dict with counts per category and a total
         last_upload         - ISO timestamp of the most recent upload document
+
+    Firestore reads are offloaded to a thread and bounded by a short timeout so
+    an unreachable emulator can't block the event loop for the default ~60s
+    gRPC deadline; the existing demo-seed fallback below covers that case too.
     """
-    try:
+    def _compute():
         total_hcps = 0
         records_this_week = 0
         health_scores: list[float] = []
@@ -162,13 +258,13 @@ async def dashboard_summary():
 
         for company_doc in companies_ref.stream():
             flags_ref = company_doc.reference.collection("flags")
-            for flag_doc in flags_ref.stream():
-                flag = flag_doc.to_dict() or {}
-                if flag.get("resolved"):
-                    continue
-                category = str(flag.get("category", "")).lower()
-                if category in flag_counts:
-                    flag_counts[category] += 1
+            for category in flag_counts:
+                unresolved_flags = (
+                    flags_ref.where("resolved", "==", False)
+                    .where("category", "==", category)
+                    .stream()
+                )
+                flag_counts[category] += sum(1 for _ in unresolved_flags)
 
         total_flags = sum(flag_counts.values())
 
@@ -191,6 +287,10 @@ async def dashboard_summary():
             "source": "firestore" if total_hcps != 10412 else "demo_seed",
         }
 
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_compute), timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS + 1
+        )
     except Exception as e:
         return {
             "total_hcps": 10412,
@@ -221,6 +321,230 @@ class InviteUserPayload(BaseModel):
 class BillingPlanUpdatePayload(BaseModel):
     plan: str
     reason: str | None = None
+
+
+class SignedUrlPayload(BaseModel):
+    filename: str
+    content_type: str = "text/csv"
+
+
+class ProcessUploadPayload(BaseModel):
+    object_name: str
+    skip_npi_validation: bool = False
+    delete_source_on_success: bool = False
+
+
+@app.post("/api/uploads/generate-signed-url")
+async def generate_signed_upload_url(
+    payload: SignedUrlPayload,
+    user: dict = Depends(require_authenticated_editor),
+):
+    """Generate an owner-scoped short-lived V4 URL for a raw CSV upload."""
+    filename = payload.filename.strip()
+    if not filename or filename in {".", ".."} or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="A valid filename without path components is required.")
+    if payload.content_type != "text/csv":
+        raise HTTPException(status_code=400, detail="Only text/csv uploads are supported.")
+
+    owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
+    if not owner_uid:
+        raise HTTPException(status_code=401, detail="Authenticated user is missing a UID.")
+
+    object_name = f"raw_uploads/{owner_uid}/{uuid4()}_{filename}"
+
+    def _sign() -> str:
+        blob = gcs_storage.Client().bucket(UPLOAD_BUCKET).blob(object_name)
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=15),
+            method="PUT",
+            content_type=payload.content_type,
+            **_iam_signing_kwargs(),
+        )
+
+    try:
+        signed_url = await asyncio.wait_for(asyncio.to_thread(_sign), timeout=GCS_SIGNING_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="Timed out generating the GCS upload URL. Check service account credentials.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to generate signed upload URL")
+        raise HTTPException(status_code=500, detail="Unable to generate upload URL.") from exc
+
+    return {
+        "signed_url": signed_url,
+        "object_name": object_name,
+        "expires_in": 900,
+    }
+
+
+async def _process_uploaded_csv_job(
+    job_id: str,
+    object_name: str,
+    *,
+    skip_npi_validation: bool,
+    delete_source_on_success: bool,
+) -> None:
+    job_ref = db.collection("processing_jobs").document(job_id)
+    total_records = 0
+    completed_batches = 0
+    max_batch_records = 0
+
+    try:
+        await _firestore_write_best_effort(
+            lambda: job_ref.update(
+                {"status": "processing", "started_at": datetime.now(timezone.utc).isoformat()},
+                retry=None,
+                timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
+            ),
+            context=f"job {job_id} start update",
+        )
+        async for records in stream_scrubbed_gcs_csv(
+            object_name,
+            bucket_name=UPLOAD_BUCKET,
+            batch_size=DEFAULT_GCS_CHUNK_SIZE,
+            validate_npi=not skip_npi_validation,
+        ):
+            batch_records = len(records)
+            total_records += batch_records
+            completed_batches += 1
+            max_batch_records = max(max_batch_records, batch_records)
+
+            if completed_batches % 20 == 0:
+                await _firestore_write_best_effort(
+                    lambda: job_ref.update(
+                        {
+                            "completed_batches": completed_batches,
+                            "records_processed": total_records,
+                            "max_batch_records": max_batch_records,
+                        },
+                        retry=None,
+                        timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
+                    ),
+                    context=f"job {job_id} progress update",
+                )
+
+        if delete_source_on_success:
+            gcs_storage.Client().bucket(UPLOAD_BUCKET).blob(object_name).delete()
+
+        await _firestore_write_best_effort(
+            lambda: job_ref.update(
+                {
+                    "status": "completed",
+                    "completed_batches": completed_batches,
+                    "records_processed": total_records,
+                    "max_batch_records": max_batch_records,
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                },
+                retry=None,
+                timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
+            ),
+            context=f"job {job_id} completion update",
+        )
+    except Exception as exc:
+        logger.exception("CSV processing job %s failed", job_id)
+        failure_reason = f"Processing failed ({type(exc).__name__})."
+        await _firestore_write_best_effort(
+            lambda: job_ref.update(
+                {
+                    "status": "failed",
+                    "error": failure_reason,
+                    "completed_batches": completed_batches,
+                    "records_processed": total_records,
+                    "max_batch_records": max_batch_records,
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                },
+                retry=None,
+                timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
+            ),
+            context=f"job {job_id} failure update",
+        )
+
+
+@app.post("/api/companies/{company_id}/uploads/process", status_code=202)
+async def start_company_upload_processing(
+    company_id: str,
+    payload: ProcessUploadPayload,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(require_authenticated_editor),
+):
+    """Queue an owner-scoped GCS CSV for bounded, asynchronous scrubbing."""
+    owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
+    role = str(user.get("role") or "").strip().lower()
+    object_name = payload.object_name.strip()
+    owner_prefix = f"raw_uploads/{owner_uid}/"
+
+    if not owner_uid:
+        raise HTTPException(status_code=401, detail="Authenticated user is missing a UID.")
+    if not object_name.startswith(owner_prefix):
+        raise HTTPException(status_code=403, detail="The upload does not belong to the authenticated user.")
+    if not object_name.lower().endswith(".csv") or ".." in object_name.split("/"):
+        raise HTTPException(status_code=400, detail="A valid staged CSV object is required.")
+    if payload.skip_npi_validation and role not in ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="Skipping NPI validation is limited to administrators.")
+
+    job_id = str(uuid4())
+    job_ref = db.collection("processing_jobs").document(job_id)
+    await _firestore_write(
+        lambda: job_ref.set(
+            {
+                "job_id": job_id,
+                "company_id": company_id,
+                "owner_uid": owner_uid,
+                "object_name": object_name,
+                "status": "queued",
+                "batch_size": DEFAULT_GCS_CHUNK_SIZE,
+                "skip_npi_validation": payload.skip_npi_validation,
+                "completed_batches": 0,
+                "records_processed": 0,
+                "max_batch_records": 0,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            retry=None,
+            timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
+        ),
+        context=f"queuing upload job for company '{company_id}'",
+    )
+    background_tasks.add_task(
+        _process_uploaded_csv_job,
+        job_id,
+        object_name,
+        skip_npi_validation=payload.skip_npi_validation,
+        delete_source_on_success=payload.delete_source_on_success,
+    )
+    return {"job_id": job_id, "company_id": company_id, "status": "queued"}
+
+
+@app.get("/api/companies/{company_id}/uploads/process/{job_id}")
+async def get_company_upload_processing_status(
+    company_id: str,
+    job_id: str,
+    user: dict = Depends(require_authenticated_editor),
+):
+    """Return processing status only to the user who staged the source object."""
+    owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
+    snapshot = db.collection("processing_jobs").document(job_id).get()
+    job = snapshot.to_dict() if snapshot.exists else None
+    if not job or job.get("owner_uid") != owner_uid or job.get("company_id") != company_id:
+        raise HTTPException(status_code=404, detail="Processing job not found.")
+
+    return {
+        key: job.get(key)
+        for key in (
+            "job_id",
+            "company_id",
+            "status",
+            "batch_size",
+            "completed_batches",
+            "records_processed",
+            "max_batch_records",
+            "skip_npi_validation",
+            "error",
+        )
+        if key in job
+    }
 
 
 @app.post("/api/export/log")
@@ -390,6 +714,85 @@ async def download_session_pdf(session_id: str):
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
 
 
+# ── Signed URL direct-to-GCS upload ────────────────────────────────────────────
+
+class GenerateUploadUrlRequest(BaseModel):
+    company_id: str
+    filename: str
+    content_type: str | None = None
+
+
+@app.post("/api/upload/generate-url")
+async def generate_upload_url(
+    payload: GenerateUploadUrlRequest,
+    request: Request,
+    _role: str = Depends(require_editor_or_above),
+):
+    """Return an upload URL for the client to PUT the raw file to.
+
+    In emulator/dev mode there are no real GCS credentials, so signing a v4
+    URL would otherwise hang trying to resolve IAM credentials via the GCE
+    metadata server; route those uploads to a local receiver instead.
+    """
+    original_filename = os.path.basename(payload.filename.replace("\\", "/"))
+    if not original_filename:
+        raise HTTPException(status_code=400, detail="A file name is required.")
+
+    upload_id = str(uuid4())
+    storage_path = f"companies/{payload.company_id}/uploads/{upload_id}_{original_filename}"
+    content_type = payload.content_type or "application/octet-stream"
+
+    if USE_EMULATOR:
+        LOCAL_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        LOCAL_UPLOAD_PATHS[upload_id] = LOCAL_UPLOAD_DIR / f"{upload_id}_{original_filename}"
+        local_upload_url = f"{str(request.base_url).rstrip('/')}/api/local-uploads/{upload_id}"
+        return {"upload_id": upload_id, "upload_url": local_upload_url, "storage_path": storage_path}
+
+    def _sign() -> str:
+        blob = storage.bucket().blob(storage_path)
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=30),
+            method="PUT",
+            content_type=content_type,
+            **_iam_signing_kwargs(),
+        )
+
+    try:
+        upload_url = await asyncio.wait_for(asyncio.to_thread(_sign), timeout=GCS_SIGNING_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as e:
+        raise HTTPException(
+            status_code=504,
+            detail="Timed out generating the GCS upload URL. Check service account credentials.",
+        ) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate upload URL: {e}") from e
+
+    return {"upload_id": upload_id, "upload_url": upload_url, "storage_path": storage_path}
+
+
+@app.put("/api/local-uploads/{upload_id}", include_in_schema=False)
+async def receive_local_upload(upload_id: str, request: Request):
+    """Accept a raw PUT body for emulator-mode uploads, streamed to disk."""
+    file_path = LOCAL_UPLOAD_PATHS.get(upload_id)
+    if file_path is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired local upload URL.")
+
+    uploaded_bytes = 0
+    try:
+        with file_path.open("wb") as output_file:
+            async for chunk in request.stream():
+                output_file.write(chunk)
+                uploaded_bytes += len(chunk)
+    except Exception:
+        file_path.unlink(missing_ok=True)
+        raise
+    finally:
+        LOCAL_UPLOAD_PATHS.pop(upload_id, None)
+
+    return {"storage_path": str(file_path), "uploaded_bytes": uploaded_bytes}
+
+
 # ── Company file upload ───────────────────────────────────────────────────────
 
 @app.post("/api/companies/{company_id}/upload_file", status_code=201)
@@ -413,17 +816,22 @@ async def upload_company_file(
     await file.seek(0)
     file_bytes = await file.read()
 
-    ingestion_summary = _get_ingest()(io.BytesIO(file_bytes))
+    # Run the CPU-bound pandas ingestion off the event loop so concurrent requests aren't serialized behind it.
+    ingestion_summary = await asyncio.to_thread(_get_ingest(), io.BytesIO(file_bytes))
+    scrubbed_records = await scrub_provider_records(ingestion_summary.get("records", []))
 
-    try:
-        from firebase_admin import storage
-
+    def _upload_to_storage() -> None:
         bucket = storage.bucket()
         blob = bucket.blob(storage_path)
         blob.upload_from_string(
             file_bytes,
             content_type=file.content_type or "application/octet-stream",
         )
+
+    try:
+        # Storage writes are blocking network I/O; run in a thread so a slow/unreachable
+        # bucket can't stall the event loop for every other concurrent upload.
+        await asyncio.to_thread(_upload_to_storage)
     except Exception:
         pass
 
@@ -435,43 +843,87 @@ async def upload_company_file(
         "preview_data": ingestion_summary["preview_data"],
         "inferred_schema": ingestion_summary["inferred_schema"],
         "duplicate_clusters": ingestion_summary.get("duplicate_clusters", []),
+        "records": scrubbed_records,
         "peak_memory_mb": ingestion_summary["peak_memory_mb"],
     }
 
 
 @app.get("/api/companies/{company_id}/dashboard_metrics")
 async def get_company_dashboard_metrics(company_id: str):
-    """Return executive metrics aggregated from the company's upload metadata."""
+    """Score processed records, falling back to legacy upload metadata when absent.
+
+    Firestore reads are offloaded to a thread and bounded by a short, retry-free
+    deadline so an unreachable emulator can't block the event loop (and every
+    other in-flight request) for the default ~60s gRPC deadline.
+    """
+    def _fetch_data():
+        company = db.collection("companies").document(company_id)
+        records = [document.to_dict() or {} for document in company.collection("records").stream(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)]
+        if records:
+            return records, []
+        uploads = list(company.collection("uploads").stream(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS))
+        return [], uploads
+
     try:
-        uploads = db.collection("companies").document(company_id).collection("uploads").stream()
-        total_hcp = 0
-        total_flags = 0
-        health_scores = []
-
-        for document in uploads:
-            upload = document.to_dict() or {}
-            metadata = upload.get("metadata") or {}
-            total_hcp += int(metadata.get("record_count", upload.get("record_count", 0)) or 0)
-            total_flags += int(metadata.get("flag_count", upload.get("flag_count", 0)) or 0)
-            health_score = float(
-                metadata.get("quality_score", upload.get("quality_score", 0)) or 0
-            )
-            if health_score > 0:
-                health_scores.append(health_score)
-
+        records, uploads = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_data), timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS + 1
+        )
+    except Exception:
+        logger.warning("Firestore unreachable while fetching dashboard metrics for '%s'.", company_id)
         return {
             "company_id": company_id,
-            "total_healthcare_professionals": total_hcp,
-            "data_health_score": round(sum(health_scores) / len(health_scores), 1)
-            if health_scores
-            else 0.0,
-            "unresolved_validation_flags": total_flags,
+            "total_healthcare_professionals": 0,
+            "data_health_score": 0.0,
+            "unresolved_validation_flags": 0,
+            "source": "offline_fallback",
         }
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unable to retrieve dashboard metrics: {exc}",
-        ) from exc
+
+    if records:
+        scores = calculate_data_health(records)
+        return {
+            "company_id": company_id,
+            "total_healthcare_professionals": scores["record_count"],
+            "data_health_score": scores["quality_score"],
+            "unresolved_validation_flags": scores["flag_count"],
+            "pending_npi_count": scores["pending_npi_count"],
+            "score_categories": scores["score_categories"],
+        }
+
+    total_hcp = 0
+    total_flags = 0
+    health_scores = []
+
+    for document in uploads:
+        upload = document.to_dict() or {}
+        metadata = upload.get("metadata") or {}
+        total_hcp += int(metadata.get("record_count", upload.get("record_count", 0)) or 0)
+        total_flags += int(metadata.get("flag_count", upload.get("flag_count", 0)) or 0)
+        health_score = float(
+            metadata.get("quality_score", upload.get("quality_score", 0)) or 0
+        )
+        if health_score > 0:
+            health_scores.append(health_score)
+
+    return {
+        "company_id": company_id,
+        "total_healthcare_professionals": total_hcp,
+        "data_health_score": round(sum(health_scores) / len(health_scores), 1)
+        if health_scores
+        else 0.0,
+        "unresolved_validation_flags": total_flags,
+    }
+
+
+@app.get("/api/companies/{company_name}/records")
+async def get_company_records(company_name: str):
+    """Return an empty records collection for the company dashboard."""
+    return {"company_name": company_name, "records": []}
+
+
+@app.get("/api/companies/{company_name}/provider_walkthrough")
+async def get_company_provider_walkthrough(company_name: str):
+    """Return an empty provider walkthrough collection for the dashboard."""
+    return {"company_name": company_name, "records": []}
 
 
 @app.post("/api/companies/{company_id}/users/invite", status_code=201)
@@ -579,18 +1031,45 @@ async def merge_company_records(company_id: str, payload: dict, _role: str = Dep
         if not isinstance(records, list) or not records:
             raise HTTPException(status_code=422, detail="'records' must be a non-empty list.")
 
-        merged = merge_record_cluster(records, master_record_id=master_record_id)
+        # Run PII/NPI/anomaly detection before persisting so Data Review reflects
+        # real quality signals instead of raw-field heuristics (this endpoint is
+        # the one the real upload flow calls; other upload paths already scrub).
+        scrubbed_records = await scrub_provider_records(records)
+
+        # Duplicate-cluster detection was previously only computed by the legacy
+        # multipart /upload_file path and never reached Firestore here, so every
+        # record from the real upload flow silently reported zero duplicates.
+        duplicate_row_indexes: set[int] = set()
+        for cluster in _get_duplicate_detector()(scrubbed_records):
+            duplicate_row_indexes.update(entry["row_index"] for entry in cluster["records"])
+        for index, record in enumerate(scrubbed_records):
+            record["is_duplicate"] = index in duplicate_row_indexes
+
+        merged = merge_record_cluster(scrubbed_records, master_record_id=master_record_id)
         master = merged["master_record"]
+        merged_at = datetime.now(timezone.utc).isoformat()
 
         records_ref = db.collection("companies").document(company_id).collection("records")
         master_id = str(master.get("record_id") or master_record_id or uuid4())
         master["record_id"] = master_id
-        records_ref.document(master_id).set(master)
+        master["merged_at"] = merged_at
+        await _firestore_write(
+            lambda: records_ref.document(master_id).set(
+                master, retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS
+            ),
+            context=f"merging records for company '{company_id}'",
+        )
 
         for archived_record in merged["archived_records"]:
             archived_id = str(archived_record.get("record_id") or uuid4())
             archived_record["record_id"] = archived_id
-            records_ref.document(archived_id).set(archived_record)
+            archived_record["merged_at"] = merged_at
+            await _firestore_write(
+                lambda archived_record=archived_record, archived_id=archived_id: records_ref.document(
+                    archived_id
+                ).set(archived_record, retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS),
+                context=f"archiving a duplicate record for company '{company_id}'",
+            )
 
         return {
             "company_id": company_id,
@@ -607,13 +1086,53 @@ async def merge_company_records(company_id: str, payload: dict, _role: str = Dep
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+class BulkApproveLowSeverityPayload(BaseModel):
+    flag_ids: list[str] | None = None
+
+
+@app.post("/api/companies/{company_id}/flags/approve-low-severity")
+async def approve_low_severity_flags_endpoint(
+    company_id: str,
+    payload: BulkApproveLowSeverityPayload,
+    _role: str = Depends(require_editor_or_above),
+):
+    """Bulk-approve all Low-severity flags for a company. Viewers are blocked.
+
+    Uses Firestore batched writes (at most 500 operations per batch) so
+    large flag sets are approved in a small, fixed number of round trips.
+    """
+    try:
+        result = approve_low_severity_flags(db, company_id, flag_ids=payload.flag_ids)
+        return {"company_id": company_id, **result}
+    except Exception as exc:
+        logger.exception("Failed to bulk-approve low-severity flags")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/companies/{company_id}/export_data")
-async def export_company_data(company_id: str):
+async def export_company_data(
+    company_id: str,
+    page_size: int = Query(FIRESTORE_PAGE_SIZE, ge=1, le=1000),
+    cursor: str | None = Query(default=None),
+):
     """Return processed records for the Data Review and export staging workflows."""
     try:
         records_ref = db.collection("companies").document(company_id).collection("records")
-        records = [doc.to_dict() for doc in records_ref.stream()]
-        return {"records": records}
+        records_query = records_ref.order_by("__name__")
+        if cursor:
+            cursor_snapshot = records_ref.document(cursor).get()
+            if not cursor_snapshot.exists:
+                raise HTTPException(status_code=400, detail="Invalid export cursor.")
+            records_query = records_query.start_after(cursor_snapshot)
+
+        documents = list(records_query.limit(page_size + 1).stream())
+        has_more = len(documents) > page_size
+        documents = documents[:page_size]
+        next_cursor = documents[-1].id if has_more else None
+        response = {"records": [doc.to_dict() for doc in documents]}
+        if next_cursor:
+            response["next_cursor"] = next_cursor
+        return response
 
     except HTTPException:
         raise

@@ -1,5 +1,7 @@
 // Record-level detail panel used by DataReviewScreen. Reacts to a record selected
 // from the flagged-records table below it (MA-62).
+import { hasReviewField, reviewName, reviewValue } from './dataReview'
+
 interface RecordDetailDashboardProps {
   records: Record<string, unknown>[]
   selectedRecord: Record<string, unknown> | null
@@ -23,12 +25,13 @@ export default function RecordDetailDashboard({ records, selectedRecord, onSelec
     )
   }
 
-  const providerName = `${text(selectedRecord.first_name)} ${text(selectedRecord.last_name)}`.trim()
-    || text(selectedRecord.provider_id) || text(selectedRecord.npi) || 'Unknown provider'
-  const npi = text(selectedRecord.npi) || text(selectedRecord.NPI) || 'Unknown'
+  const providerName = reviewName(selectedRecord, records.indexOf(selectedRecord))
+  const npi = reviewValue(selectedRecord, 'npi') || 'Unknown'
   const payerName = text(selectedRecord.payer_name) || text(selectedRecord.payerName) || 'Not reported'
-  const email = text(selectedRecord.email) || text(selectedRecord.email_address)
-  const phone = text(selectedRecord.phone) || text(selectedRecord.phone_number)
+  const email = reviewValue(selectedRecord, 'email')
+  const phone = reviewValue(selectedRecord, 'phone')
+  const emailSupplied = hasReviewField(records, 'email')
+  const phoneSupplied = hasReviewField(records, 'phone')
   const isAnomaly = selectedRecord.anomaly_flag === -1 || selectedRecord.anomaly_flag === '-1' || isTrueValue(selectedRecord.is_anomaly)
   const isDuplicate = isTrueValue(selectedRecord.is_duplicate) || isTrueValue(selectedRecord.merged_from_sources) || selectedRecord.deduplication_status === 'merged'
 
@@ -53,15 +56,14 @@ export default function RecordDetailDashboard({ records, selectedRecord, onSelec
       <div className="flex flex-wrap gap-1.5 mb-3">
         {isAnomaly && badge('Statistical outlier', '#991B1B', '#FEE2E2')}
         {isDuplicate && badge('Duplicate', '#92400E', '#FEF3C7')}
-        {!email && badge('Missing email', '#991B1B', '#FEE2E2')}
-        {!phone && badge('Missing phone', '#991B1B', '#FEE2E2')}
-        {!isAnomaly && !isDuplicate && email && phone && badge('No open flags', '#1B5E3B', '#E8F5EF')}
+        {emailSupplied && !email && badge('Missing email', '#991B1B', '#FEE2E2')}
+        {phoneSupplied && !phone && badge('Missing phone', '#991B1B', '#FEE2E2')}
       </div>
 
       <div className="grid grid-cols-2 gap-3 text-[12px]" style={{ color: '#1A1A2E' }}>
         <div><span className="font-semibold">Payer:</span> {payerName}</div>
-        <div><span className="font-semibold">Email:</span> {email || 'Not on file'}</div>
-        <div><span className="font-semibold">Phone:</span> {phone || 'Not on file'}</div>
+        <div><span className="font-semibold">Email:</span> {email || (emailSupplied ? 'Not on file' : 'Not supplied')}</div>
+        <div><span className="font-semibold">Phone:</span> {phone || (phoneSupplied ? 'Not on file' : 'Not supplied')}</div>
         <div><span className="font-semibold">Dedup status:</span> {text(selectedRecord.deduplication_status) || (isDuplicate ? 'Merged' : 'Unique')}</div>
       </div>
     </div>
