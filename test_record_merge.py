@@ -1,5 +1,8 @@
+import time
+
 from fastapi.testclient import TestClient
 
+import main as main_module
 from database import db
 from main import app
 
@@ -112,6 +115,32 @@ def test_merge_records_endpoint_persists_every_incoming_record():
     }
 
 
+def test_merge_records_endpoint_flags_true_duplicate_clusters_only():
+    """Regression test: the real upload flow (records/merge) previously never set
+    is_duplicate at all, so the Duplicates category/tab always read zero for
+    genuinely uploaded data. Same NPI twice should be flagged; a distinct NPI
+    should not."""
+    company_id = "test-merge-duplicate-flagging-company"
+    payload = {
+        "records": [
+            {"record_id": "dup-1", "npi": "1111111111", "name": "Provider A"},
+            {"record_id": "dup-2", "npi": "1111111111", "name": "Provider A Clone"},
+            {"record_id": "unique-1", "npi": "2222222222", "name": "Provider B"},
+        ],
+    }
+
+    response = client.post(f"/api/companies/{company_id}/records/merge", json=payload, headers={"X-User-Role": "admin"})
+
+    assert response.status_code == 200, response.text
+    records = {
+        record.to_dict()["record_id"]: record.to_dict()
+        for record in db.collection("companies").document(company_id).collection("records").stream()
+    }
+    assert records["dup-1"]["is_duplicate"] is True
+    assert records["dup-2"]["is_duplicate"] is True
+    assert records["unique-1"]["is_duplicate"] is False
+
+
 def test_merge_records_endpoint_requires_records_field():
     response = client.post("/api/companies/test-merge-company/records/merge", json={}, headers={"X-User-Role": "admin"})
 
@@ -133,3 +162,65 @@ def test_merge_records_endpoint_logs_and_returns_execution_error(monkeypatch, ca
     assert response.status_code == 500
     assert response.json()["detail"] == "database unavailable"
     assert "Failed to merge company records" in caplog.text
+
+
+class _UnreachableNode:
+    """Mimics the Firestore client's chained collection()/document() calls,
+    raising only when a write is actually attempted."""
+
+    def collection(self, *args, **kwargs):
+        return self
+
+    def document(self, *args, **kwargs):
+        return self
+
+    def set(self, *args, **kwargs):
+        raise ConnectionError("[Errno 10061] Connection refused")
+
+
+def test_merge_records_endpoint_fails_fast_when_firestore_unreachable(monkeypatch):
+    monkeypatch.setattr(main_module, "db", _UnreachableNode())
+    monkeypatch.setattr(main_module, "ALLOW_OFFLINE_FIRESTORE_WRITES", False)
+
+    payload = {
+        "records": [
+            {"record_id": "r1", "name": "Provider One"},
+            {"record_id": "r2", "name": "Provider Two"},
+        ],
+        "master_record_id": "r1",
+    }
+
+    started = time.monotonic()
+    response = client.post(
+        "/api/companies/unreachable-company/records/merge",
+        json=payload,
+        headers={"X-User-Role": "admin"},
+    )
+    elapsed = time.monotonic() - started
+
+    assert response.status_code == 503
+    assert "Firestore is unreachable" in response.json()["detail"]
+    assert elapsed < 5, f"Expected a fast failure, took {elapsed:.1f}s"
+
+
+def test_merge_records_endpoint_skips_write_when_offline_bypass_enabled(monkeypatch):
+    monkeypatch.setattr(main_module, "db", _UnreachableNode())
+    monkeypatch.setattr(main_module, "USE_EMULATOR", True)
+    monkeypatch.setattr(main_module, "ALLOW_OFFLINE_FIRESTORE_WRITES", True)
+
+    payload = {
+        "records": [
+            {"record_id": "r1", "name": "Provider One"},
+            {"record_id": "r2", "name": "Provider Two"},
+        ],
+        "master_record_id": "r1",
+    }
+
+    response = client.post(
+        "/api/companies/offline-bypass-company/records/merge",
+        json=payload,
+        headers={"X-User-Role": "admin"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["merged_record"]["record_id"] == "r1"

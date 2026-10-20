@@ -2,6 +2,19 @@ import { useState, useRef, useEffect, createContext, useContext, Fragment, type 
 import { useNavigate, useLocation } from 'react-router-dom'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
 import RecordDetailDashboard from './RecordDetailDashboard'
+import { contactFlags, hasReviewField, npiOutcome, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
+
+// Backend base URL — empty string means calls are relative (proxied via Firebase Hosting rewrites in prod)
+const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
+
+// Carries the HTTP status code alongside a fetch failure so callers can branch on 403/404/etc.
+class HttpError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip as RechartTooltip,
   Cell, CartesianGrid, Legend, PieChart, Pie,
@@ -41,7 +54,7 @@ const UploadContext = createContext<{ meta: UploadMeta | null; setMeta: (m: Uplo
 const useUploadMeta = () => useContext(UploadContext)
 
 // Shared NPI validation resolution state — read by ExportScreen to gate CSV export
-type ValAction = 'removed' | 'override'
+type ValAction = 'removed' | 'override' | 'approved'
 const ValidationContext = createContext<{
   resolvedVal: Map<number, ValAction>
   setResolvedVal: (m: Map<number, ValAction>) => void
@@ -49,7 +62,7 @@ const ValidationContext = createContext<{
 const useValidation = () => useContext(ValidationContext)
 
 // Shared outlier resolution state — read by Analytics + Export
-type OutAction = 'removed' | 'kept' | 'warned'
+type OutAction = 'removed' | 'kept' | 'warned' | 'approved'
 const OutlierContext = createContext<{
   resolvedOut: Map<number, OutAction>
   setResolvedOut: (m: Map<number, OutAction>) => void
@@ -809,7 +822,7 @@ function useDashboardStats() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('http://localhost:8000/api/dashboard/summary')
+      const res = await fetch(`${API_BASE_URL}/api/dashboard/summary`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json: DashboardStats = await res.json()
       setData(json)
@@ -1110,8 +1123,8 @@ function useProviderWalkthrough(companyId: string) {
       setError(null)
 
       const endpoints = [
-        `http://localhost:8000/api/companies/${encodeURIComponent(companyId)}/provider_walkthrough`,
-        `http://localhost:8000/api/companies/${encodeURIComponent(companyId)}/records`,
+        `${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/provider_walkthrough`,
+        `${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/records`,
       ]
 
       for (const endpoint of endpoints) {
@@ -1161,6 +1174,21 @@ function useProviderWalkthrough(companyId: string) {
 function formatUsd(value: number | null): string {
   if (value === null) return 'N/A'
   return value.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
+}
+
+// Bulk-approves all Low-severity flags for a company via Firestore batched writes (≤500 docs/batch).
+async function approveLowSeverityFlags(companyId: string): Promise<{ approved_count: number; batch_count: number } | null> {
+  try {
+    const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/flags/approve-low-severity`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User-Role': 'editor' },
+      body: JSON.stringify({}),
+    })
+    if (!response.ok) return null
+    return await response.json()
+  } catch {
+    return null
+  }
 }
 
 function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
@@ -1499,13 +1527,15 @@ type UploadState =
   | 'processing'   // server-side parse / column detection
   | 'done'
   | 'error-type'   // wrong file extension
-  | 'error-size'   // > 50 MB
+  | 'error-size'   // exceeds MAX_FILE_BYTES
   | 'error-parse'  // malformed CSV (row-level error)
-  | 'error-network' // connection dropped mid-upload
+  | 'error-forbidden' // 403 — caller lacks Editor role or higher
+  | 'error-network' // connection dropped, timed out, or other server error mid-upload
 
-// Simulated chunked upload — tracks chunk index and total chunks
+// Simulated chunked upload — tracks chunk index and total chunks (demo scenarios only)
 const CHUNK_SIZE_MB = 5
-const MAX_FILE_MB = 50
+// Client-side dropzone ceiling — backend chunking is memory-safe up to this size (National NPI dataset).
+const MAX_FILE_BYTES = 1073741824 // 1 GB
 
 interface ParseError {
   row: number
@@ -1515,6 +1545,7 @@ interface ParseError {
 
 interface ExportResponse {
   records: Record<string, unknown>[]
+  next_cursor?: string
 }
 
 const MOCK_PARSE_ERRORS: ParseError[] = [
@@ -1554,56 +1585,92 @@ function parseCsvRecords(
   return rows.map(values => Object.fromEntries(headers.map((header, index) => [header, values[index]?.trim() || ''])))
 }
 
-function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => void; showToast: (type: ToastType, message: string) => void }) {
   const { role } = useRole()
   const canDeleteDatasets = isAdminRole(role)
   const deleteDatasetTooltip = 'Only Admin users can delete datasets.'
   const { setMeta } = useUploadMeta()
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [fileName,    setFileName]    = useState('')
-  const [fileSize,    setFileSize]    = useState(0)   // bytes
+  const [fileSize,    setFileSize]    = useState(0)   // MB
   const [chunksDone,  setChunksDone]  = useState(0)
   const [chunksTotal, setChunksTotal] = useState(0)
   const [retryCount,  setRetryCount]  = useState(0)
   const [uploadError, setUploadError] = useState('')
+  const [isRealUpload, setIsRealUpload] = useState(false)
+  const [uploadPct,    setUploadPct]    = useState(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const xhrRef = useRef<XMLHttpRequest | null>(null)
+  const pendingFileRef = useRef<File | null>(null)
 
   const totalPct = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0
 
+  // Direct client-to-GCS PUT against a signed URL, reporting real byte-level progress.
+  const putFileToSignedUrl = (file: File, uploadUrl: string) => new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhrRef.current = xhr
+    xhr.open('PUT', uploadUrl, true)
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
+    xhr.timeout = 30 * 60 * 1000 // large files can take a while on slow connections
+    xhr.upload.onprogress = event => {
+      if (event.lengthComputable) setUploadPct(Math.round((event.loaded / event.total) * 100))
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve()
+      else reject(new Error(`Storage upload failed (HTTP ${xhr.status})`))
+    }
+    xhr.onerror = () => reject(new Error('Network error — the connection dropped mid-upload.'))
+    xhr.ontimeout = () => reject(new Error('Upload timed out — the connection was too slow or was interrupted.'))
+    xhr.onabort = () => reject(new Error('Upload was cancelled.'))
+    xhr.send(file)
+  })
+
   const uploadRealFile = async (file: File) => {
+    pendingFileRef.current = file
     setFileName(file.name)
     setFileSize(file.size / (1024 * 1024))
     setUploadError('')
+    setIsRealUpload(true)
+    setUploadPct(0)
     setUploadState('uploading')
 
     try {
-      const recordsToUpload = parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
-      setChunksDone(1)
-      setChunksTotal(1)
+      const urlRes = await fetch(`${API_BASE_URL}/api/companies/demo-company/uploads/generate-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
+        body: JSON.stringify({ filename: file.name, content_type: file.type || 'text/csv' }),
+      })
+      if (!urlRes.ok) throw new HttpError(urlRes.status, (await urlRes.text()) || 'Could not obtain an upload URL')
+      const { upload_url: uploadUrl } = await urlRes.json()
+
+      await putFileToSignedUrl(file, uploadUrl)
+      xhrRef.current = null
       setUploadState('processing')
 
-      const formData = new FormData()
-      formData.append('file', file, file.name)
-      const uploadResponse = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/upload_file', {
+      const recordsToUpload = parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
+      const mergeResponse = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/records/merge`, {
         method: 'POST',
-        body: formData,
-      })
-      if (!uploadResponse.ok) throw new Error(await uploadResponse.text())
-
-      console.log("Parsed Payload:", recordsToUpload);
-      const mergeResponse = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/records/merge', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ records: recordsToUpload }),
       })
-      if (!mergeResponse.ok) throw new Error(await mergeResponse.text())
-      await new Promise(resolve => setTimeout(resolve, 500))
+      if (!mergeResponse.ok) throw new HttpError(mergeResponse.status, await mergeResponse.text())
 
       setMeta({ fileName: file.name, fileSize: file.size, rowCount: recordsToUpload.length, fileType: 'CSV', uploadedAt: new Date().toLocaleString() })
       setUploadState('done')
       onNavigate('data-review')
     } catch (error) {
-      setUploadError(error instanceof Error ? error.message : 'Upload failed')
+      xhrRef.current = null
+      if (error instanceof HttpError && error.status === 403) {
+        setUploadError('Unauthorized: Editor role required to upload data. Ask an Admin to upgrade your access.')
+        setUploadState('error-forbidden')
+        showToast('error', 'Unauthorized: Editor role required')
+        return
+      }
+      if (error instanceof HttpError && error.status === 404) {
+        setUploadError('Upload service not found (404) — the endpoint may be misconfigured. Please contact support.')
+      } else {
+        setUploadError(error instanceof Error ? error.message : 'Upload failed')
+      }
       setUploadState('error-network')
     }
   }
@@ -1611,6 +1678,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   // ── core upload simulator ──────────────────────────────────────────────────
   const runUpload = (name: string, sizeMB: number, rowCount = 10412, fileType = 'CSV') => {
     const total = Math.max(1, Math.ceil(sizeMB / CHUNK_SIZE_MB))
+    setIsRealUpload(false)
     setFileName(name)
     setFileSize(sizeMB)
     setChunksDone(0)
@@ -1634,14 +1702,18 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const cancelUpload = (e: React.MouseEvent) => {
     e.stopPropagation()
     clearInterval(intervalRef.current!)
+    xhrRef.current?.abort()
+    xhrRef.current = null
     setUploadState('idle')
     setChunksDone(0)
     setChunksTotal(0)
+    setUploadPct(0)
   }
 
   const retryUpload = () => {
     setRetryCount(r => r + 1)
-    runUpload(fileName, fileSize)
+    if (isRealUpload && pendingFileRef.current) uploadRealFile(pendingFileRef.current)
+    else runUpload(fileName, fileSize)
   }
 
   // ── file validation ────────────────────────────────────────────────────────
@@ -1651,19 +1723,12 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       setUploadState('error-type')
       return
     }
-    if (sizeMB > MAX_FILE_MB) {
-      setFileName(name)
-      setFileSize(sizeMB)
-      setUploadState('error-size')
-      return
-    }
     runUpload(name, sizeMB)
   }
 
   // ── demo triggers — click zone picks one of several scenarios ─────────────
   const triggerNormal  = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; runUpload('Q2_HCP_Oncology.csv', 12) }
   const triggerBadType  = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; setFileName('BadFormat_HCP_List.pdf'); setUploadState('error-type') }
-  const triggerTooLarge = () => { if (uploadState === 'uploading' || uploadState === 'processing') return; setFileName('Massive_NPI_Export_2026.csv'); setFileSize(67); setUploadState('error-size') }
   const triggerParse    = () => {
     if (uploadState === 'uploading' || uploadState === 'processing') return
     runUpload('Corrupted_HCP_March.csv', 8)
@@ -1686,7 +1751,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     if (!file.name.endsWith('.csv') && !file.name.endsWith('.xlsx')) {
       setFileName(file.name); setUploadState('error-type'); e.currentTarget.value = ''; return
     }
-    if (sizeMB > MAX_FILE_MB) {
+    if (file.size > MAX_FILE_BYTES) {
       setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); e.currentTarget.value = ''; return
     }
     if (ext === 'CSV') uploadRealFile(file)
@@ -1702,16 +1767,14 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     const dt = e.dataTransfer
     // DataTransferItem gives us filename+size during dragover in most browsers
     let name = ''
-    let sizeMB = 0
     try {
       if (dt.items && dt.items.length > 0) {
         const item = dt.items[0]
         const f = item.kind === 'file' ? (item as unknown as { getAsFile(): File | null }).getAsFile?.() : null
-        if (f) { name = f.name; sizeMB = f.size / (1024 * 1024) }
+        if (f) name = f.name
       }
       if (!name && dt.files && dt.files.length > 0) {
         name = dt.files[0].name
-        sizeMB = dt.files[0].size / (1024 * 1024)
       }
     } catch { /* browser may restrict file access during dragover */ }
 
@@ -1720,12 +1783,6 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       if (!lname.endsWith('.csv') && !lname.endsWith('.xlsx')) {
         setFileName(name)
         setUploadState('error-type')
-        return
-      }
-      if (sizeMB > MAX_FILE_MB) {
-        setFileName(name)
-        setFileSize(sizeMB)
-        setUploadState('error-size')
         return
       }
     }
@@ -1741,7 +1798,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     if (!file.name.toLowerCase().endsWith('.csv') && !file.name.toLowerCase().endsWith('.xlsx')) {
       setFileName(file.name); setUploadState('error-type'); return
     }
-    if (sizeMB > MAX_FILE_MB) {
+    if (file.size > MAX_FILE_BYTES) {
       setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); return
     }
     if (ext === 'CSV') uploadRealFile(file)
@@ -1773,7 +1830,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         subtitle="Import HCP datasets for cleaning and analysis"
         actions={
           <span className="text-[11px] px-3 py-1 rounded-[6px]" style={{ background: C.lightTint, color: C.navy }}>
-            Max file size: 50 MB · CSV or XLSX
+            CSV or XLSX · Up to 1 GB
           </span>
         }
       />
@@ -1783,7 +1840,6 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         <span className="text-[11px] font-bold" style={{ color: C.navy }}>Test scenarios:</span>
         <button onClick={triggerNormal}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.success,  color: 'white', borderColor: C.success  }}>✓ Normal upload</button>
         <button onClick={triggerBadType}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.danger,   color: 'white', borderColor: C.danger   }}>✕ Wrong file type (.pdf)</button>
-        <button onClick={triggerTooLarge} className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.danger,   color: 'white', borderColor: C.danger   }}>✕ File too large (67 MB)</button>
         <button onClick={triggerParse}    className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.warning,  color: 'white', borderColor: C.warning  }}>⚠ Parse error (corrupt CSV)</button>
         <button onClick={triggerNetworkError} className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: '#6B7280', color: 'white', borderColor: '#6B7280'  }}>⚡ Network drop</button>
       </div>
@@ -1794,11 +1850,11 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           className={`border-2 border-dashed rounded-[6px] transition-all cursor-pointer select-none`}
           style={{
             borderColor: uploadState === 'dragging' ? C.corpBlue
-              : (uploadState === 'error-type' || uploadState === 'error-size' || uploadState === 'error-parse' || uploadState === 'error-network') ? C.danger
+              : (uploadState === 'error-type' || uploadState === 'error-size' || uploadState === 'error-parse' || uploadState === 'error-forbidden' || uploadState === 'error-network') ? C.danger
               : uploadState === 'done' ? C.success
               : C.border,
             background: uploadState === 'dragging' ? 'rgba(46,134,171,0.04)'
-              : (uploadState === 'error-type' || uploadState === 'error-size') ? 'rgba(192,57,43,0.03)'
+              : uploadState === 'error-type' ? 'rgba(192,57,43,0.03)'
               : 'transparent',
             padding: '48px 32px',
           }}
@@ -1826,7 +1882,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               <p className="text-[15px] font-semibold mb-1" style={{ color: uploadState === 'dragging' ? C.corpBlue : C.navy }}>
                 {uploadState === 'dragging' ? 'Drop to upload' : 'Drag CSV or XLSX here, or click to browse'}
               </p>
-              <p className="text-[12px]" style={{ color: C.midText }}>Supports CSV, XLSX · Max 50 MB · Up to 1 M rows</p>
+              <p className="text-[12px]" style={{ color: C.midText }}>Supports CSV, XLSX · Up to 1 GB per file</p>
               {uploadState === 'dragging' && (
                 <Badge tier={1} color="info" className="mt-3">Release to begin upload</Badge>
               )}
@@ -1927,38 +1983,23 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             </div>
           )}
 
-          {/* ── STATE: error — file too large ───────────────────────────── */}
+          {/* ── STATE: error — file exceeds 1GB limit ─────────────────────── */}
           {uploadState === 'error-size' && (
-            <div className="max-w-sm mx-auto text-center">
+            <div className="max-w-sm mx-auto text-center" onClick={e => e.stopPropagation()}>
               <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
                 style={{ background: '#FEE2E2', color: C.danger }}>
                 {Icon.alertTriangle}
               </div>
-              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>File exceeds 50 MB limit</p>
+              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>File too large</p>
               <p className="text-[13px] mb-1" style={{ color: C.darkText }}>
-                <span className="mono font-semibold">{fileName}</span>
-                <span className="ml-2 text-[11px] font-semibold px-2 py-0.5 rounded-[4px]"
-                  style={{ background: '#FEE2E2', color: C.danger }}>
-                  {fileSize.toFixed(1)} MB
-                </span>
+                <span className="mono font-semibold">{fileName}</span> ({(fileSize / 1024).toFixed(2)} GB)
               </p>
-              <p className="text-[12px] mb-2" style={{ color: C.midText }}>
-                Your file is <strong>{(fileSize - MAX_FILE_MB).toFixed(1)} MB over the limit</strong>. Split the file into chunks under 50 MB and upload each separately, or contact support to request a limit increase.
+              <p className="text-[12px] mb-5" style={{ color: C.midText }}>
+                MedReach AI accepts files up to <strong>1 GB</strong>. Split the dataset into smaller batches and try again.
               </p>
-              {/* Visual size indicator */}
-              <div className="mt-3 mb-5 px-8">
-                <div className="progress-track" style={{ height: 8 }}>
-                  <div className="progress-fill" style={{ width: '100%', background: C.danger }} />
-                </div>
-                <div className="flex justify-between text-[10px] mt-1" style={{ color: C.midText }}>
-                  <span>0 MB</span>
-                  <span style={{ color: C.danger, fontWeight: 700 }}>Limit: 50 MB</span>
-                  <span style={{ color: C.danger }}>{fileSize.toFixed(1)} MB</span>
-                </div>
-              </div>
-              <div className="flex gap-2 justify-center" onClick={e => e.stopPropagation()}>
+              <div className="flex gap-2 justify-center">
                 <Btn variant="primary" size="sm" onClick={() => setUploadState('idle')}>
-                  Upload a different file
+                  Try a different file
                 </Btn>
               </div>
             </div>
@@ -2013,6 +2054,25 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             </div>
           )}
 
+          {/* ── STATE: error — 403 Forbidden ──────────────────────────────── */}
+          {uploadState === 'error-forbidden' && (
+            <div className="max-w-sm mx-auto text-center" onClick={e => e.stopPropagation()}>
+              <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+                style={{ background: '#FEE2E2', color: C.danger }}>
+                {Icon.shield}
+              </div>
+              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>Unauthorized: Editor role required</p>
+              <p className="text-[12px] mb-5" style={{ color: C.midText }}>
+                {uploadError || 'Your current role does not have permission to upload data. Ask an Admin to upgrade your access to Editor or higher.'}
+              </p>
+              <div className="flex gap-2 justify-center">
+                <Btn variant="primary" size="sm" onClick={() => setUploadState('idle')}>
+                  Dismiss
+                </Btn>
+              </div>
+            </div>
+          )}
+
           {/* ── STATE: error — network failure mid-upload ────────────────── */}
           {uploadState === 'error-network' && (
             <div className="max-w-sm mx-auto text-center">
@@ -2029,7 +2089,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               </p>
               {/* Partial progress bar */}
               <div className="progress-track mb-4 mx-8" style={{ height: 8 }}>
-                <div className="progress-fill" style={{ width: `${totalPct}%`, background: C.warning }} />
+                <div className="progress-fill" style={{ width: `${isRealUpload ? uploadPct : totalPct}%`, background: C.warning }} />
               </div>
               {retryCount > 0 && (
                 <p className="text-[11px] mb-3" style={{ color: C.midText }}>Retry attempt {retryCount}</p>
@@ -2060,7 +2120,7 @@ function UploadScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               </div>
             ))}
             <div className="flex items-center gap-2 text-[11px]" style={{ color: C.midText }}>
-              <span className="px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.lightTint, color: C.navy }}>50 MB</span>
+              <span className="px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.lightTint, color: C.navy }}>1 GB</span>
               Max file size
             </div>
           </div>
@@ -2610,16 +2670,24 @@ function NullPctBadge({ pct }: { pct: number }) {
 // ── Null completeness summary bar ─────────────────────────────────────────────
 function NullSummaryBar({ tab, records = [] }: { tab: string; records?: Record<string, unknown>[] }) {
   const totalRecords = records.length || 1
-  const emailNullCount = records.filter(record => !record.email).length
-  const phoneNullCount = records.filter(record => !record.phone).length
-  const emailNullPercent = Math.round((emailNullCount / totalRecords) * 100)
-  const phoneNullPercent = Math.round((phoneNullCount / totalRecords) * 100)
+  const emailSupplied = hasReviewField(records, 'email')
+  const phoneSupplied = hasReviewField(records, 'phone')
+  const emailNullCount = records.filter(record => !reviewValue(record, 'email')).length
+  const phoneNullCount = records.filter(record => !reviewValue(record, 'phone')).length
+  const emailNullPercent = Math.round((emailNullCount / totalRecords) * 1000) / 10
+  const phoneNullPercent = Math.round((phoneNullCount / totalRecords) * 1000) / 10
   const fields = tab === 'pii'
     ? [
-        { field: 'Email', nullPct: emailNullPercent },
-        { field: 'Phone', nullPct: phoneNullPercent },
+        { field: 'Email', nullPct: emailSupplied ? emailNullPercent : null },
+        { field: 'Phone', nullPct: phoneSupplied ? phoneNullPercent : null },
       ]
-    : NULL_SUMMARIES[tab]
+    : tab === 'validation'
+      ? [
+          { field: 'NPI Number', nullPct: Math.round(records.filter(record => !reviewValue(record, 'npi')).length / totalRecords * 1000) / 10 },
+          { field: 'Specialty', nullPct: Math.round(records.filter(record => !String(record.specialty || record.pri_spec || '').trim()).length / totalRecords * 1000) / 10 },
+          { field: 'State', nullPct: Math.round(records.filter(record => !String(record.state || record.State || '').trim()).length / totalRecords * 1000) / 10 },
+        ]
+      : NULL_SUMMARIES[tab]
   if (!fields) return null
   return (
     <div className="flex flex-wrap gap-4 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
@@ -2628,12 +2696,12 @@ function NullSummaryBar({ tab, records = [] }: { tab: string; records?: Record<s
         <div key={f.field} className="flex flex-col gap-0.5" style={{ minWidth: 90 }}>
           <div className="flex items-center justify-between gap-2">
             <span className="text-[10px]" style={{ color: C.midText }}>{f.field}</span>
-            <NullPctBadge pct={f.nullPct} />
+            {f.nullPct === null ? <span className="text-[10px]" style={{ color: C.midText }}>Not supplied</span> : <NullPctBadge pct={f.nullPct} />}
           </div>
           <div className="progress-track" style={{ height: 4 }}>
             <div className="progress-fill" style={{
-              width: `${100 - f.nullPct}%`,
-              background: f.nullPct === 0 ? C.success : f.nullPct <= 5 ? C.warning : C.danger,
+              width: `${f.nullPct === null ? 0 : 100 - f.nullPct}%`,
+              background: f.nullPct === null ? C.border : f.nullPct === 0 ? C.success : f.nullPct <= 5 ? C.warning : C.danger,
             }} />
           </div>
         </div>
@@ -2647,11 +2715,16 @@ function DataReviewScreen() {
   const [selectedRecord, setSelectedRecord] = useState<Record<string, unknown> | null>(null)
   const [recordsLoading, setRecordsLoading] = useState(true)
   const [recordsError, setRecordsError] = useState<string | null>(null)
-  const [tab, setTab] = useState<'pii' | 'duplicates' | 'outliers' | 'validation'>('pii')
+  const [recordsStatus, setRecordsStatus] = useState<number | null>(null)
+  const [tab, setTab] = useState<'pii' | 'contacts' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
-  // Map of PII id -> action ('anonymized'|'removed'|'override')
-  const [resolvedPII, setResolvedPII] = useState<Map<number, 'anonymized' | 'removed' | 'override'>>(new Map())
+  // Map of PII id -> action ('anonymized'|'removed'|'override'|'approved')
+  const [resolvedPrivacy, setResolvedPrivacy] = useState<Map<number, 'anonymized' | 'removed' | 'override' | 'approved'>>(new Map())
+  const [resolvedContacts, setResolvedContacts] = useState<Map<number, 'anonymized' | 'removed' | 'override' | 'approved'>>(new Map())
+  const [resolvedPII, setResolvedPII] = tab === 'contacts'
+    ? [resolvedContacts, setResolvedContacts] as const
+    : [resolvedPrivacy, setResolvedPrivacy] as const
   // NPI validation resolution — lifted into ValidationContext so ExportScreen can gate export
   const { resolvedVal, setResolvedVal } = useValidation()
   // Outlier resolution — lifted into OutlierContext so Analytics + Export can read tagged records
@@ -2672,24 +2745,28 @@ function DataReviewScreen() {
   useEffect(() => {
     const loadProcessedRecords = async () => {
       try {
-        const response = await globalThis.fetch('http://127.0.0.1:8000/api/companies/demo-company/export_data')
-        if (!response.ok) throw new Error(`Export request failed (${response.status})`)
-        const contentType = response.headers.get('content-type') || ''
-        if (contentType.includes('json')) {
-          const data = await response.json() as ExportResponse
-          console.log("Backend Export Response:", data);
-          if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
-          setProcessedRecords(data.records)
-        } else {
-          const payload = await response.text()
-          const [headerLine, ...lines] = payload.trim().split(/\r?\n/)
-          const headers = headerLine ? headerLine.split(',') : []
-          setProcessedRecords(lines.filter(Boolean).map(line => {
-            const values = line.split(',')
-            return Object.fromEntries(headers.map((header, index) => [header, values[index] || '']))
-          }))
-        }
+        const records: Record<string, unknown>[] = []
+        const cursors = new Set<string>()
+        let cursor: string | undefined
+        do {
+          const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+          const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
+          if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
+          if ((response.headers.get('content-type') || '').includes('json')) {
+            const data = await response.json() as ExportResponse
+            if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
+            records.push(...data.records)
+            cursor = data.next_cursor
+            if (cursor && cursors.has(cursor)) throw new Error('Export returned a repeated pagination cursor')
+            if (cursor) cursors.add(cursor)
+          } else {
+            records.push(...parseCsvRecords(await response.text(), { header: true, skipEmptyLines: true }))
+            cursor = undefined
+          }
+        } while (cursor)
+        setProcessedRecords(records)
       } catch (error) {
+        setRecordsStatus(error instanceof HttpError ? error.status : null)
         setRecordsError(error instanceof Error ? error.message : 'Unable to load processed records')
       } finally {
         setRecordsLoading(false)
@@ -2726,17 +2803,17 @@ function DataReviewScreen() {
 
   const severityRank = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
 
-  const piiFlags = processedRecords.flatMap((record, index) => {
-    const flags: { id: number; record: string; field: string; type: string; severity: string; nullPct: number; originalRecord: Record<string, unknown> }[] = []
-    const recordName = `${String(record.first_name || '')} ${String(record.last_name || '')}`.trim() || String(record.provider_id || record.npi || `Record ${index + 1}`)
-    if (!String(record.email || record.email_address || '').trim()) {
-      flags.push({ id: index * 2, record: recordName, field: 'Email', type: 'Personal Identifier', severity: 'High', nullPct: 100, originalRecord: record })
-    }
-    if (!String(record.phone || record.phone_number || '').trim()) {
-      flags.push({ id: index * 2 + 1, record: recordName, field: 'Phone', type: 'Personal Identifier', severity: 'High', nullPct: 100, originalRecord: record })
-    }
-    return flags
-  })
+  const piiFlags = tab === 'contacts' ? contactFlags(processedRecords) : privacyFlags(processedRecords)
+
+  const VALIDATION_ERRORS = processedRecords.flatMap((record, index) => npiOutcome(record) === 'invalid' ? [{
+    id: index,
+    record: reviewName(record, index),
+    npi: reviewValue(record, 'npi'),
+    specialty: String(record.specialty || record.pri_spec || 'Not reported'),
+    state: String(record.state || record.State || 'Not reported'),
+    issue: String(record.npi_status || record.validation_status || 'Missing or malformed NPI'),
+    issueType: 'Invalid', severity: 'High', nullPct: reviewValue(record, 'npi') ? 0 : 100,
+  }] : [])
 
   // ── sorted data ──────────────────────────────────────────────────────────
   const sortedPII = [...piiFlags].sort((a, b) => {
@@ -2778,53 +2855,49 @@ function DataReviewScreen() {
     return 0
   })
 
-  // ── Data Health Score (0–100) ───────────────────────────────────────────
-  // Each category contributes a weighted share. Within each category flags are
-  // weighted by severity so resolving High > Medium > Low flags scores more.
-  // Base score of 100 is penalised by unresolved flags, then capped 0–100.
-  const TOTAL_ROWS = processedRecords.length
-  const isTrue = (value: unknown) => value === true || value === -1 || ['true', '1', 'merged'].includes(String(value).toLowerCase())
-  const processedOutliers = processedRecords.filter(record => record.anomaly_flag === -1 || record.anomaly_flag === '-1' || record.is_anomaly === true || record.is_anomaly === 'true').length
-  const processedDuplicates = processedRecords.filter(record => isTrue(record.is_duplicate) || isTrue(record.merged_from_sources) || record.deduplication_status === 'merged').length
-  const processedPII = processedRecords.filter(record => !String(record.email || record.email_address || '').trim() || !String(record.phone || record.phone_number || '').trim()).length
-  const processedNPIValidation = processedRecords.filter(record => !String(record.npi || record.NPI || '').trim() || !String(record.payer_name || record.payerName || '').trim()).length
-  const unresolvedDataFlags = processedOutliers + processedDuplicates + processedPII + processedNPIValidation
+  const scores = reviewScores(processedRecords)
+  const TOTAL_ROWS = scores.total
+  const processedOutliers = scores.outliers
+  const processedDuplicates = scores.duplicates
+  const processedPII = scores.contacts
+  const processedPrivacy = scores.privacy
+  const processedNPIValidation = scores.invalidNpis
+  const unresolvedDataFlags = processedOutliers + processedDuplicates + processedPII + processedNPIValidation + processedPrivacy
 
-  const scoreCategory = (
-    flags: { severity: string; id: number }[],
-    resolved: Map<number, unknown>,
-    weight: number               // max points this category can contribute
-  ) => {
-    if (flags.length === 0) return weight
-    const sev = (s: string) => s === 'High' ? 3 : s === 'Medium' ? 2 : 1
-    const totalWeight  = flags.reduce((a, f) => a + sev(f.severity), 0)
-    const earnedWeight = flags
-      .filter(f => resolved.has(f.id))
-      .reduce((a, f) => a + sev(f.severity), 0)
-    return (earnedWeight / totalWeight) * weight
-  }
+  const npiPoints = scores.npiPoints
+  const piiPoints = scores.contactPoints
+  const dupPoints = scores.duplicatePoints
+  const outPoints = scores.outlierPoints
 
-  // Category weights: NPI (30) > PII (25) > Duplicates (25) > Outliers (20)
-  const liveRatio = TOTAL_ROWS === 0 ? 0 : Math.min(1, unresolvedDataFlags / TOTAL_ROWS)
-  const npiPoints = TOTAL_ROWS > 0 ? 30 * (1 - processedNPIValidation / TOTAL_ROWS) : 0
-  const piiPoints = TOTAL_ROWS > 0 ? 25 * (1 - processedPII / TOTAL_ROWS) : 0
-  const dupPoints = TOTAL_ROWS > 0 ? 25 * (1 - processedDuplicates / TOTAL_ROWS) : 0
-  const outPoints = TOTAL_ROWS > 0 ? 20 * (1 - processedOutliers / TOTAL_ROWS) : 0
-
-  // Flag-density penalty: reduce base by up to 5 pts if many flags per 1k rows
-  const totalFlags = unresolvedDataFlags
-  const densityPenalty = liveRatio * 100
-
-  const quality = Math.min(100, Math.max(0,
-    Math.round(100 - densityPenalty)
-  ))
+  const quality = scores.quality
 
   const tabs = [
-    { id: 'pii',        label: 'PII / PHI Flags',      count: processedPII },
+    { id: 'pii',        label: 'PII / PHI',             count: processedPrivacy },
+    { id: 'contacts',   label: 'Contact Completeness',  count: processedPII },
     { id: 'duplicates', label: 'Duplicates',            count: processedDuplicates },
     { id: 'outliers',   label: 'Statistical Outliers',  count: processedOutliers },
     { id: 'validation', label: 'NPI Validation',        count: processedNPIValidation },
   ] as const
+
+  // 404 from export_data means the company has no processed dataset yet — show an empty
+  // state instead of a dashboard full of misleading zeros.
+  if (!recordsLoading && recordsStatus === 404) {
+    return (
+      <div className="p-8">
+        <SectionHeader title="Data Review" subtitle="Review and resolve data quality flags before export" />
+        <Card className="max-w-md mx-auto text-center py-10">
+          <div className="w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4"
+            style={{ background: C.lightTint, color: C.midText }}>
+            {Icon.dashboard}
+          </div>
+          <p className="text-[15px] font-bold mb-1" style={{ color: C.navy }}>No data available</p>
+          <p className="text-[12px]" style={{ color: C.midText }}>
+            No processed records were found for this company yet. Upload a dataset to populate the data review dashboard.
+          </p>
+        </Card>
+      </div>
+    )
+  }
 
   return (
     <div className="p-8">
@@ -2847,6 +2920,13 @@ function DataReviewScreen() {
 
       <RecordDetailDashboard records={processedRecords} selectedRecord={selectedRecord} onSelectRecord={setSelectedRecord} />
 
+      {scores.pendingNpis > 0 && (
+        <Banner type="warning">Provisional score: {scores.pendingNpis.toLocaleString()} of {TOTAL_ROWS.toLocaleString()} NPIs await registry validation. Unavailable validation is not counted as an error.</Banner>
+      )}
+      {processedPrivacy > 0 && (
+        <Banner type="warning">PII / PHI detected in {processedPrivacy.toLocaleString()} records. These records reduce the dedicated 20-point privacy score.</Banner>
+      )}
+
       {/* ── Data Health Score bar ── */}
       {(() => {
         const scoreColor = quality >= 85 ? C.success : quality >= 65 ? C.corpBlue : quality >= 45 ? C.warning : C.danger
@@ -2855,10 +2935,11 @@ function DataReviewScreen() {
         const totalFlags = unresolvedDataFlags
 
         const segments = [
-          { label: 'NPI Validation', pts: npiPoints,  max: 30, resolved: 0, total: processedNPIValidation, color: C.navy },
-          { label: 'PII / PHI',      pts: piiPoints,  max: 25, resolved: 0, total: processedPII,           color: C.corpBlue },
-          { label: 'Duplicates',     pts: dupPoints,  max: 25, resolved: 0, total: processedDuplicates,   color: C.teal },
+          { label: 'NPI Validation', pts: npiPoints,  max: 20, resolved: 0, total: processedNPIValidation, color: C.navy },
+          { label: 'Contact Completeness', pts: piiPoints, max: 20, resolved: 0, total: processedPII,    color: C.corpBlue },
+          { label: 'Duplicates',     pts: dupPoints,  max: 20, resolved: 0, total: processedDuplicates,   color: C.teal },
           { label: 'Outliers',       pts: outPoints,  max: 20, resolved: 0, total: processedOutliers,     color: '#5C85C4' },
+          { label: 'PII / PHI', pts: scores.privacyPoints, max: 20, resolved: 0, total: processedPrivacy, color: C.danger },
         ]
 
         return (
@@ -2866,7 +2947,7 @@ function DataReviewScreen() {
             {/* Header row */}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-3">
-                <span className="text-[13px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Health Score</span>
+                <span className="text-[13px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Health Score{scores.pendingNpis > 0 ? ' (Provisional)' : ''}</span>
                 <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
                   style={{ background: quality >= 85 ? '#E8F5EF' : quality >= 65 ? '#EBF4FA' : quality >= 45 ? '#FEF3C7' : '#FEE2E2',
                            color: scoreColor }}>
@@ -2917,7 +2998,7 @@ function DataReviewScreen() {
             </div>
 
             {/* Per-category sub-bars */}
-            <div className="grid grid-cols-4 gap-3 mt-4 pt-4 border-t border-[#EDF2F7]">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3 mt-4 pt-4 border-t border-[#EDF2F7]">
               {segments.map(seg => {
                 const pct = Math.round((seg.pts / seg.max) * 100)
                 return (
@@ -2925,7 +3006,7 @@ function DataReviewScreen() {
                     <div className="flex justify-between items-center mb-1">
                       <span className="text-[10px] font-semibold" style={{ color: C.midText }}>{seg.label}</span>
                       <span className="text-[10px] font-bold mono" style={{ color: seg.color }}>
-                        {Math.round(seg.pts * 10) / 10}<span style={{ color: C.midText, fontWeight: 400 }}>/{seg.max}</span>
+                        {Math.round(seg.pts * 10) / 10}<span style={{ color: C.midText, fontWeight: 400 }}> / {seg.max} pts</span>
                       </span>
                     </div>
                     <div className="progress-track" style={{ height: 6 }}>
@@ -2950,7 +3031,7 @@ function DataReviewScreen() {
       })()}
 
       {/* Tabs */}
-      <div className="border-b-2 border-[#EDF2F7] mb-6 flex gap-1">
+      <div className="border-b-2 border-[#EDF2F7] mb-6 flex flex-wrap gap-1">
         {tabs.map(t => (
           <button
             key={t.id}
@@ -2975,9 +3056,28 @@ function DataReviewScreen() {
       </div>
 
       {/* ── PII / PHI FLAGS TAB ──────────────────────────────────────────────── */}
-      {tab === 'pii' && (
+      {(tab === 'pii' || tab === 'contacts') && (
         <Card>
-          <NullSummaryBar tab="pii" records={processedRecords} />
+          {tab === 'contacts' && <NullSummaryBar tab="pii" records={processedRecords} />}
+
+          {(() => {
+            const lowSeverityIds = sortedPII.filter(f => f.severity === 'Low' && !resolvedPII.has(f.id)).map(f => f.id)
+            return (
+              <div className="flex justify-end mb-3">
+                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
+                  onClick={async () => {
+                    await approveLowSeverityFlags('demo-company')
+                    setResolvedPII(prev => {
+                      const m = new Map(prev)
+                      lowSeverityIds.forEach(id => m.set(id, 'approved'))
+                      return m
+                    })
+                  }}>
+                  Approve All Low-Severity ({lowSeverityIds.length})
+                </Btn>
+              </div>
+            )
+          })()}
 
           {selected.size > 0 && (
             <div className="flex items-center gap-3 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
@@ -3016,9 +3116,9 @@ function DataReviewScreen() {
                 </th>
                 <SortTh label="Record"   sortKey="record"   current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
                 <SortTh label="Field"    sortKey="field"    current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
-                <th>PII / PHI Type</th>
+                <th>{tab === 'pii' ? 'PII / PHI Type' : 'Issue Type'}</th>
                 <SortTh label="Severity" sortKey="severity" current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
-                <SortTh label="Null %"   sortKey="nullPct"  current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />
+                {tab === 'contacts' && <SortTh label="Null %" sortKey="nullPct" current={piiSort.key} dir={piiSort.dir} onSort={k => cycleSort(piiSort, setPiiSort, k)} />}
                 <th>Action</th>
               </tr>
             </thead>
@@ -3036,7 +3136,7 @@ function DataReviewScreen() {
                           setSelected(s)
                         }} />
                     </td>
-                    <td className="font-medium"><span onClick={(event) => { event.stopPropagation(); setSelectedRecord(f.originalRecord || f); console.log("Bottom table name clicked! Selected:", f.originalRecord || f) }} style={{ cursor: 'pointer', color: '#0066cc', textDecoration: 'underline', fontWeight: 'bold' }}>{f.record}</span></td>
+                    <td className="font-medium"><span onClick={(event) => { event.stopPropagation(); setSelectedRecord(f.originalRecord) }} style={{ cursor: 'pointer', color: '#0066cc', textDecoration: 'underline', fontWeight: 'bold' }}>{f.record}</span></td>
                     <td className="mono">{f.field}</td>
                     <td>{f.type}</td>
                     <td>
@@ -3044,11 +3144,12 @@ function DataReviewScreen() {
                         {f.severity}
                       </Badge>
                     </td>
-                    <td><NullPctBadge pct={f.nullPct} /></td>
+                    {tab === 'contacts' && <td><NullPctBadge pct={f.nullPct} /></td>}
                     <td>
                       {resolved ? (
                         action === 'anonymized' ? <Badge tier={1} color="success">Anonymized</Badge>
                         : action === 'removed' ? <Badge tier={1} color="danger">Removed</Badge>
+                        : action === 'approved' ? <Badge tier={1} color="success">Approved</Badge>
                         : <Badge tier={1} color="info">Overridden</Badge>
                       ) : (
                         <div className="flex gap-1">
@@ -3271,6 +3372,23 @@ function DataReviewScreen() {
         <Card>
           <NullSummaryBar tab="outliers" />
 
+          {(() => {
+            const lowSeverityIds = OUTLIERS.filter(o => o.severity === 'Low' && !resolvedOut.has(o.id)).map(o => o.id)
+            return (
+              <div className="flex justify-end mb-3">
+                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
+                  onClick={async () => {
+                    await approveLowSeverityFlags('demo-company')
+                    const m = new Map(resolvedOut)
+                    lowSeverityIds.forEach(id => m.set(id, 'approved'))
+                    setResolvedOut(m)
+                  }}>
+                  Approve All Low-Severity ({lowSeverityIds.length})
+                </Btn>
+              </div>
+            )
+          })()}
+
           {/* Tagged-records summary strip */}
           {(() => {
             const tagged = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
@@ -3365,6 +3483,7 @@ function DataReviewScreen() {
                           <div className="flex flex-col gap-0.5">
                             {action === 'removed' && <Badge tier={1} color="danger">Removed</Badge>}
                             {action === 'kept'    && <Badge tier={1} color="success">Kept</Badge>}
+                            {action === 'approved' && <Badge tier={1} color="success">Approved</Badge>}
                             {action === 'warned'  && (
                               <>
                                 <Badge tier={1} color="warning">Data Quality Warning</Badge>
@@ -3459,6 +3578,9 @@ function DataReviewScreen() {
                 <strong>Export blocked:</strong> {openHigh.length} High-severity NPI error{openHigh.length > 1 ? 's' : ''} ({openHigh.map(v => v.issueType).join(', ')}) must be resolved before dataset export is permitted. Remove the record or submit an Override with justification.
               </Banner>
             )
+            if (scores.pendingNpis > 0) return (
+              <Banner type="warning">Registry validation is incomplete. No confirmed High-severity NPI errors are currently reported.</Banner>
+            )
             if (resolvedVal.size === VALIDATION_ERRORS.length) return (
               <Banner type="success">All NPI validation errors resolved — dataset export is unlocked.</Banner>
             )
@@ -3467,8 +3589,25 @@ function DataReviewScreen() {
             )
           })()}
 
-          <Banner type="warning">NPI Registry is temporarily unavailable. 847 records marked pending. Will auto-retry in 5 minutes.</Banner>
-          <NullSummaryBar tab="validation" />
+          {scores.pendingNpis > 0 && <Banner type="warning">{scores.pendingNpis.toLocaleString()} NPIs await registry validation. They are not confirmed errors.</Banner>}
+          <NullSummaryBar tab="validation" records={processedRecords} />
+
+          {(() => {
+            const lowSeverityIds = VALIDATION_ERRORS.filter(v => v.severity === 'Low' && !resolvedVal.has(v.id)).map(v => v.id)
+            return (
+              <div className="flex justify-end mb-3">
+                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
+                  onClick={async () => {
+                    await approveLowSeverityFlags('demo-company')
+                    const m = new Map(resolvedVal)
+                    lowSeverityIds.forEach(id => m.set(id, 'approved'))
+                    setResolvedVal(m)
+                  }}>
+                  Approve All Low-Severity ({lowSeverityIds.length})
+                </Btn>
+              </div>
+            )
+          })()}
 
           <table className="data-table w-full border-collapse">
             <thead>
@@ -3526,6 +3665,8 @@ function DataReviewScreen() {
                           <div className="flex flex-col gap-0.5">
                             {action === 'removed'
                               ? <Badge tier={1} color="danger">Removed</Badge>
+                              : action === 'approved'
+                              ? <Badge tier={1} color="success">Approved</Badge>
                               : <Badge tier={1} color="info">Overridden</Badge>
                             }
                             {action === 'override' && valJustifications[v.id] && (
@@ -3621,24 +3762,65 @@ const SUGGESTED_QUERIES = [
   'List all records updated in the last 30 days',
 ]
 
-const QUERY_RESULT = [
-  { npi: '1234567890', name: 'James Morrison, MD', specialty: 'Cardiology', state: 'FL', email: 'j.morrison@floridahealth.com', status: 'Active' },
-  { npi: '8847261039', name: 'Patricia Wang, MD', specialty: 'Cardiology', state: 'FL', email: 'pwang@tampacc.org', status: 'Active' },
-  { npi: '3312889401', name: 'David Okafor, DO', specialty: 'Cardiology', state: 'FL', email: 'dokafor@baptist.com', status: 'Pending' },
-]
+const NLP_QUERY_DATASET_ID = 'raw_registry_input.csv'
+
+interface NLPQueryResponse {
+  success: boolean
+  applied_query?: string
+  results?: Record<string, unknown>[]
+  total_matches?: number
+  returned_count?: number
+  error?: string
+}
+
+type QueryErrorKind = 'auth' | 'not-understood' | 'server' | 'network'
 
 function QueryScreen() {
+  const { role } = useRole()
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
-  const [results, setResults] = useState<typeof QUERY_RESULT | null>(null)
+  const [results, setResults] = useState<Record<string, unknown>[] | null>(null)
+  const [appliedQuery, setAppliedQuery] = useState<string | null>(null)
+  const [totalMatches, setTotalMatches] = useState<number | null>(null)
+  const [error, setError] = useState<{ kind: QueryErrorKind; message: string } | null>(null)
   const [showQuery, setShowQuery] = useState(false)
 
-  const run = (q: string) => {
+  const run = async (q: string) => {
     setQuery(q)
     setLoading(true)
     setResults(null)
-    setTimeout(() => { setLoading(false); setResults(QUERY_RESULT) }, 1400)
+    setAppliedQuery(null)
+    setError(null)
+
+    try {
+      const response = await globalThis.fetch(`${API_BASE_URL}/api/dataset/nlp-search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
+        body: JSON.stringify({ query: q, dataset_id: NLP_QUERY_DATASET_ID }),
+      })
+      const body = await response.json().catch(() => null) as NLPQueryResponse | null
+
+      if (response.status === 401 || response.status === 403) {
+        setError({ kind: 'auth', message: body?.error || 'You are not authorized to run natural-language queries.' })
+        return
+      }
+      if (!response.ok || !body?.success) {
+        const kind: QueryErrorKind = response.status === 422 ? 'not-understood' : 'server'
+        setError({ kind, message: body?.error || `Query failed (HTTP ${response.status}).` })
+        return
+      }
+
+      setResults(body.results ?? [])
+      setAppliedQuery(body.applied_query ?? null)
+      setTotalMatches(body.total_matches ?? body.results?.length ?? 0)
+    } catch {
+      setError({ kind: 'network', message: "Couldn't reach the server. Check your connection and try again." })
+    } finally {
+      setLoading(false)
+    }
   }
+
+  const resultColumns = results && results.length > 0 ? Object.keys(results[0]) : []
 
   return (
     <div className="p-8">
@@ -3661,7 +3843,7 @@ function QueryScreen() {
           <Btn variant="primary" onClick={() => query && run(query)}>Run Query</Btn>
         </div>
 
-        {!results && !loading && (
+        {!results && !loading && !error && (
           <div className="mt-4">
             <p className="text-[12px] mb-2 font-semibold" style={{ color: C.midText }}>Try these queries:</p>
             <div className="flex flex-wrap gap-2">
@@ -3681,54 +3863,77 @@ function QueryScreen() {
         <Card>
           <div className="flex items-center gap-3 py-8 justify-center">
             <span style={{ color: C.corpBlue }}>{Icon.spinner}</span>
-            <span className="text-[13px] pulse" style={{ color: C.midText }}>Running your query against 10,412 records...</span>
+            <span className="text-[13px] pulse" style={{ color: C.midText }}>Running your query against your dataset...</span>
           </div>
         </Card>
       )}
 
-      {results && (
+      {/* ── STATE: error ─────────────────────────────────────────────────── */}
+      {error && !loading && (
+        <Card>
+          <div className="flex items-start gap-4 py-4">
+            <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0" style={{ background: '#FEE2E2', color: C.danger }}>
+              {Icon.alertTriangle}
+            </div>
+            <div className="flex-1">
+              <p className="text-[14px] font-bold mb-1" style={{ color: C.danger }}>
+                {error.kind === 'auth' && 'Unauthorized'}
+                {error.kind === 'not-understood' && "Couldn't understand that question"}
+                {error.kind === 'server' && 'Query failed'}
+                {error.kind === 'network' && 'Connection error'}
+              </p>
+              <p className="text-[12px]" style={{ color: C.darkText }}>{error.message}</p>
+            </div>
+            <Btn variant="ghost" size="sm" onClick={() => query && run(query)}>Try again</Btn>
+          </div>
+        </Card>
+      )}
+
+      {results && !loading && (
         <Card>
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">
               <h3 className="text-[14px] font-bold" style={{ color: C.navy }}>Results</h3>
-              <Badge tier={1} color="info">{results.length} records</Badge>
+              <Badge tier={1} color="info">{totalMatches ?? results.length} records</Badge>
               <span className="text-[12px]" style={{ color: C.midText }}>for "{query}"</span>
             </div>
-            <button onClick={() => setShowQuery(!showQuery)} className="text-[12px] hover:underline" style={{ color: C.corpBlue }}>
-              {showQuery ? 'Hide query ▲' : 'View generated query ▼'}
-            </button>
+            {appliedQuery && (
+              <button onClick={() => setShowQuery(!showQuery)} className="text-[12px] hover:underline" style={{ color: C.corpBlue }}>
+                {showQuery ? 'Hide query ▲' : 'View generated query ▼'}
+              </button>
+            )}
           </div>
 
-          {showQuery && (
+          {showQuery && appliedQuery && (
             <div className="mb-4 p-3 rounded-[6px] border border-[#EDF2F7]" style={{ background: '#F7FAFC' }}>
               <p className="text-[11px] font-semibold mb-2" style={{ color: C.midText }}>Generated pandas filter:</p>
-              <pre className="mono text-[11px]" style={{ color: C.darkText }}>
-{`df = df[
-  (df['specialty'] == 'Cardiology') &
-  (df['state'] == 'FL') &
-  (df['npi_status'] == 'Active')
-]`}
-              </pre>
+              <pre className="mono text-[11px]" style={{ color: C.darkText, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{appliedQuery}</pre>
             </div>
           )}
 
-          <table className="data-table w-full border-collapse">
-            <thead>
-              <tr><th>NPI</th><th>Name</th><th>Specialty</th><th>State</th><th>Email</th><th>Status</th></tr>
-            </thead>
-            <tbody>
-              {results.map(r => (
-                <tr key={r.npi}>
-                  <td className="mono">{r.npi}</td>
-                  <td className="font-medium">{r.name}</td>
-                  <td>{r.specialty}</td>
-                  <td>{r.state}</td>
-                  <td style={{ color: C.corpBlue }}>{r.email}</td>
-                  <td><Badge tier={1} color={r.status === 'Active' ? 'success' : 'warning'}>{r.status}</Badge></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {results.length === 0 ? (
+            <div className="text-center py-10">
+              <p className="text-[13px] font-semibold mb-1" style={{ color: C.navy }}>No matching records</p>
+              <p className="text-[12px]" style={{ color: C.midText }}>Try rephrasing the question or asking about a different field.</p>
+            </div>
+          ) : (
+            <table className="data-table w-full border-collapse">
+              <thead>
+                <tr>{resultColumns.map(col => <th key={col}>{col}</th>)}</tr>
+              </thead>
+              <tbody>
+                {results.map((r, i) => (
+                  <tr key={i}>
+                    {resultColumns.map(col => (
+                      <td key={col} className={col.toLowerCase().includes('npi') ? 'mono' : undefined}>
+                        {r[col] === null || r[col] === undefined || r[col] === '' ? '—' : String(r[col])}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </Card>
       )}
     </div>
@@ -4662,59 +4867,118 @@ function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
 
 // ─── DATA HEATMAP ─────────────────────────────────────────────────────────────
 
-const HEATMAP_FIELDS: {
+type CellStatus = 'complete' | 'partial' | 'invalid' | 'pending' | 'missing'
+
+interface HeatmapField {
+  key: string
   name: string
   required: boolean
-  nullPct: number         // % of records where field is missing
-  invalidPct: number      // % of records where field fails validation
-  partialPct: number      // % partially filled
-}[] = [
-  { name: 'NPI',        required: true,  nullPct: 0,  invalidPct: 4,  partialPct: 0  },
-  { name: 'First Name', required: true,  nullPct: 0,  invalidPct: 0,  partialPct: 1  },
-  { name: 'Last Name',  required: true,  nullPct: 0,  invalidPct: 0,  partialPct: 0  },
-  { name: 'Specialty',  required: false, nullPct: 3,  invalidPct: 2,  partialPct: 4  },
-  { name: 'State',      required: false, nullPct: 2,  invalidPct: 1,  partialPct: 0  },
-  { name: 'Email',      required: false, nullPct: 14, invalidPct: 6,  partialPct: 3  },
-  { name: 'Phone',      required: false, nullPct: 18, invalidPct: 3,  partialPct: 8  },
-  { name: 'ZIP Code',   required: false, nullPct: 9,  invalidPct: 2,  partialPct: 5  },
-  { name: 'DEA #',      required: false, nullPct: 31, invalidPct: 1,  partialPct: 4  },
-  { name: 'Address',    required: false, nullPct: 22, invalidPct: 0,  partialPct: 11 },
-]
-
-type CellStatus = 'complete' | 'partial' | 'invalid' | 'missing'
-
-// Deterministic cell generator so grid is stable across renders
-function makeCellStatus(fieldIdx: number, recIdx: number): CellStatus {
-  const f = HEATMAP_FIELDS[fieldIdx]
-  // use a simple hash of indices for deterministic "random"
-  const h = ((fieldIdx * 31 + recIdx * 17) % 100)
-  if (h < f.nullPct)                          return 'missing'
-  if (h < f.nullPct + f.invalidPct)           return 'invalid'
-  if (h < f.nullPct + f.invalidPct + f.partialPct) return 'partial'
-  return 'complete'
+  nullPct: number
+  invalidPct: number
+  partialPct: number
+  pendingPct: number
+  completePct: number
 }
 
-const HEATMAP_RECORDS = Array.from({ length: 30 }, (_, i) => ({
-  id: `#${4800 + i}`,
-  lastName: ['Morrison','Chen','Patel','Torres','Brennan','Tanaka','Nguyen','Davis','Park','Santos',
-             'Williams','Kim','Okafor','Ruiz','Wang','Johnson','Lee','Brown','Garcia','Martinez',
-             'Anderson','Taylor','Thomas','Jackson','White','Harris','Martin','Thompson','Robinson','Clark'][i],
-  values: HEATMAP_FIELDS.map((_, fi) => makeCellStatus(fi, i)),
-}))
+interface HeatmapRecord {
+  id: string
+  name: string
+  values: CellStatus[]
+}
 
-// Per-field aggregated health (used in column summary row)
-const FIELD_HEALTH: (typeof HEATMAP_FIELDS[number] & { completePct: number })[] =
-  HEATMAP_FIELDS.map(f => ({
-    ...f,
-    completePct: 100 - f.nullPct - f.invalidPct - f.partialPct,
-  }))
+const HEATMAP_METADATA_FIELDS = new Set([
+  'record_id', 'merged_at', 'pii_detections', 'pii_flagged', 'anomaly_flag',
+  'detection_model_used', 'npi_status', 'validation_status',
+])
 
-function DataHeatmapScreen() {
+const HEATMAP_FIELD_LABELS: Record<string, string> = {
+  npi: 'NPI', first_name: 'First Name', last_name: 'Last Name',
+  specialty: 'Specialty', pri_spec: 'Specialty', state: 'State',
+  email: 'Email', email_address: 'Email', phone: 'Phone', phone_number: 'Phone',
+  zip: 'ZIP Code', zip_code: 'ZIP Code', dea: 'DEA #', dea_number: 'DEA #', address: 'Address',
+}
+
+function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => void }) {
+  const [records, setRecords] = useState<Record<string, unknown>[]>([])
+  const [recordsLoading, setRecordsLoading] = useState(true)
+  const [recordsError, setRecordsError] = useState<string | null>(null)
+  const [recordsStatus, setRecordsStatus] = useState<number | null>(null)
   const [hover, setHover] = useState<{ r: number; c: number } | null>(null)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [filterField, setFilterField] = useState<string>('All fields')
   const [filterStatus, setFilterStatus] = useState<CellStatus | 'all'>('all')
   const [viewMode, setViewMode] = useState<'matrix' | 'field' | 'chart'>('matrix')
+
+  useEffect(() => {
+    let active = true
+    const loadRecords = async () => {
+      try {
+        const loadedRecords: Record<string, unknown>[] = []
+        const cursors = new Set<string>()
+        let cursor: string | undefined
+        do {
+          const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+          const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
+          if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
+          if ((response.headers.get('content-type') || '').includes('json')) {
+            const data = await response.json() as ExportResponse
+            if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
+            loadedRecords.push(...data.records)
+            cursor = data.next_cursor
+            if (cursor && cursors.has(cursor)) throw new Error('Export returned a repeated pagination cursor')
+            if (cursor) cursors.add(cursor)
+          } else {
+            loadedRecords.push(...parseCsvRecords(await response.text(), { header: true, skipEmptyLines: true }))
+            cursor = undefined
+          }
+        } while (cursor)
+        if (active) setRecords(loadedRecords)
+      } catch (error) {
+        if (active) {
+          setRecordsStatus(error instanceof HttpError ? error.status : null)
+          setRecordsError(error instanceof Error ? error.message : 'Unable to load processed records')
+        }
+      } finally {
+        if (active) setRecordsLoading(false)
+      }
+    }
+    void loadRecords()
+    return () => { active = false }
+  }, [])
+
+  const fieldKeys = [...new Set(records.flatMap(record => Object.keys(record)))].filter(key =>
+    !HEATMAP_METADATA_FIELDS.has(key.toLowerCase()) && !key.toLowerCase().startsWith('validation_')
+  )
+  const normalizedField = (key: string) => key.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const heatmapRecords: HeatmapRecord[] = records.map((record, index) => ({
+    id: String(record.record_id || record.provider_id || reviewValue(record, 'npi') || `Record ${index + 1}`),
+    name: reviewName(record, index),
+    values: fieldKeys.map(key => {
+      const value = record[key]
+      if (value === null || value === undefined || !String(value).trim()) return 'missing'
+      if (normalizedField(key) === 'npi') {
+        const outcome = npiOutcome(record)
+        if (outcome === 'invalid') return 'invalid'
+        if (outcome === 'pending') return 'pending'
+      }
+      return 'complete'
+    }),
+  }))
+  const heatmapFields: HeatmapField[] = fieldKeys.map((key, fieldIndex) => {
+    const statuses = heatmapRecords.map(record => record.values[fieldIndex])
+    const count = (status: CellStatus) => statuses.filter(value => value === status).length
+    const percent = (status: CellStatus) => records.length ? Math.round(count(status) / records.length * 100) : 0
+    return {
+      key,
+      name: HEATMAP_FIELD_LABELS[key.toLowerCase()] || key,
+      required: ['npi', 'firstname', 'lastname'].includes(normalizedField(key)),
+      nullPct: percent('missing'),
+      invalidPct: percent('invalid'),
+      partialPct: percent('partial'),
+      pendingPct: percent('pending'),
+      completePct: percent('complete'),
+    }
+  })
 
   const onCellEnter = (r: number, c: number) => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
@@ -4726,26 +4990,50 @@ function DataHeatmapScreen() {
   }
 
   const cellColor = (s: CellStatus) =>
-    s === 'complete' ? C.success : s === 'partial' ? C.warning : s === 'invalid' ? C.danger : '#CBD5E0'
+    s === 'complete' ? C.success : s === 'partial' ? C.warning : s === 'invalid' ? C.danger : s === 'pending' ? C.corpBlue : '#CBD5E0'
 
   const cellLabel = (s: CellStatus) =>
-    s === 'complete' ? 'Complete' : s === 'partial' ? 'Partial / truncated' : s === 'invalid' ? 'Validation failure' : 'Missing / null'
+    s === 'complete' ? 'Complete' : s === 'partial' ? 'Partial' : s === 'invalid' ? 'Validation failure' : s === 'pending' ? 'Validation pending' : 'Missing / null'
 
   // filter which columns to show
   const visibleFields = filterField === 'All fields'
-    ? HEATMAP_FIELDS.map((_, i) => i)
-    : [HEATMAP_FIELDS.findIndex(f => f.name === filterField)]
+    ? heatmapFields.map((_, i) => i)
+    : [heatmapFields.findIndex(f => f.key === filterField)]
 
   // filter which rows to show
   const visibleRecords = filterStatus === 'all'
-    ? HEATMAP_RECORDS
-    : HEATMAP_RECORDS.filter(rec =>
-        visibleFields.some(fi => rec.values[fi] === filterStatus)
+    ? heatmapRecords.map((record, index) => ({ record, index }))
+    : heatmapRecords.flatMap((record, index) =>
+        visibleFields.some(fi => record.values[fi] === filterStatus) ? [{ record, index }] : []
       )
 
-  const hoverField = hover !== null ? HEATMAP_FIELDS[hover.c] : null
-  const hoverRec   = hover !== null ? HEATMAP_RECORDS[hover.r] : null
-  const hoverStatus = hover !== null ? HEATMAP_RECORDS[hover.r]?.values[hover.c] : null
+  const hoverField = hover !== null ? heatmapFields[hover.c] : null
+  const hoverRec   = hover !== null ? heatmapRecords[hover.r] : null
+  const hoverStatus = hover !== null ? heatmapRecords[hover.r]?.values[hover.c] : null
+
+  if (recordsLoading) return (
+    <div className="p-8">
+      <SectionHeader title="Data Quality Heatmap" subtitle="Loading processed records and validation results" />
+      <Card className="text-center py-10"><p className="text-[13px]" style={{ color: C.midText }}>Loading dataset…</p></Card>
+    </div>
+  )
+
+  if (recordsError || recordsStatus === 404 || records.length === 0) return (
+    <div className="p-8">
+      <SectionHeader title="Data Quality Heatmap" subtitle="Field completeness and validation status across processed records" />
+      <Card className="max-w-md mx-auto text-center py-10">
+        <p className="text-[15px] font-bold mb-1" style={{ color: C.navy }}>
+          {recordsError ? 'Unable to load data' : 'No data available'}
+        </p>
+        <p className="text-[12px] mb-4" style={{ color: C.midText }}>
+          {recordsError
+            ? recordsError
+            : 'Upload a CSV dataset to see its field completeness and backend validation results here.'}
+        </p>
+        <Btn variant="primary" onClick={() => onNavigate('upload')} icon={Icon.upload}>Upload Data</Btn>
+      </Card>
+    </div>
+  )
 
   return (
     <div className="p-8">
@@ -4784,7 +5072,7 @@ function DataHeatmapScreen() {
             <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Legend:</span>
             {([
               { status: 'complete', label: 'Complete' },
-              { status: 'partial',  label: 'Partial' },
+              { status: 'pending',  label: 'Validation pending' },
               { status: 'invalid',  label: 'Validation failure' },
               { status: 'missing',  label: 'Missing / null' },
             ] as { status: CellStatus; label: string }[]).map(l => (
@@ -4817,10 +5105,10 @@ function DataHeatmapScreen() {
               value={filterField}
               onChange={e => setFilterField(e.target.value)}>
               <option>All fields</option>
-              {HEATMAP_FIELDS.map(f => <option key={f.name}>{f.name}</option>)}
+              {heatmapFields.map(f => <option key={f.key} value={f.key}>{f.name}</option>)}
             </select>
             <span className="text-[11px]" style={{ color: C.midText }}>
-              Showing <strong>{visibleRecords.length}</strong> of {HEATMAP_RECORDS.length} records
+              Showing <strong>{visibleRecords.length}</strong> of {heatmapRecords.length} records
             </span>
           </div>
         </div>
@@ -4844,7 +5132,7 @@ function DataHeatmapScreen() {
         {hover && hoverField && hoverRec && hoverStatus ? (<>
           <div style={{ minWidth: 140 }}>
             <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Record</p>
-            <p className="text-[13px] font-bold mono" style={{ color: C.navy }}>{hoverRec.id} — {hoverRec.lastName}</p>
+            <p className="text-[13px] font-bold mono" style={{ color: C.navy }}>{hoverRec.id} — {hoverRec.name}</p>
           </div>
           <div style={{ minWidth: 90 }}>
             <p className="text-[11px] font-semibold mb-0.5" style={{ color: C.midText }}>Field</p>
@@ -4897,20 +5185,20 @@ function DataHeatmapScreen() {
                     <th key={fi} className="px-1 py-1 text-center"
                       style={{ minWidth: 52, borderBottom: `2px solid #EDF2F7` }}>
                       <div className="flex flex-col items-center gap-0.5">
-                        <span className="text-[9px] font-bold" style={{ color: HEATMAP_FIELDS[fi].required ? C.warning : C.navy }}>
-                          {HEATMAP_FIELDS[fi].name}
-                          {HEATMAP_FIELDS[fi].required && ' *'}
+                        <span className="text-[9px] font-bold" style={{ color: heatmapFields[fi].required ? C.warning : C.navy }}>
+                          {heatmapFields[fi].name}
+                          {heatmapFields[fi].required && ' *'}
                         </span>
                         {/* Column health bar */}
                         <div className="progress-track" style={{ width: 36, height: 3 }}>
                           <div className="progress-fill" style={{
-                            width: `${FIELD_HEALTH[fi].completePct}%`,
-                            background: FIELD_HEALTH[fi].completePct >= 90 ? C.success
-                              : FIELD_HEALTH[fi].completePct >= 70 ? C.warning : C.danger,
+                            width: `${heatmapFields[fi].completePct}%`,
+                            background: heatmapFields[fi].completePct >= 90 ? C.success
+                              : heatmapFields[fi].completePct >= 70 ? C.warning : C.danger,
                           }} />
                         </div>
                         <span className="text-[8px] mono" style={{ color: C.midText }}>
-                          {FIELD_HEALTH[fi].completePct}%
+                          {heatmapFields[fi].completePct}%
                         </span>
                       </div>
                     </th>
@@ -4923,18 +5211,17 @@ function DataHeatmapScreen() {
                 </tr>
               </thead>
               <tbody>
-                {visibleRecords.map((rec, ri) => {
-                  const actualRi = HEATMAP_RECORDS.indexOf(rec)
+                {visibleRecords.map(({ record: rec, index: actualRi }, ri) => {
                   const rowStatuses = visibleFields.map(fi => rec.values[fi])
                   const rowComplete = rowStatuses.filter(s => s === 'complete').length
-                  const rowHealth = Math.round((rowComplete / rowStatuses.length) * 100)
+                  const rowHealth = rowStatuses.length ? Math.round((rowComplete / rowStatuses.length) * 100) : 0
                   return (
                     <tr key={rec.id} style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC' }}>
                       {/* Record ID — sticky */}
                       <td className="px-2 py-0.5 sticky left-0 z-10 text-[10px]"
                         style={{ background: ri % 2 === 0 ? 'white' : '#FAFBFC' }}>
                         <span className="mono font-semibold" style={{ color: C.navy }}>{rec.id}</span>
-                        <span className="ml-1.5" style={{ color: C.midText }}>{rec.lastName}</span>
+                        <span className="ml-1.5" style={{ color: C.midText }}>{rec.name}</span>
                       </td>
                       {/* Field cells */}
                       {visibleFields.map(fi => {
@@ -4982,7 +5269,7 @@ function DataHeatmapScreen() {
                     FIELD TOTALS
                   </td>
                   {visibleFields.map(fi => {
-                    const f = HEATMAP_FIELDS[fi]
+                    const f = heatmapFields[fi]
                     return (
                       <td key={fi} className="px-1 py-2 text-center">
                         <div className="flex flex-col items-center gap-0.5">
@@ -5005,18 +5292,23 @@ function DataHeatmapScreen() {
       {/* ── VIEW: RECHARTS CHART ─────────────────────────────────────────── */}
       {viewMode === 'chart' && (() => {
         // Build per-field data for both charts
-        const fieldChartData = HEATMAP_FIELDS.map((f, fi) => ({
-          name: f.name.length > 8 ? f.name.slice(0, 8) + '…' : f.name,
+        const fieldChartData = heatmapFields.map(f => ({
+          name: f.name.length > 14 ? f.name.slice(0, 14) + '…' : f.name,
           fullName: f.name,
-          complete: FIELD_HEALTH[fi].completePct,
+          complete: f.completePct,
           partial:  f.partialPct,
           invalid:  f.invalidPct,
+          pending:  f.pendingPct,
           missing:  f.nullPct,
-          health:   FIELD_HEALTH[fi].completePct,
+          health:   f.completePct,
         }))
 
         const healthColor = (pct: number) =>
           pct >= 90 ? C.success : pct >= 70 ? C.warning : C.danger
+
+        // Guarantee each bar enough width for its angled label; scroll horizontally once
+        // the field count exceeds what the card can show at a readable size.
+        const chartMinWidth = Math.max(fieldChartData.length * 56, 100)
 
         // Custom tooltip for health bar
         const HealthTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof fieldChartData[0] }> }) => {
@@ -5026,7 +5318,7 @@ function DataHeatmapScreen() {
             <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
               <p className="font-bold mb-1" style={{ color: C.navy }}>{d.fullName}</p>
               <p style={{ color: C.success }}>✅ Complete: {d.complete}%</p>
-              <p style={{ color: C.warning }}>⚠ Partial: {d.partial}%</p>
+              <p style={{ color: C.corpBlue }}>◷ Validation pending: {d.pending}%</p>
               <p style={{ color: C.danger }}>✗ Invalid: {d.invalid}%</p>
               <p style={{ color: '#A0AEC0' }}>○ Missing: {d.missing}%</p>
             </div>
@@ -5050,11 +5342,12 @@ function DataHeatmapScreen() {
             {/* Chart 1 – Field health score (color-coded bar per field) */}
             <Card>
               <p className="text-[13px] font-bold mb-4" style={{ color: C.navy }}>Field Health Score (% Complete)</p>
-              <div style={{ height: 260 }}>
+              <div style={{ height: 300, overflowX: 'auto' }}>
+                <div style={{ height: '100%', minWidth: `${chartMinWidth}px` }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 24 }}>
+                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 64 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
-                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} angle={-45} textAnchor="end" height={80} />
                     <YAxis domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} width={38} />
                     <RechartTooltip content={<HealthTooltip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
                     {/* Threshold reference lines via custom label not available in simple BarChart, keep it clean */}
@@ -5065,6 +5358,7 @@ function DataHeatmapScreen() {
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
+                </div>
               </div>
               {/* Threshold legend */}
               <div className="flex items-center gap-6 mt-2 justify-end">
@@ -5084,20 +5378,22 @@ function DataHeatmapScreen() {
             {/* Chart 2 – Stacked breakdown per field */}
             <Card>
               <p className="text-[13px] font-bold mb-4" style={{ color: C.navy }}>Field Quality Breakdown (Stacked %)</p>
-              <div style={{ height: 260 }}>
+              <div style={{ height: 300, overflowX: 'auto' }}>
+                <div style={{ height: '100%', minWidth: `${chartMinWidth}px` }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 24 }}>
+                  <BarChart data={fieldChartData} margin={{ top: 4, right: 16, left: 0, bottom: 64 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
-                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} interval={0} angle={-45} textAnchor="end" height={80} />
                     <YAxis domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} width={38} />
                     <RechartTooltip content={<StackTooltip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
-                    <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 11, paddingTop: 12, color: C.midText }} />
+                    <Legend iconType="square" iconSize={10} wrapperStyle={{ fontSize: 11, paddingTop: 28, color: C.midText }} />
                     <Bar dataKey="complete" name="Complete" stackId="a" fill={C.success} />
-                    <Bar dataKey="partial"  name="Partial"  stackId="a" fill={C.warning} />
+                    <Bar dataKey="pending"  name="Validation pending" stackId="a" fill={C.corpBlue} />
                     <Bar dataKey="invalid"  name="Invalid"  stackId="a" fill={C.danger}  />
                     <Bar dataKey="missing"  name="Missing"  stackId="a" fill="#CBD5E0" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
+                </div>
               </div>
             </Card>
           </div>
@@ -5107,12 +5403,12 @@ function DataHeatmapScreen() {
       {/* ── VIEW: FIELD SUMMARY ───────────────────────────────────────────── */}
       {viewMode === 'field' && (
         <div className="flex flex-col gap-3">
-          {HEATMAP_FIELDS.map((f, fi) => {
-            const isHoveredField = filterField === f.name || filterField === 'All fields'
+          {heatmapFields.map(f => {
+            const isHoveredField = filterField === f.key || filterField === 'All fields'
             return (
-              <Card key={f.name}
+              <Card key={f.key}
                 className={`transition-all ${!isHoveredField ? 'opacity-40' : ''}`}
-                onClick={() => setFilterField(filterField === f.name ? 'All fields' : f.name)}>
+                onClick={() => setFilterField(filterField === f.key ? 'All fields' : f.key)}>
                 <div className="flex items-center gap-4">
                   {/* Field name */}
                   <div style={{ width: 120, flexShrink: 0 }}>
@@ -5123,15 +5419,16 @@ function DataHeatmapScreen() {
                   {/* Stacked completion bar */}
                   <div className="flex-1">
                     <div className="flex rounded-[4px] overflow-hidden" style={{ height: 20 }}>
-                      <div title={`${FIELD_HEALTH[fi].completePct}% complete`} style={{ width: `${FIELD_HEALTH[fi].completePct}%`, background: C.success }} />
+                      <div title={`${f.completePct}% complete`} style={{ width: `${f.completePct}%`, background: C.success }} />
                       <div title={`${f.partialPct}% partial`}  style={{ width: `${f.partialPct}%`,  background: C.warning }} />
                       <div title={`${f.invalidPct}% invalid`}  style={{ width: `${f.invalidPct}%`,  background: C.danger }} />
+                      <div title={`${f.pendingPct}% validation pending`} style={{ width: `${f.pendingPct}%`, background: C.corpBlue }} />
                       <div title={`${f.nullPct}% null`}        style={{ width: `${f.nullPct}%`,     background: '#CBD5E0' }} />
                     </div>
                     <div className="flex gap-4 mt-1">
                       {[
-                        { label: `${FIELD_HEALTH[fi].completePct}% complete`, color: C.success },
-                        { label: `${f.partialPct}% partial`,  color: C.warning },
+                        { label: `${f.completePct}% complete`, color: C.success },
+                        { label: `${f.pendingPct}% pending`, color: C.corpBlue },
                         { label: `${f.invalidPct}% invalid`,  color: C.danger  },
                         { label: `${f.nullPct}% null`,        color: '#A0AEC0' },
                       ].map(seg => (
@@ -5147,21 +5444,21 @@ function DataHeatmapScreen() {
                     <div>
                       <p className="text-[10px]" style={{ color: C.midText }}>Null count</p>
                       <p className="text-[14px] font-bold mono" style={{ color: f.nullPct > 10 ? C.danger : C.midText }}>
-                        {Math.round(f.nullPct / 100 * HEATMAP_RECORDS.length)}
-                        <span className="text-[10px] font-normal"> / {HEATMAP_RECORDS.length}</span>
+                        {Math.round(f.nullPct / 100 * heatmapRecords.length)}
+                        <span className="text-[10px] font-normal"> / {heatmapRecords.length}</span>
                       </p>
                     </div>
                     <div>
                       <p className="text-[10px]" style={{ color: C.midText }}>Validation failures</p>
                       <p className="text-[14px] font-bold mono" style={{ color: f.invalidPct > 0 ? C.danger : C.success }}>
-                        {Math.round(f.invalidPct / 100 * HEATMAP_RECORDS.length)}
-                        <span className="text-[10px] font-normal"> / {HEATMAP_RECORDS.length}</span>
+                        {Math.round(f.invalidPct / 100 * heatmapRecords.length)}
+                        <span className="text-[10px] font-normal"> / {heatmapRecords.length}</span>
                       </p>
                     </div>
                     <div>
                       <p className="text-[10px]" style={{ color: C.midText }}>Health score</p>
-                      <p className="text-[14px] font-bold mono" style={{ color: FIELD_HEALTH[fi].completePct >= 90 ? C.success : FIELD_HEALTH[fi].completePct >= 70 ? C.warning : C.danger }}>
-                        {FIELD_HEALTH[fi].completePct}%
+                      <p className="text-[14px] font-bold mono" style={{ color: f.completePct >= 90 ? C.success : f.completePct >= 70 ? C.warning : C.danger }}>
+                        {f.completePct}%
                       </p>
                     </div>
                   </div>
@@ -5233,7 +5530,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const logToFirestore = async (format: string, filename: string, size: string, records: number) => {
     setLogStatus('logging')
     try {
-      await fetch('http://localhost:8000/api/export/log', {
+      await fetch(`${API_BASE_URL}/api/export/log`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ format, fileName: filename, size, role, records, timestamp: new Date().toISOString() }),
@@ -5549,7 +5846,7 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
     }
     setInviting(true)
     try {
-      const res = await fetch('http://localhost:8000/api/companies/acme/users/invite', {
+      const res = await fetch(`${API_BASE_URL}/api/companies/acme/users/invite`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
         body: JSON.stringify({ email: inviteEmail, role: inviteRole, invited_by: role }),
@@ -5797,7 +6094,7 @@ function ScrubbingSessionsScreen() {
     setDownloading(session.id)
     setDlError(null)
     try {
-      const res = await fetch(`http://localhost:8000/api/scrubbing-sessions/${session.id}/pdf`)
+      const res = await fetch(`${API_BASE_URL}/api/scrubbing-sessions/${session.id}/pdf`)
       if (!res.ok) throw new Error(`Server returned ${res.status}`)
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
@@ -6391,7 +6688,7 @@ export default function App() {
       case 'register': return <RegisterScreen onNavigate={navigate} />
       case 'forgot-password': return <ForgotPasswordScreen onNavigate={navigate} />
       case 'dashboard': return <DashboardScreen onNavigate={navigate} />
-      case 'upload': return <UploadScreen onNavigate={navigate} />
+      case 'upload': return <UploadScreen onNavigate={navigate} showToast={showToast} />
       case 'column-mapping': return <ColumnMappingScreen onNavigate={navigate} />
       case 'data-review': return <DataReviewScreen />
       case 'query': return <QueryScreen />
@@ -6400,7 +6697,7 @@ export default function App() {
       case 'compliance-review': return <ComplianceReviewScreen />
       case 'financial-disclosures': return <FinancialDisclosureScreen />
       case 'analytics': return <AnalyticsScreen onNavigate={navigate} />
-      case 'data-heatmap': return <DataHeatmapScreen />
+      case 'data-heatmap': return <DataHeatmapScreen onNavigate={navigate} />
       case 'export': return <ExportScreen onNavigate={navigate} />
       case 'team': return <TeamScreen showToast={showToast} />
       case 'audit-log': return <AuditLogScreen />

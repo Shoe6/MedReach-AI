@@ -26,6 +26,7 @@ tsconfig*.json
 # Logs & Local Credentials
 *.log
 .env
+.env.*
 serviceAccountKey.json
 .firebase/
 .firebase-data/

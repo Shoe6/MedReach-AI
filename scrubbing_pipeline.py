@@ -18,6 +18,11 @@ from pii_detection_service import scan_text_for_pii
 OFFLINE_NPI_STATUS = "unvalidated_offline"
 DEFAULT_GCS_BUCKET = "medreach-ai-uploads"
 DEFAULT_GCS_CHUNK_SIZE = 500
+NPI_LOOKUP_TIMEOUT_SECONDS = 8.0
+# CMS rate-limits to 20 lookups/second; capping here keeps the interactive
+# merge request bounded regardless of upload size instead of racing the whole
+# batch against one timeout that discards all progress on overrun.
+MAX_LIVE_NPI_LOOKUPS = 100
 
 
 def _run_local_scrubbing(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -49,26 +54,36 @@ async def scrub_provider_records(records: list[dict[str, Any]]) -> list[dict[str
     if not records:
         return []
 
-    npis = [str(record.get("npi") or "").strip() for record in records]
+    npis = [str(record.get("npi") or record.get("NPI") or "").strip() for record in records]
     unique_npis = list(dict.fromkeys(npi for npi in npis if npi))
+    live_npis = unique_npis[:MAX_LIVE_NPI_LOOKUPS]
+    skipped_npis = set(unique_npis[MAX_LIVE_NPI_LOOKUPS:])
 
     async with CMSNPIRegistryClient(timeout=2.0) as npi_client:
-        npi_task = asyncio.create_task(npi_client.fetch_many(unique_npis))
         local_task = asyncio.create_task(asyncio.to_thread(_run_local_scrubbing, records))
-        payloads, scrubbed_records = await asyncio.gather(npi_task, local_task)
+        try:
+            # Bound the wait so a slow/unreachable registry can't stall the
+            # interactive merge request; any NPIs not resolved in time (or
+            # beyond the live-lookup cap above) fall back to offline status.
+            payloads = await asyncio.wait_for(
+                npi_client.fetch_many(live_npis), timeout=NPI_LOOKUP_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            payloads = [{} for _ in live_npis]
+        scrubbed_records = await local_task
 
     payload_by_npi = {
         str(payload.get("number")): payload
         for payload in payloads
         if isinstance(payload, dict) and payload.get("number")
     }
-    offline_npis = {
-        npi for npi, payload in zip(unique_npis, payloads) if not payload
+    offline_npis = skipped_npis | {
+        npi for npi, payload in zip(live_npis, payloads) if not payload
     }
 
     enriched_records: list[dict[str, Any]] = []
     for record in scrubbed_records:
-        npi = str(record.get("npi") or "").strip()
+        npi = str(record.get("npi") or record.get("NPI") or "").strip()
         payload = payload_by_npi.get(npi, {})
         enriched = enrich_provider_with_npi_status(record, payload)
         if npi in offline_npis:
