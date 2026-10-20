@@ -8,7 +8,7 @@ Pipeline:
 
 Configuration (environment variables):
     NLP_LLM_PROVIDER   "gemini" (default) or "openai"
-    NLP_LLM_MODEL      Model name override (defaults: gemini-2.5-flash / gpt-4o-mini)
+    NLP_LLM_MODEL      Model name override (defaults: gemini-3.8-flash / gpt-4o-mini)
     GEMINI_API_KEY     Required for the Gemini provider (GOOGLE_API_KEY also accepted)
     OPENAI_API_KEY     Required for the OpenAI provider
     NLP_DATASET_DIR    Directory with the CSV datasets (default: this module's dir)
@@ -28,7 +28,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 MAX_QUERY_LENGTH = 500
 

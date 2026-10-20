@@ -10,6 +10,7 @@ if IS_CLOUD_RUN:
 else:
 	load_dotenv()
 USE_EMULATOR = not IS_CLOUD_RUN and os.environ.get("USE_FIRESTORE_EMULATOR", "true").lower() != "false"
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID") or os.environ.get("GCLOUD_PROJECT") or "medreachai-679aa"
 
 if USE_EMULATOR:
 	os.environ["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
@@ -23,7 +24,7 @@ storage_bucket = os.environ.get(
 )
 
 if not firebase_admin._apps:
-	app_options = {"projectId": "demo-project"} if USE_EMULATOR else {}
+	app_options = {"projectId": FIREBASE_PROJECT_ID}
 	firebase_credential = None
 	if not USE_EMULATOR:
 		credential_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
@@ -38,4 +39,3 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 default_bucket = storage.bucket(name=storage_bucket) if storage_bucket else storage.bucket()
-

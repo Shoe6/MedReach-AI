@@ -3,6 +3,9 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
 import RecordDetailDashboard from './RecordDetailDashboard'
 import { contactFlags, hasReviewField, npiOutcome, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
+import { signInWithEmailAndPassword } from 'firebase/auth'
+import { getFirebaseAuth } from './firebase'
+import { NLPAuthenticationError, searchDataset } from './nlpSearch'
 
 // Backend base URL — empty string means calls are relative (proxied via Firebase Hosting rewrites in prod)
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
@@ -618,19 +621,26 @@ function LoginScreen({ onLogin, onNavigate }: { onLogin: (role: Role) => void; o
   const [emailError, setEmailError] = useState('')
   const [selectedRole, setSelectedRole] = useState<Role>('admin')
 
-  const submit = () => {
+  const submit = async () => {
     setError('')
     setEmailError('')
     if (!email.includes('@')) {
       setEmailError('Enter a valid email address')
       return
     }
-    if (password === 'wrong') {
-      setError('Invalid email or password')
+    if (!password) {
+      setError('Enter your password')
       return
     }
     setLoading(true)
-    setTimeout(() => { setLoading(false); onLogin(selectedRole) }, 1200)
+    try {
+      await signInWithEmailAndPassword(getFirebaseAuth(), email, password)
+      onLogin(selectedRole)
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Unable to sign in. Please try again.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -649,7 +659,7 @@ function LoginScreen({ onLogin, onNavigate }: { onLogin: (role: Role) => void; o
 
         {/* ── ROLE PICKER (demo) ── */}
         <div className="mb-5 p-3 rounded-[8px]" style={{ background: '#F7F9FB', border: '1px solid #EDF2F7' }}>
-          <p className="text-[10px] font-bold mb-2" style={{ color: C.midText }}>DEMO: Select role to preview</p>
+          <p className="text-[10px] font-bold mb-2" style={{ color: C.midText }}>DEMO: Select role to preview (does not change Firebase permissions)</p>
           <div className="grid grid-cols-2 gap-2">
             {(Object.entries(ROLE_META) as [Role, typeof ROLE_META[Role]][]).map(([r, m]) => (
               <button
@@ -3776,7 +3786,6 @@ interface NLPQueryResponse {
 type QueryErrorKind = 'auth' | 'not-understood' | 'server' | 'network'
 
 function QueryScreen() {
-  const { role } = useRole()
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [results, setResults] = useState<Record<string, unknown>[] | null>(null)
@@ -3793,11 +3802,7 @@ function QueryScreen() {
     setError(null)
 
     try {
-      const response = await globalThis.fetch(`${API_BASE_URL}/api/dataset/nlp-search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
-        body: JSON.stringify({ query: q, dataset_id: NLP_QUERY_DATASET_ID }),
-      })
+      const response = await searchDataset(API_BASE_URL, q, NLP_QUERY_DATASET_ID)
       const body = await response.json().catch(() => null) as NLPQueryResponse | null
 
       if (response.status === 401 || response.status === 403) {
@@ -3813,8 +3818,10 @@ function QueryScreen() {
       setResults(body.results ?? [])
       setAppliedQuery(body.applied_query ?? null)
       setTotalMatches(body.total_matches ?? body.results?.length ?? 0)
-    } catch {
-      setError({ kind: 'network', message: "Couldn't reach the server. Check your connection and try again." })
+    } catch (error) {
+      setError(error instanceof NLPAuthenticationError
+        ? { kind: 'auth', message: error.message }
+        : { kind: 'network', message: "Couldn't reach the server. Check your connection and try again." })
     } finally {
       setLoading(false)
     }

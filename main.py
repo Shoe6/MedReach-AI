@@ -53,7 +53,7 @@ app.add_middleware(
     ],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "X-User-Role"],
 )
 
 app.include_router(nlp_query_router)
