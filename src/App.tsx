@@ -1645,10 +1645,10 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
     setUploadState('uploading')
 
     try {
-      const urlRes = await fetch(`${API_BASE_URL}/api/upload/generate-url`, {
+      const urlRes = await fetch(`${API_BASE_URL}/api/companies/demo-company/uploads/generate-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
-        body: JSON.stringify({ company_id: 'demo-company', filename: file.name, content_type: file.type || 'text/csv' }),
+        body: JSON.stringify({ filename: file.name, content_type: file.type || 'text/csv' }),
       })
       if (!urlRes.ok) throw new HttpError(urlRes.status, (await urlRes.text()) || 'Could not obtain an upload URL')
       const { upload_url: uploadUrl } = await urlRes.json()

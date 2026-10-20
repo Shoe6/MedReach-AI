@@ -112,6 +112,17 @@ Run the optional live emulator regression with
 (PowerShell: set `$env:MEDREACH_TEST_AUTH_EMULATOR = '1'` first). It creates and
 deletes a temporary emulator user and verifies an actual emulator ID token.
 
+### Upload URL endpoints
+
+* `POST /api/uploads/generate-signed-url` (alias: `/api/upload/generate-url`)
+  uses a Firebase bearer token and returns `signed_url`, `object_name`, and
+  `expires_in` for owner-scoped CSV processing. Local E2E mode retains its
+  development-only, loopback-restricted upload flow.
+* `POST /api/companies/{company_id}/uploads/generate-url` uses `X-User-Role`
+  (Editor or above) and returns `upload_id`, `upload_url`, and `storage_path`.
+  The request body contains `filename` and optional `content_type`; the company
+  comes from the URL. In emulator mode, the upload URL targets a local receiver.
+
 ## 📜 License
 This project is licensed under the **MIT License**. This permits open use, modification, and distribution, which is appropriate given our use of open-source libraries like scikit-learn and Pandas.
 

@@ -1,7 +1,7 @@
 # End-to-End Upload Pipeline Test Report
 
 **Scope:** frontend CSV upload → Cloud Run backend → live Firestore, exercising the
-real signed-URL flow (`/api/upload/generate-url` → direct-to-GCS `PUT` →
+real signed-URL flow (`/api/companies/{company_id}/uploads/generate-url` → direct-to-GCS `PUT` →
 `/api/companies/{id}/records/merge` → `/api/companies/{id}/export_data`).
 
 **Date:** 2026-10-08

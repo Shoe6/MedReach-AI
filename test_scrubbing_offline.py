@@ -155,6 +155,12 @@ def test_authenticated_gcs_processing_jobs_are_owner_scoped():
                 json={"filename": "providers.csv"},
             )
             assert unauthenticated.status_code == 401
+            unauthenticated_alias = await client.post(
+                "/api/upload/generate-url",
+                json={"filename": "providers.csv"},
+                headers={"X-User-Role": "editor"},
+            )
+            assert unauthenticated_alias.status_code == 401
 
             app.dependency_overrides[main_module.require_authenticated_editor] = lambda: {
                 "uid": "load-test-user",
@@ -170,6 +176,13 @@ def test_authenticated_gcs_processing_jobs_are_owner_scoped():
                         assert signed.status_code == 200, signed.text
                         object_name = signed.json()["object_name"]
                         assert object_name.startswith("raw_uploads/load-test-user/")
+                        alias = await client.post(
+                            "/api/upload/generate-url",
+                            json={"filename": "providers.csv"},
+                        )
+                        assert alias.status_code == 200, alias.text
+                        assert alias.json()["signed_url"] == signed.json()["signed_url"]
+                        assert alias.json()["object_name"].startswith("raw_uploads/load-test-user/")
 
                         queued = await client.post(
                             "/api/companies/load-test-company/uploads/process",
@@ -273,23 +286,148 @@ def test_background_processing_job_tracks_streamed_batch_totals():
     assert reference.data["max_batch_records"] == 500
 
 
-def test_local_generate_upload_url_skips_gcs_signing_and_accepts_put():
-    assert main_module.USE_EMULATOR, "This test assumes emulator/dev mode (no real GCS credentials)."
+def test_local_e2e_upload_runs_without_firebase_or_gcs():
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    csv_payload = (
+        b"NPI,First Name,Last Name,Taxonomy Code\n"
+        b"9000000001,Local,ProviderOne,207Q00000X\n"
+        b"9000000002,Local,ProviderTwo,207Q00000X\n"
+    )
+
+    async def exercise_local_flow(upload_dir):
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            signed = await client.post(
+                "/api/upload/generate-url",
+                json={"filename": "providers.csv", "content_type": "text/csv"},
+            )
+            assert signed.status_code == 200, signed.text
+            signed_payload = signed.json()
+            assert signed_payload["signed_url"].startswith(
+                "http://testserver/api/e2e/local-uploads/"
+            )
+
+            upload = await client.put(signed_payload["signed_url"], content=csv_payload)
+            assert upload.status_code == 200, upload.text
+            assert upload.json()["uploaded_bytes"] == len(csv_payload)
+
+            queued = await client.post(
+                "/api/companies/local-e2e/uploads/process",
+                json={
+                    "object_name": signed_payload["object_name"],
+                    "skip_npi_validation": True,
+                    "skip_content_analysis": True,
+                    "delete_source_on_success": True,
+                },
+            )
+            assert queued.status_code == 202, queued.text
+
+            status = await client.get(
+                f"/api/companies/local-e2e/uploads/process/{queued.json()['job_id']}"
+            )
+            assert status.status_code == 200, status.text
+            assert status.json()["status"] == "completed"
+            assert status.json()["records_processed"] == 2
+            assert status.json()["max_batch_records"] == 2
+            assert status.json()["skip_content_analysis"] is True
+            assert not list(upload_dir.iterdir())
+            assert not main_module.LOCAL_E2E_UPLOADS
+            assert not main_module.LOCAL_E2E_UPLOAD_TOKENS
+
+    dependency_key = main_module.require_authenticated_editor
+    previous_override = app.dependency_overrides.get(dependency_key)
+    previous_local_mode = main_module.LOCAL_E2E_MODE
+    previous_upload_dir = main_module.LOCAL_E2E_UPLOAD_DIR
+    try:
+        with TemporaryDirectory() as temp_dir:
+            main_module.LOCAL_E2E_MODE = True
+            main_module.LOCAL_E2E_UPLOAD_DIR = Path(temp_dir)
+            main_module.LOCAL_E2E_UPLOADS.clear()
+            main_module.LOCAL_E2E_UPLOAD_TOKENS.clear()
+            main_module.LOCAL_E2E_JOBS.clear()
+            app.dependency_overrides[dependency_key] = lambda: {
+                "uid": main_module.LOCAL_E2E_UID,
+                "role": "admin",
+            }
+            asyncio.run(exercise_local_flow(Path(temp_dir)))
+    finally:
+        main_module.LOCAL_E2E_MODE = previous_local_mode
+        main_module.LOCAL_E2E_UPLOAD_DIR = previous_upload_dir
+        main_module.LOCAL_E2E_UPLOADS.clear()
+        main_module.LOCAL_E2E_UPLOAD_TOKENS.clear()
+        main_module.LOCAL_E2E_JOBS.clear()
+        if previous_override is None:
+            app.dependency_overrides.pop(dependency_key, None)
+        else:
+            app.dependency_overrides[dependency_key] = previous_override
+
+
+def test_local_e2e_auth_bypass_rejects_non_loopback_clients():
+    from fastapi import HTTPException, Request
+
+    previous_local_mode = main_module.LOCAL_E2E_MODE
+    request_scope = {
+        "type": "http",
+        "headers": [],
+        "method": "POST",
+        "path": "/api/upload/generate-url",
+        "query_string": b"",
+        "server": ("127.0.0.1", 8000),
+        "client": ("192.0.2.1", 12345),
+        "scheme": "http",
+    }
+    try:
+        main_module.LOCAL_E2E_MODE = True
+        try:
+            main_module._local_e2e_identity(Request(request_scope))
+        except HTTPException as exc:
+            assert exc.status_code == 403
+        else:
+            raise AssertionError("The local E2E auth bypass accepted a non-loopback client.")
+    finally:
+        main_module.LOCAL_E2E_MODE = previous_local_mode
+
+
+def test_local_generate_upload_url_skips_gcs_signing_and_accepts_put(monkeypatch, tmp_path):
+    monkeypatch.setattr(main_module, "USE_EMULATOR", True)
+    monkeypatch.setattr(main_module, "LOCAL_UPLOAD_DIR", tmp_path)
 
     async def exercise():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            denied = await client.post(
+                "/api/companies/demo-company/uploads/generate-url",
+                json={"filename": "providers.csv"},
+                headers={"X-User-Role": "viewer"},
+            )
+            assert denied.status_code == 403
             url_response = await client.post(
-                "/api/upload/generate-url",
-                json={"company_id": "demo-company", "filename": "providers.csv", "content_type": "text/csv"},
+                "/api/companies/demo-company/uploads/generate-url",
+                json={"filename": "providers.csv", "content_type": "text/csv"},
                 headers={"X-User-Role": "editor"},
             )
             assert url_response.status_code == 200, url_response.text
             payload = url_response.json()
             assert payload["upload_url"].startswith("http://testserver/api/local-uploads/")
+            assert payload["storage_path"].startswith("companies/demo-company/uploads/")
 
             put_response = await client.put(payload["upload_url"], content=b"npi,first_name\n1234567890,Jane\n")
             assert put_response.status_code == 200, put_response.text
             assert put_response.json()["uploaded_bytes"] > 0
 
     asyncio.run(exercise())
+
+
+def test_upload_url_routes_are_not_shadowed():
+    for path in (
+        "/api/upload/generate-url",
+        "/api/uploads/generate-signed-url",
+        "/api/companies/{company_id}/uploads/generate-url",
+    ):
+        routes = [
+            route for route in app.routes
+            if getattr(route, "path", None) == path and "POST" in getattr(route, "methods", set())
+        ]
+        assert len(routes) == 1, f"Expected exactly one POST handler for {path}."
