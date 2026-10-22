@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, createContext, useContext, Fragment, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User as FirebaseUser } from 'firebase/auth'
+import { auth } from './firebase'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
 import RecordDetailDashboard from './RecordDetailDashboard'
 import { contactFlags, hasReviewField, npiOutcome, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
@@ -45,6 +47,37 @@ const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
 })
 const useRole = () => useContext(RoleContext)
 const isAdminRole = (role: Role) => role === 'admin' || role === 'super-admin'
+
+// Tracks the live Firebase Authentication user so the profile indicator and
+// logout flow reflect the real signed-in session instead of the demo role.
+const AuthContext = createContext<{ user: FirebaseUser | null; authLoading: boolean }>({
+  user: null,
+  authLoading: true,
+})
+const useAuthUser = () => useContext(AuthContext)
+
+const AUTH_TOKEN_STORAGE_KEY = 'medreach_id_token'
+
+function firebaseAuthErrorMessage(err: unknown): string {
+  const code = (err as { code?: string } | null)?.code || ''
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return 'Invalid email or password'
+    case 'auth/invalid-email':
+      return 'Enter a valid email address'
+    case 'auth/too-many-requests':
+      return 'Too many attempts — please wait a moment and try again'
+    default:
+      return 'Unable to sign in. Please try again.'
+  }
+}
+
+function initialsFromName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  return (parts[0]?.[0] || '').concat(parts[1]?.[0] || '').toUpperCase() || '?'
+}
 
 // Shared upload file metadata (written by UploadScreen, read by ColumnMappingScreen + ExportScreen)
 interface UploadMeta { fileName: string; fileSize: number; rowCount: number; fileType: string; uploadedAt: string }
@@ -240,6 +273,11 @@ const Icon = {
   plus: (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+  ),
+  logout: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
     </svg>
   ),
   spinner: (
@@ -480,11 +518,24 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
   current: Screen; onNavigate: (s: Screen) => void; collapsed: boolean; onToggle: () => void
 }) {
   const { role } = useRole()
+  const { user: authUser } = useAuthUser()
   const allowed = ROLE_NAV[role]
   const navItems = ALL_NAV_ITEMS.filter(i => allowed.includes(i.id))
-  const user = DEMO_USERS[role]
+  const demoUser = DEMO_USERS[role]
+  const displayName = authUser?.displayName || authUser?.email || demoUser.name
+  const initials = authUser ? initialsFromName(displayName) : demoUser.initials
   const meta = ROLE_META[role]
   const isSuperAdmin = role === 'super-admin'
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth)
+    } catch {
+      // Clear local session state regardless of whether the network sign-out call succeeds.
+    }
+    localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY)
+    onNavigate('login')
+  }
 
   return (
     <div
@@ -543,16 +594,24 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
         {!collapsed && (
           <div className="flex items-center gap-2 mb-2 px-1">
             <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
-              style={{ background: isSuperAdmin ? '#9333EA' : C.teal }}>{user.initials}</div>
+              style={{ background: isSuperAdmin ? '#9333EA' : C.teal }}>{initials}</div>
             <div className="flex-1 min-w-0">
-              <p className="text-[11px] font-semibold text-white truncate">{user.name}</p>
+              <p className="text-[11px] font-semibold text-white truncate" title={displayName}>{displayName}</p>
               <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
                 style={{ background: meta.bg, color: meta.color }}>{meta.label}</span>
             </div>
+            <button
+              onClick={handleLogout}
+              title="Log out"
+              aria-label="Log out"
+              className="shrink-0 p-1 rounded-[6px] text-white/50 hover:text-white hover:bg-white/10 transition-all"
+            >
+              {Icon.logout}
+            </button>
           </div>
         )}
         {!collapsed && (
-          <p className="text-[9px] px-1 mb-2 truncate" style={{ color: 'rgba(255,255,255,0.4)' }}>{user.org}</p>
+          <p className="text-[9px] px-1 mb-2 truncate" style={{ color: 'rgba(255,255,255,0.4)' }}>{authUser?.email && authUser.displayName ? authUser.email : demoUser.org}</p>
         )}
         <button
           onClick={onToggle}
@@ -618,19 +677,24 @@ function LoginScreen({ onLogin, onNavigate }: { onLogin: (role: Role) => void; o
   const [emailError, setEmailError] = useState('')
   const [selectedRole, setSelectedRole] = useState<Role>('admin')
 
-  const submit = () => {
+  const submit = async () => {
     setError('')
     setEmailError('')
     if (!email.includes('@')) {
       setEmailError('Enter a valid email address')
       return
     }
-    if (password === 'wrong') {
-      setError('Invalid email or password')
-      return
-    }
     setLoading(true)
-    setTimeout(() => { setLoading(false); onLogin(selectedRole) }, 1200)
+    try {
+      const credential = await signInWithEmailAndPassword(auth, email, password)
+      const token = await credential.user.getIdToken()
+      localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token)
+      onLogin(selectedRole)
+    } catch (err) {
+      setError(firebaseAuthErrorMessage(err))
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -6648,6 +6712,18 @@ export default function App() {
   const [resolvedValApp, setResolvedValApp] = useState<Map<number, ValAction>>(new Map())
   const [resolvedOutApp, setResolvedOutApp] = useState<Map<number, OutAction>>(new Map())
   const [warnNotesApp,   setWarnNotesApp]   = useState<Record<number, string>>({})
+  const [authUser, setAuthUser] = useState<FirebaseUser | null>(null)
+  const [authLoading, setAuthLoading] = useState(true)
+
+  // Mirror the live Firebase Auth session so the sidebar profile/logout stay in sync
+  // with sign-in and sign-out, independent of the demo role switcher.
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, user => {
+      setAuthUser(user)
+      setAuthLoading(false)
+    })
+    return unsubscribe
+  }, [])
 
   // Derive current Screen from URL path (e.g. /dashboard → 'dashboard')
   const pathToScreen = (path: string): Screen => {
@@ -6710,6 +6786,7 @@ export default function App() {
 
   if (isAuth) {
     return (
+      <AuthContext.Provider value={{ user: authUser, authLoading }}>
       <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
       <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
       <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
@@ -6720,10 +6797,12 @@ export default function App() {
       </UploadContext.Provider>
       </ValidationContext.Provider>
       </OutlierContext.Provider>
+      </AuthContext.Provider>
     )
   }
 
   return (
+    <AuthContext.Provider value={{ user: authUser, authLoading }}>
     <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
     <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
     <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
@@ -6759,5 +6838,6 @@ export default function App() {
     </UploadContext.Provider>
     </ValidationContext.Provider>
     </OutlierContext.Provider>
+    </AuthContext.Provider>
   )
 }
