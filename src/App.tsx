@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, createContext, useContext, Fragment, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User as FirebaseUser } from 'firebase/auth'
+import { read as readWorkbook, utils as xlsxUtils } from 'xlsx'
 import { getFirebaseAuth } from './firebase'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
 import RecordDetailDashboard from './RecordDetailDashboard'
-import { contactFlags, hasReviewField, npiOutcome, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
+import { contactFlags, duplicateFlags, hasReviewField, npiOutcome, outlierFlags, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
 import { NLPAuthenticationError, searchDataset } from './nlpSearch'
 
 // Backend base URL — empty string means calls are relative (proxied via Firebase Hosting rewrites in prod)
@@ -492,7 +493,7 @@ function Modal({ title, children, onClose, width = 480 }: { title: string; child
 const ALL_NAV_ITEMS = [
   { id: 'dashboard',          label: 'Dashboard',      icon: Icon.dashboard },
   { id: 'upload',             label: 'Upload Data',    icon: Icon.upload },
-  { id: 'data-review',        label: 'Data Review',    icon: Icon.shield, badge: 12 },
+  { id: 'data-review',        label: 'Data Review',    icon: Icon.shield },
   { id: 'data-heatmap',       label: 'Data Heatmap',   icon: Icon.chart },
   { id: 'query',              label: 'Query',          icon: Icon.query },
   { id: 'segments',           label: 'Segments',       icon: Icon.users },
@@ -528,6 +529,19 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
   const meta = ROLE_META[role]
   const isSuperAdmin = role === 'super-admin'
 
+  // Live unresolved-flag count for the Data Review nav badge (blends the dashboard
+  // summary with any flags already resolved this session, same as DashboardScreen).
+  const { data: stats } = useDashboardStats()
+  const { resolvedOut } = useOutliers()
+  const { resolvedVal } = useValidation()
+  const dataReviewBadge = stats ? Math.max(0,
+    stats.unresolved_flags.pii
+    + stats.unresolved_flags.duplicates
+    + Math.max(0, stats.unresolved_flags.outliers - resolvedOut.size)
+    + Math.max(0, stats.unresolved_flags.npi_validation - resolvedVal.size)
+  ) : 0
+  const navBadges: Partial<Record<string, number>> = { 'data-review': dataReviewBadge }
+
   const handleLogout = async () => {
     try {
       await signOut(getFirebaseAuth())
@@ -562,6 +576,7 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
       <nav className="flex-1 py-3 px-2 flex flex-col gap-0.5">
         {navItems.map(item => {
           const active = current === item.id
+          const badge = navBadges[item.id]
           return (
             <button
               key={item.id}
@@ -577,12 +592,12 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
             >
               <span className="shrink-0">{item.icon}</span>
               {!collapsed && <span className="flex-1 truncate">{item.label}</span>}
-              {'badge' in item && item.badge && !collapsed && (
+              {!!badge && !collapsed && (
                 <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: C.danger, color: 'white' }}>
-                  {item.badge}
+                  {badge}
                 </span>
               )}
-              {'badge' in item && item.badge && collapsed && (
+              {!!badge && collapsed && (
                 <span className="absolute top-1 right-1 w-2 h-2 rounded-full" style={{ background: C.danger }} />
               )}
             </button>
@@ -633,10 +648,7 @@ function TopBar({ title }: { title: string }) {
       <span className="text-[13px] font-semibold" style={{ color: C.darkText }}>{title}</span>
       <div className="flex items-center gap-4" style={{ color: C.navy }}>
         {Icon.search}
-        <div className="relative">
-          {Icon.bell}
-          <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[8px] font-bold text-white" style={{ background: C.danger }}>3</span>
-        </div>
+        {Icon.bell}
         {Icon.user}
       </div>
     </div>
@@ -929,14 +941,6 @@ function StatSkeleton() {
   )
 }
 
-const RECENT_ACTIVITY = [
-  { time: '2 min ago', actor: 'Jane Doe', action: 'Resolved PII flag', resource: 'Record #4821' },
-  { time: '18 min ago', actor: 'Mark Chen', action: 'Exported Clean HCP CSV', resource: '10,412 records' },
-  { time: '1 hr ago', actor: 'Jane Doe', action: 'Uploaded dataset', resource: 'Q2_HCP_List.csv' },
-  { time: '2 hr ago', actor: 'Admin', action: 'Invited team member', resource: 'sarah@acmepharma.com' },
-  { time: 'Yesterday', actor: 'Mark Chen', action: 'Ran segmentation', resource: '6 segments generated' },
-]
-
 type WalkthroughSource = 'api' | 'demo'
 
 interface WalkthroughValidationError {
@@ -964,19 +968,6 @@ interface ProviderWalkthroughRecord {
   softDeletedDuplicate: boolean
   duplicateClusterId: string | null
   prescriptionVolume: number | null
-}
-
-// Reference benchmarks for the provider volume comparison histogram
-const NATIONAL_AVERAGE_VOLUME = 1200
-const SPECIALTY_AVERAGE_VOLUME: Record<string, number> = {
-  Cardiology: 1450,
-  Neurology: 1100,
-  Oncology: 950,
-  'Family Medicine': 1600,
-  'Internal Medicine': 1350,
-}
-function specialtyAverageVolume(specialty: string): number {
-  return SPECIALTY_AVERAGE_VOLUME[specialty] ?? NATIONAL_AVERAGE_VOLUME
 }
 
 const DEMO_PROVIDER_WALKTHROUGH: ProviderWalkthroughRecord[] = [
@@ -1320,43 +1311,22 @@ function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       <div className="grid grid-cols-3 gap-6 mb-8">
         {/* Quality trend */}
         <Card className="col-span-2">
-          <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Quality — Last 5 Uploads</h3>
-          <div className="flex items-end gap-3 h-32">
-            {[
-              { label: 'Dec 10', score: 58 }, { label: 'Jan 4', score: 72 }, { label: 'Feb 17', score: 69 },
-              { label: 'Mar 8', score: 80 }, { label: 'Today', score: 84 },
-            ].map((b, i) => (
-              <div key={b.label} className="flex flex-col items-center gap-1 flex-1">
-                <span className="text-[10px] font-bold" style={{ color: i === 4 ? C.success : C.corpBlue }}>{b.score}%</span>
-                <div className="w-full rounded-t-[4px] transition-all" style={{
-                  height: `${b.score}%`,
-                  background: i === 4 ? C.success : C.corpBlue,
-                  opacity: i === 4 ? 1 : 0.7,
-                }} />
-                <span className="text-[9px]" style={{ color: C.midText }}>{b.label}</span>
-              </div>
-            ))}
-          </div>
+          <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Data Quality Trend</h3>
+          <EmptyState
+            icon={Icon.chart}
+            title="No upload history yet"
+            subtitle="Quality trend across past uploads will appear here once more than one dataset has been processed."
+          />
         </Card>
 
         {/* Specialty distribution */}
         <Card>
           <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Specialty Distribution</h3>
-          <div className="flex flex-col gap-2.5">
-            {[
-              { name: 'Cardiology', pct: 28, color: C.navy },
-              { name: 'Oncology', pct: 22, color: C.corpBlue },
-              { name: 'Neurology', pct: 17, color: C.teal },
-              { name: 'Orthopedics', pct: 14, color: '#5C85C4' },
-              { name: 'Other', pct: 19, color: '#CBD5E0' },
-            ].map(s => (
-              <div key={s.name} className="flex items-center gap-2">
-                <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: s.color }} />
-                <span className="flex-1 text-[11px]" style={{ color: C.darkText }}>{s.name}</span>
-                <span className="text-[11px] font-semibold" style={{ color: C.midText }}>{s.pct}%</span>
-              </div>
-            ))}
-          </div>
+          <EmptyState
+            icon={Icon.users}
+            title="No specialty breakdown yet"
+            subtitle="Upload and process a dataset to see specialty distribution."
+          />
         </Card>
       </div>
 
@@ -1458,29 +1428,10 @@ function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
 
                 {selectedRecord.prescriptionVolume !== null && (
                   <div className="mb-4 p-3 rounded-[7px]" style={{ background: '#F8FAFC', border: '1px solid #E2E8F0' }}>
-                    <p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: C.midText }}>
-                      Volume vs. national &amp; specialty peers
+                    <p className="text-[10px] font-bold uppercase tracking-widest mb-1" style={{ color: C.midText }}>
+                      Prescription volume
                     </p>
-                    <ResponsiveContainer width="100%" height={180}>
-                      <BarChart
-                        data={[
-                          { label: selectedRecord.providerName, volume: selectedRecord.prescriptionVolume },
-                          { label: 'National Avg', volume: NATIONAL_AVERAGE_VOLUME },
-                          { label: `${selectedRecord.specialty} Avg`, volume: specialtyAverageVolume(selectedRecord.specialty) },
-                        ]}
-                        margin={{ top: 4, right: 8, left: -16, bottom: 4 }}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                        <XAxis dataKey="label" tick={{ fontSize: 10 }} interval={0} />
-                        <YAxis tick={{ fontSize: 10 }} />
-                        <RechartTooltip formatter={(value) => Array.isArray(value) ? value.join(', ') : Number(value).toLocaleString()} />
-                        <Bar dataKey="volume" radius={[4, 4, 0, 0]}>
-                          <Cell fill={C.danger} />
-                          <Cell fill={C.corpBlue} />
-                          <Cell fill={C.teal} />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                    <p className="text-[20px] font-bold mono" style={{ color: C.navy }}>{selectedRecord.prescriptionVolume.toLocaleString()}</p>
                   </div>
                 )}
 
@@ -1565,21 +1516,11 @@ function DashboardScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       {/* Activity feed */}
       <Card>
         <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Recent Activity</h3>
-        <div className="flex flex-col divide-y divide-[#EDF2F7]">
-          {RECENT_ACTIVITY.map((a, i) => (
-            <div key={i} className="flex items-center gap-4 py-2.5">
-              <div className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-white shrink-0" style={{ background: C.navy }}>
-                {a.actor.split(' ').map(n => n[0]).join('')}
-              </div>
-              <div className="flex-1">
-                <span className="text-[12px] font-semibold" style={{ color: C.darkText }}>{a.actor}</span>
-                <span className="text-[12px]" style={{ color: C.midText }}> · {a.action} · </span>
-                <span className="text-[12px] font-medium" style={{ color: C.corpBlue }}>{a.resource}</span>
-              </div>
-              <span className="text-[11px]" style={{ color: C.midText }}>{a.time}</span>
-            </div>
-          ))}
-        </div>
+        <EmptyState
+          icon={Icon.audit}
+          title="No recent activity feed available"
+          subtitle="A live activity feed is not yet available for this dataset."
+        />
       </Card>
     </div>
   )
@@ -1654,10 +1595,68 @@ function parseCsvRecords(
   return rows.map(values => Object.fromEntries(headers.map((header, index) => [header, values[index]?.trim() || ''])))
 }
 
+// Parses the first sheet of an uploaded XLSX workbook into the same
+// Record<string, string>[] shape parseCsvRecords produces, so both formats can
+// flow through the same real upload/merge pipeline.
+function parseXlsxRecords(buffer: ArrayBuffer): Record<string, string>[] {
+  const workbook = readWorkbook(buffer, { type: 'array' })
+  const firstSheetName = workbook.SheetNames[0]
+  if (!firstSheetName) return []
+  const sheet = workbook.Sheets[firstSheetName]
+  const rows = xlsxUtils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false })
+  return rows.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.trim(), String(value ?? '').trim()])))
+}
+
+// Fetches the full processed/export dataset for a company (paginating through
+// export_data cursors). Shared by any screen that needs the real, cleaned record set.
+function useExportedRecords(companyId: string) {
+  const [records, setRecords] = useState<Record<string, unknown>[]>([])
+  const [loading, setLoading] = useState(true)
+  const [status, setStatus] = useState<number | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    const load = async () => {
+      try {
+        const loaded: Record<string, unknown>[] = []
+        const cursors = new Set<string>()
+        let cursor: string | undefined
+        do {
+          const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+          const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/${companyId}/export_data${query}`)
+          if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
+          if ((response.headers.get('content-type') || '').includes('json')) {
+            const data = await response.json() as ExportResponse
+            if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
+            loaded.push(...data.records)
+            cursor = data.next_cursor
+            if (cursor && cursors.has(cursor)) throw new Error('Export returned a repeated pagination cursor')
+            if (cursor) cursors.add(cursor)
+          } else {
+            loaded.push(...parseCsvRecords(await response.text(), { header: true, skipEmptyLines: true }))
+            cursor = undefined
+          }
+        } while (cursor)
+        if (active) setRecords(loaded)
+      } catch (err) {
+        if (active) {
+          setStatus(err instanceof HttpError ? err.status : null)
+          setError(err instanceof Error ? err.message : 'Unable to load processed records')
+        }
+      } finally {
+        if (active) setLoading(false)
+      }
+    }
+    void load()
+    return () => { active = false }
+  }, [companyId])
+
+  return { records, loading, status, error }
+}
+
 function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => void; showToast: (type: ToastType, message: string) => void }) {
   const { role } = useRole()
-  const canDeleteDatasets = isAdminRole(role)
-  const deleteDatasetTooltip = 'Only Admin users can delete datasets.'
   const { setMeta } = useUploadMeta()
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [fileName,    setFileName]    = useState('')
@@ -1702,12 +1701,13 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
     setIsRealUpload(true)
     setUploadPct(0)
     setUploadState('uploading')
+    const isXlsx = file.name.toLowerCase().endsWith('.xlsx')
 
     try {
       const urlRes = await fetch(`${API_BASE_URL}/api/companies/demo-company/uploads/generate-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
-        body: JSON.stringify({ filename: file.name, content_type: file.type || 'text/csv' }),
+        body: JSON.stringify({ filename: file.name, content_type: file.type || (isXlsx ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv') }),
       })
       if (!urlRes.ok) throw new HttpError(urlRes.status, (await urlRes.text()) || 'Could not obtain an upload URL')
       const { upload_url: uploadUrl } = await urlRes.json()
@@ -1716,7 +1716,9 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
       xhrRef.current = null
       setUploadState('processing')
 
-      const recordsToUpload = parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
+      const recordsToUpload = isXlsx
+        ? parseXlsxRecords(await file.arrayBuffer())
+        : parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
       const mergeResponse = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/records/merge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
@@ -1724,7 +1726,7 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
       })
       if (!mergeResponse.ok) throw new HttpError(mergeResponse.status, await mergeResponse.text())
 
-      setMeta({ fileName: file.name, fileSize: file.size, rowCount: recordsToUpload.length, fileType: 'CSV', uploadedAt: new Date().toLocaleString() })
+      setMeta({ fileName: file.name, fileSize: file.size, rowCount: recordsToUpload.length, fileType: isXlsx ? 'XLSX' : 'CSV', uploadedAt: new Date().toLocaleString() })
       setUploadState('done')
       onNavigate('data-review')
     } catch (error) {
@@ -1816,15 +1818,13 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
     const file = e.target.files?.[0]
     if (!file) return
     const sizeMB = file.size / (1024 * 1024)
-    const ext = file.name.split('.').pop()?.toUpperCase() || 'CSV'
     if (!file.name.endsWith('.csv') && !file.name.endsWith('.xlsx')) {
       setFileName(file.name); setUploadState('error-type'); e.currentTarget.value = ''; return
     }
     if (file.size > MAX_FILE_BYTES) {
       setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); e.currentTarget.value = ''; return
     }
-    if (ext === 'CSV') uploadRealFile(file)
-    else runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
+    uploadRealFile(file)
     e.currentTarget.value = ''
   }
 
@@ -1863,15 +1863,13 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
     const file = e.dataTransfer.files[0]
     if (!file) { setUploadState('idle'); return }
     const sizeMB = file.size / (1024 * 1024)
-    const ext = file.name.split('.').pop()?.toUpperCase() || 'CSV'
     if (!file.name.toLowerCase().endsWith('.csv') && !file.name.toLowerCase().endsWith('.xlsx')) {
       setFileName(file.name); setUploadState('error-type'); return
     }
     if (file.size > MAX_FILE_BYTES) {
       setFileName(file.name); setFileSize(sizeMB); setUploadState('error-size'); return
     }
-    if (ext === 'CSV') uploadRealFile(file)
-    else runUpload(file.name, sizeMB, Math.floor(sizeMB * 867), ext)
+    uploadRealFile(file)
   }
 
   // ── demo: trigger network error manually ──────────────────────────────────
@@ -1879,12 +1877,6 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
     clearInterval(intervalRef.current!)
     setUploadState('error-network')
   }
-
-  const UPLOADS = [
-    { name: 'Q1_HCP_Cardiology.csv',       size: '3.2 MB',  date: 'Mar 8, 2026',  records: 4217, quality: 84, status: 'complete' },
-    { name: 'National_NPI_Jan2026.xlsx',    size: '8.7 MB',  date: 'Jan 4, 2026',  records: 6195, quality: 72, status: 'complete' },
-    { name: 'Legacy_Reps_Dec2025.csv',      size: '1.1 MB',  date: 'Dec 10, 2025', records: 948,  quality: 58, status: 'complete' },
-  ]
 
   // ── chunk label helper ─────────────────────────────────────────────────────
   const chunkLabel = () => {
@@ -2198,53 +2190,12 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
 
       {/* ── UPLOAD HISTORY ─────────────────────────────────────────────────── */}
       <Card>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-[15px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Upload History</h3>
-          <span className="text-[11px]" style={{ color: C.midText }}>{UPLOADS.length} uploads · last 90 days</span>
-        </div>
-        <table className="data-table w-full border-collapse">
-          <thead>
-            <tr>
-              <th>File name</th><th>Size</th><th>Date</th><th>Records</th><th>Quality</th><th>Status</th><th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {UPLOADS.map(u => (
-              <tr key={u.name}>
-                <td>
-                  <div className="flex items-center gap-2">
-                    <span style={{ color: C.teal }}>{Icon.fileCheck}</span>
-                    <span className="font-medium" style={{ color: C.corpBlue }}>{u.name}</span>
-                  </div>
-                </td>
-                <td>{u.size}</td>
-                <td>{u.date}</td>
-                <td className="mono">{u.records.toLocaleString()}</td>
-                <td>
-                  <div className="flex items-center gap-2">
-                    <div className="progress-track" style={{ minWidth: 60 }}>
-                      <div className="progress-fill" style={{ width: `${u.quality}%`, background: u.quality >= 80 ? C.success : u.quality >= 65 ? C.warning : C.danger }} />
-                    </div>
-                    <span className="text-[11px] font-semibold" style={{ color: u.quality >= 80 ? C.success : u.quality >= 65 ? C.warning : C.danger }}>{u.quality}%</span>
-                  </div>
-                </td>
-                <td><Badge tier={1} color={u.status === 'complete' ? 'success' : 'warning'}>{u.status === 'complete' ? 'Complete' : 'Processing'}</Badge></td>
-                <td>
-                  <button className="text-[11px] font-semibold hover:underline mr-3" style={{ color: C.corpBlue }}>View</button>
-                  <span title={canDeleteDatasets ? '' : deleteDatasetTooltip}>
-                    <button
-                      disabled={!canDeleteDatasets}
-                      className={`text-[11px] font-semibold ${canDeleteDatasets ? 'hover:underline' : 'cursor-not-allowed'}`}
-                      style={{ color: canDeleteDatasets ? C.danger : '#A0AEC0' }}
-                    >
-                      Delete
-                    </button>
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <h3 className="text-[15px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Upload History</h3>
+        <EmptyState
+          icon={Icon.upload}
+          title="No upload history available"
+          subtitle="A list of past uploads is not yet available. Uploads you process this session appear in Data Review."
+        />
       </Card>
     </div>
   )
@@ -2641,65 +2592,10 @@ function ColumnMappingScreen({ onNavigate }: { onNavigate: (s: Screen) => void }
 
 // ── Data Review data ─────────────────────────────────────────────────────────
 
-interface DupRecord {
-  npi: string; firstName: string; lastName: string; spec: string
-  state: string; email: string; phone: string; address: string; source: string
-}
-interface DupCluster {
-  id: string; similarity: number
-  rec1: DupRecord; rec2: DupRecord
-}
-const DUPLICATES: DupCluster[] = [
-  {
-    id: 'A', similarity: 97,
-    rec1: { npi: '1234567890', firstName: 'James',  lastName: 'Morrison',   spec: 'Cardiology', state: 'FL', email: 'j.morrison@floridahealth.com',  phone: '(305) 882-4411', address: '101 Medical Dr, Miami FL',              source: 'Q1_Upload' },
-    rec2: { npi: '1234567890', firstName: 'Jim',    lastName: 'Morrison',   spec: 'Cardiology', state: 'FL', email: 'jmorrison@baptisthealth.net',   phone: '(305) 882-4411', address: '101 Medical Dr, Miami, FL 33101',       source: 'Q2_Upload' },
-  },
-  {
-    id: 'B', similarity: 91,
-    rec1: { npi: '5544332211', firstName: 'Robert', lastName: 'Patel',      spec: 'Neurology',  state: 'CA', email: 'rpatel@ucsf.edu',               phone: '(415) 476-0001', address: '505 Parnassus Ave, San Francisco CA',   source: 'Q1_Upload' },
-    rec2: { npi: '5544332211', firstName: 'Rob',    lastName: 'Patel MD',   spec: 'Neurology',  state: 'CA', email: 'robert.patel@ucsf.edu',         phone: '(415) 476-0001', address: '505 Parnassus Ave, San Francisco CA 94143', source: 'Q1_Upload' },
-  },
-  {
-    id: 'C', similarity: 84,
-    rec1: { npi: '9988221100', firstName: 'Angela', lastName: 'Ruiz',       spec: 'Oncology',   state: 'TX', email: 'aruiz@mdanderson.org',          phone: '(713) 792-2121', address: '1515 Holcombe Blvd, Houston TX',        source: 'Q1_Upload' },
-    rec2: { npi: '9988221100', firstName: 'Angela', lastName: 'M. Ruiz',    spec: 'Oncology',   state: 'TX', email: 'a.m.ruiz@mdanderson.org',       phone: '(713) 792-9999', address: '1515 Holcombe Blvd, Houston TX 77030',  source: 'Q2_Upload' },
-  },
-]
-
-const OUTLIERS = [
-  { id: 0, record: 'Dr. Chen #1192',    specialty: 'Oncology',    reason: 'NPI claims volume 10x above oncology specialty average',              severity: 'High',   anomalyScore: 0.94, nullPct: 3  },
-  { id: 1, record: 'Dr. Williams #4490',specialty: 'Cardiology',  reason: 'Prescribing pattern spans 14 states — geographically implausible',   severity: 'Medium', anomalyScore: 0.78, nullPct: 7  },
-  { id: 2, record: 'Dr. Kim #7723',     specialty: 'Dermatology', reason: 'License expiry date 22 years in the future',                          severity: 'Low',    anomalyScore: 0.61, nullPct: 11 },
-  { id: 3, record: 'Dr. Okonkwo #5512', specialty: 'Neurology',   reason: 'Email domain does not match registered practice location',           severity: 'Medium', anomalyScore: 0.71, nullPct: 0  },
-]
-
-const VALIDATION_ERRORS = [
-  { id: 0, record: 'Thomas Nguyen #5501', npi: '0000000001', specialty: 'Internal Medicine', state: 'CA', issue: 'NPI not found in NPPES registry',                              issueType: 'Not Found',  severity: 'High',   nullPct: 6  },
-  { id: 1, record: 'Carol Davis #3320',   npi: '9988776655', specialty: 'Cardiology',        state: 'NY', issue: 'NPI is inactive since 2019',                                    issueType: 'Inactive',   severity: 'Medium', nullPct: 2  },
-  { id: 2, record: 'Steven Park #8811',   npi: '1122334455', specialty: 'Surgery',           state: 'TX', issue: 'NPI specialty mismatch — registered as GP, uploaded as Surgeon', issueType: 'Mismatch',   severity: 'Medium', nullPct: 9  },
-  { id: 3, record: 'Maria Santos #6630',  npi: '4455667788', specialty: 'Oncology',          state: 'FL', issue: 'NPI check digit invalid',                                       issueType: 'Invalid',    severity: 'High',   nullPct: 4  },
-]
-
-// ── Field-level null completeness summary (shown above each table) ────────────
-const NULL_SUMMARIES: Record<string, { field: string; nullPct: number }[]> = {
-  pii: [
-    { field: 'SSN',            nullPct: 2  },
-    { field: 'Email (personal)',nullPct: 14 },
-    { field: 'Home Address',   nullPct: 5  },
-    { field: 'Date of Birth',  nullPct: 8  },
-  ],
-  outliers: [
-    { field: 'Claims Volume',  nullPct: 3  },
-    { field: 'License Expiry', nullPct: 11 },
-    { field: 'Practice State', nullPct: 7  },
-  ],
-  validation: [
-    { field: 'NPI Number',     nullPct: 6  },
-    { field: 'Specialty Code', nullPct: 9  },
-    { field: 'State',          nullPct: 2  },
-  ],
-}
+// Outlier/duplicate/NPI-validation flag rows are all derived live from
+// processedRecords inside DataReviewScreen (see outlierFlags()/duplicateFlags() in
+// dataReview.ts, and the local VALIDATION_ERRORS derivation below) using only fields
+// the backend actually persists. No module-level mock data remains for these.
 
 // ── Shared sortable column header ─────────────────────────────────────────────
 type SortDir = 'asc' | 'desc' | null
@@ -2756,7 +2652,7 @@ function NullSummaryBar({ tab, records = [] }: { tab: string; records?: Record<s
           { field: 'Specialty', nullPct: Math.round(records.filter(record => !String(record.specialty || record.pri_spec || '').trim()).length / totalRecords * 1000) / 10 },
           { field: 'State', nullPct: Math.round(records.filter(record => !String(record.state || record.State || '').trim()).length / totalRecords * 1000) / 10 },
         ]
-      : NULL_SUMMARIES[tab]
+      : null
   if (!fields) return null
   return (
     <div className="flex flex-wrap gap-4 mb-4 p-3 rounded-[6px]" style={{ background: C.lightTint }}>
@@ -2806,10 +2702,9 @@ function DataReviewScreen() {
   const [overrideOpen, setOverrideOpen] = useState<Set<number>>(new Set())
   // Set of validation error ids currently re-validating (spinner)
   const [revalidating, setRevalidating] = useState<Set<number>>(new Set())
-  // Duplicate cluster resolution
-  const [resolvedDup, setResolvedDup] = useState<Map<string, 'merged' | 'distinct' | 'removed'>>(new Map())
-  const [masterSel,   setMasterSel]   = useState<Map<string, 1 | 2>>(new Map())
-  const [mergingDup,  setMergingDup]  = useState<Set<string>>(new Set())
+  // Duplicate record resolution (local triage only — no backend endpoint persists
+  // per-record duplicate resolution yet, so this does not simulate a fake round-trip).
+  const [resolvedDup, setResolvedDup] = useState<Map<number, 'kept' | 'removed'>>(new Map())
 
   useEffect(() => {
     const loadProcessedRecords = async () => {
@@ -2844,14 +2739,8 @@ function DataReviewScreen() {
     loadProcessedRecords()
   }, [])
 
-  const resolveDup = (id: string, action: 'merged' | 'distinct' | 'removed', master?: 1 | 2) => {
-    setMergingDup(prev => { const s = new Set(prev); s.add(id); return s })
-    // Simulate backend merge/distinct endpoint (~900 ms)
-    setTimeout(() => {
-      setMergingDup(prev => { const s = new Set(prev); s.delete(id); return s })
-      setResolvedDup(prev => { const m = new Map(prev); m.set(id, action); return m })
-      if (master) setMasterSel(prev => { const m = new Map(prev); m.set(id, master); return m })
-    }, 900)
+  const resolveDup = (id: number, action: 'kept' | 'removed') => {
+    setResolvedDup(prev => { const m = new Map(prev); m.set(id, action); return m })
   }
 
   // ── sort state ───────────────────────────────────────────────────────────
@@ -2884,6 +2773,11 @@ function DataReviewScreen() {
     issueType: 'Invalid', severity: 'High', nullPct: reviewValue(record, 'npi') ? 0 : 100,
   }] : [])
 
+  // Real flagged-record rows derived from processedRecords — shadows the module-level
+  // mock arrays of the same name (which other not-yet-wired screens still use).
+  const OUTLIERS = outlierFlags(processedRecords)
+  const DUPLICATES = duplicateFlags(processedRecords)
+
   // ── sorted data ──────────────────────────────────────────────────────────
   const sortedPII = [...piiFlags].sort((a, b) => {
     if (!piiSort.key) return 0
@@ -2898,10 +2792,8 @@ function DataReviewScreen() {
   const sortedOut = [...OUTLIERS].sort((a, b) => {
     if (!outSort.key) return 0
     const dir = outSort.dir === 'asc' ? 1 : -1
-    if (outSort.key === 'severity')     return (severityRank(a.severity) - severityRank(b.severity)) * dir
-    if (outSort.key === 'anomalyScore') return (a.anomalyScore - b.anomalyScore) * dir
-    if (outSort.key === 'nullPct')      return (a.nullPct - b.nullPct) * dir
-    if (outSort.key === 'record')       return a.record.localeCompare(b.record) * dir
+    if (outSort.key === 'record')         return a.record.localeCompare(b.record) * dir
+    if (outSort.key === 'detectionModel') return a.detectionModel.localeCompare(b.detectionModel) * dir
     return 0
   })
 
@@ -2919,8 +2811,8 @@ function DataReviewScreen() {
   const sortedDup = [...DUPLICATES].sort((a, b) => {
     if (!dupSort.key) return 0
     const dir = dupSort.dir === 'asc' ? 1 : -1
-    if (dupSort.key === 'similarity') return (a.similarity - b.similarity) * dir
-    if (dupSort.key === 'name')       return `${a.rec1.lastName} ${a.rec1.firstName}`.localeCompare(`${b.rec1.lastName} ${b.rec1.firstName}`) * dir
+    if (dupSort.key === 'name') return a.record.localeCompare(b.record) * dir
+    if (dupSort.key === 'npi')  return a.npi.localeCompare(b.npi) * dir
     return 0
   })
 
@@ -3238,14 +3130,13 @@ function DataReviewScreen() {
 
       {/* ── DUPLICATES TAB ───────────────────────────────────────────────────── */}
       {tab === 'duplicates' && (
-        <div className="flex flex-col gap-4">
-
+        <Card>
           {/* Sort + summary bar */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 mb-4">
             <span className="text-[11px] font-semibold" style={{ color: C.midText }}>Sort by:</span>
             {[
-              { label: 'Similarity', key: 'similarity' },
-              { label: 'Name',       key: 'name' },
+              { label: 'Name', key: 'name' },
+              { label: 'NPI',  key: 'npi' },
             ].map(opt => (
               <button key={opt.key}
                 className="text-[11px] px-2 py-1 rounded-[4px] border transition-all"
@@ -3260,203 +3151,91 @@ function DataReviewScreen() {
               </button>
             ))}
             <span className="text-[11px] ml-auto" style={{ color: C.midText }}>
-              {DUPLICATES.length - resolvedDup.size} of {DUPLICATES.length} cluster{DUPLICATES.length !== 1 ? 's' : ''} pending
+              {DUPLICATES.length - resolvedDup.size} of {DUPLICATES.length} flagged record{DUPLICATES.length !== 1 ? 's' : ''} pending
             </span>
           </div>
 
           {/* Empty state */}
-          {resolvedDup.size === DUPLICATES.length && (
-            <Card>
-              <EmptyState
-                icon={Icon.checkCircle}
-                title="All duplicate clusters resolved"
-                subtitle="No further deduplication required. Your dataset is clean."
-              />
-            </Card>
-          )}
+          {DUPLICATES.length === 0 ? (
+            <EmptyState
+              icon={Icon.checkCircle}
+              title="No duplicate records detected"
+              subtitle="The dedupe pass found no records flagged as duplicates in this dataset."
+            />
+          ) : resolvedDup.size === DUPLICATES.length ? (
+            <EmptyState
+              icon={Icon.checkCircle}
+              title="All flagged duplicates resolved"
+              subtitle="No further deduplication required for this session."
+            />
+          ) : null}
 
-          {sortedDup.map(d => {
-            const isResolved = resolvedDup.has(d.id)
-            const isMerging  = mergingDup.has(d.id)
-            const resolution = resolvedDup.get(d.id)
-            const master     = masterSel.get(d.id)
-            const hasMaster  = masterSel.has(d.id)
-
-            // Compare field-by-field to find diffs
-            const COMPARE_FIELDS: { label: string; key: keyof DupRecord }[] = [
-              { label: 'NPI',        key: 'npi'       },
-              { label: 'First Name', key: 'firstName' },
-              { label: 'Last Name',  key: 'lastName'  },
-              { label: 'Specialty',  key: 'spec'      },
-              { label: 'State',      key: 'state'     },
-              { label: 'Email',      key: 'email'     },
-              { label: 'Phone',      key: 'phone'     },
-              { label: 'Address',    key: 'address'   },
-              { label: 'Source',     key: 'source'    },
-            ]
-
-            return (
-              <Card key={d.id} className={isResolved ? 'opacity-50' : ''}>
-                {/* ── Cluster header ── */}
-                <div className="flex items-center gap-2 mb-3">
-                  <span style={{ color: C.warning }}>{Icon.copy}</span>
-                  <span className="text-[13px] font-bold" style={{ color: C.darkText }}>Duplicate cluster detected</span>
-                  <Badge tier={1} color={d.rec1.source !== d.rec2.source ? 'warning' : 'info'}>
-                    {d.rec1.source !== d.rec2.source ? 'Cross-upload' : 'Same upload'}
-                  </Badge>
-                  <span className="ml-auto flex items-center gap-2">
-                    <span className="text-[11px]" style={{ color: C.midText }}>Similarity</span>
-                    <span className="font-bold mono text-[13px]" style={{ color: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue }}>
-                      {d.similarity}%
-                    </span>
-                    {isResolved && (
-                      <Badge tier={2}
-                        color={resolution === 'merged' ? 'approve' : resolution === 'distinct' ? 'info' : 'block'}>
-                        {resolution === 'merged' ? `✓ Merged → Record ${master}` : resolution === 'distinct' ? 'Distinct entities' : 'Duplicate removed'}
-                      </Badge>
-                    )}
-                  </span>
-                </div>
-
-                {/* ── Similarity bar ── */}
-                <div className="progress-track mb-4" style={{ height: 5 }}>
-                  <div className="progress-fill" style={{
-                    width: `${d.similarity}%`,
-                    background: d.similarity >= 95 ? C.danger : d.similarity >= 85 ? C.warning : C.corpBlue,
-                  }} />
-                </div>
-
-                {/* ── Side-by-side comparison table ── */}
-                <div className="rounded-[6px] border border-[#EDF2F7] overflow-hidden mb-4">
-                  {/* Column headers with master-select */}
-                  <div className="grid" style={{ gridTemplateColumns: '130px 1fr 1fr' }}>
-                    <div className="px-3 py-2 border-b border-r border-[#EDF2F7] text-[10px] font-semibold uppercase tracking-wider" style={{ background: '#F7FAFC', color: C.midText }}>Field</div>
-                    {[1, 2].map(idx => {
-                      const rec  = idx === 1 ? d.rec1 : d.rec2
-                      const isMaster = master === idx
-                      return (
-                        <div key={idx}
-                          className="px-3 py-2 border-b border-[#EDF2F7] flex items-center justify-between"
-                          style={{ borderLeft: '1px solid #EDF2F7', background: isMaster ? '#F0FDF4' : '#F7FAFC' }}>
-                          <div>
-                            <p className="text-[11px] font-bold" style={{ color: isMaster ? C.success : C.navy }}>Record {idx}</p>
-                            <p className="text-[10px]" style={{ color: C.midText }}>{rec.source}</p>
-                          </div>
-                          {!isResolved && (
-                            <button
-                              onClick={() => setMasterSel(prev => {
-                                const m = new Map(prev)
-                                m.set(d.id, idx as 1 | 2)
-                                return m
-                              })}
-                              className="text-[10px] font-bold px-2 py-1 rounded-[4px] border transition-all"
-                              style={{
-                                borderColor: isMaster ? C.success : C.border,
-                                background:  isMaster ? '#E8F5EF' : 'white',
-                                color:       isMaster ? C.success : C.midText,
-                              }}>
-                              {isMaster ? '★ Master' : '☆ Set as Master'}
+          {DUPLICATES.length > 0 && (
+            <table className="data-table w-full border-collapse">
+              <thead>
+                <tr>
+                  <th>Record</th>
+                  <th>NPI</th>
+                  <th>Specialty</th>
+                  <th>State</th>
+                  <th>Email</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedDup.map(d => {
+                  const action   = resolvedDup.get(d.id)
+                  const resolved = action !== undefined
+                  return (
+                    <tr key={d.id} style={{ opacity: resolved ? 0.5 : 1 }}>
+                      <td className="font-medium">{d.record}</td>
+                      <td className="mono text-[11px]">{d.npi || <span style={{ color: C.border }}>—</span>}</td>
+                      <td><Badge tier={1} color="neutral">{d.specialty}</Badge></td>
+                      <td>{d.state}</td>
+                      <td className="text-[11px]">{d.email || <span style={{ color: C.border }}>—</span>}</td>
+                      <td>
+                        {resolved ? (
+                          <div className="flex items-center gap-2">
+                            <Badge tier={1} color={action === 'removed' ? 'danger' : 'success'}>
+                              {action === 'removed' ? 'Removed' : 'Kept'}
+                            </Badge>
+                            <button className="text-[10px] hover:underline" style={{ color: C.corpBlue }}
+                              onClick={() => { const m = new Map(resolvedDup); m.delete(d.id); setResolvedDup(m) }}>
+                              Undo
                             </button>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </div>
-
-                  {/* Field-by-field rows */}
-                  {COMPARE_FIELDS.map((f, fi) => {
-                    const v1   = d.rec1[f.key]
-                    const v2   = d.rec2[f.key]
-                    const diff = v1 !== v2
-                    return (
-                      <div key={f.key}
-                        className="grid"
-                        style={{
-                          gridTemplateColumns: '130px 1fr 1fr',
-                          background: fi % 2 === 0 ? 'white' : '#FAFBFC',
-                          borderTop: '1px solid #EDF2F7',
-                        }}>
-                        <div className="px-3 py-2 border-r border-[#EDF2F7] text-[11px] font-semibold flex items-center" style={{ color: C.midText }}>
-                          {f.label}
-                          {diff && <span className="ml-1.5 text-[9px] font-bold px-1 py-0.5 rounded" style={{ background: '#FEF3C7', color: '#92400E' }}>DIFF</span>}
-                        </div>
-                        {[1, 2].map(idx => {
-                          const val      = idx === 1 ? v1 : v2
-                          const isMasterCol = master === idx
-                          return (
-                            <div key={idx}
-                              className="px-3 py-2 mono text-[11px] flex items-center"
-                              style={{
-                                borderLeft: '1px solid #EDF2F7',
-                                color:      diff ? (isMasterCol ? C.success : C.danger) : C.darkText,
-                                fontWeight: diff && isMasterCol ? 700 : 400,
-                                background: diff && isMasterCol ? '#F0FDF4' : diff && !isMasterCol ? '#FFF9F9' : 'transparent',
-                              }}>
-                              {val || <span style={{ color: C.border }}>—</span>}
-                            </div>
-                          )
-                        })}
-                      </div>
-                    )
-                  })}
-                </div>
-
-                {/* ── Action bar ── */}
-                {!isResolved && (
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <Btn
-                      variant={hasMaster ? 'primary' : 'disabled'}
-                      disabled={!hasMaster || isMerging}
-                      size="sm"
-                      icon={isMerging ? Icon.spinner : Icon.checkCircle}
-                      onClick={() => resolveDup(d.id, 'merged', master)}
-                    >
-                      {isMerging ? 'Merging…' : `Confirm Merge → keep Record ${master ?? '?'}`}
-                    </Btn>
-                    {!hasMaster && (
-                      <span className="text-[11px]" style={{ color: C.midText }}>Select a master record above to enable merge</span>
-                    )}
-                    <div className="ml-auto flex gap-2">
-                      <Btn size="sm" variant="ghost"
-                        disabled={isMerging}
-                        onClick={() => resolveDup(d.id, 'distinct')}>
-                        Mark as Distinct Entities
-                      </Btn>
-                      <Btn size="sm" variant="danger"
-                        disabled={isMerging}
-                        onClick={() => resolveDup(d.id, 'removed')}>
-                        Remove Duplicate
-                      </Btn>
-                    </div>
-                  </div>
-                )}
-              </Card>
-            )
-          })}
-        </div>
+                          </div>
+                        ) : (
+                          <div className="flex gap-1">
+                            <Btn size="sm" variant="danger" onClick={() => resolveDup(d.id, 'removed')}>Remove</Btn>
+                            <Btn size="sm" variant="secondary" onClick={() => resolveDup(d.id, 'kept')}>Keep</Btn>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </Card>
       )}
 
       {/* ── STATISTICAL OUTLIERS TAB ─────────────────────────────────────────── */}
       {tab === 'outliers' && (
         <Card>
-          <NullSummaryBar tab="outliers" />
-
-          {(() => {
-            const lowSeverityIds = OUTLIERS.filter(o => o.severity === 'Low' && !resolvedOut.has(o.id)).map(o => o.id)
-            return (
-              <div className="flex justify-end mb-3">
-                <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
-                  onClick={async () => {
-                    await approveLowSeverityFlags('demo-company')
-                    const m = new Map(resolvedOut)
-                    lowSeverityIds.forEach(id => m.set(id, 'approved'))
-                    setResolvedOut(m)
-                  }}>
-                  Approve All Low-Severity ({lowSeverityIds.length})
-                </Btn>
-              </div>
-            )
-          })()}
+          {OUTLIERS.length > 0 && (
+            <div className="flex justify-end mb-3">
+              <Btn size="sm" variant="teal" disabled={OUTLIERS.every(o => resolvedOut.has(o.id))}
+                onClick={async () => {
+                  await approveLowSeverityFlags('demo-company')
+                  const m = new Map(resolvedOut)
+                  OUTLIERS.forEach(o => { if (!m.has(o.id)) m.set(o.id, 'approved') })
+                  setResolvedOut(m)
+                }}>
+                Approve All Flagged Outliers ({OUTLIERS.filter(o => !resolvedOut.has(o.id)).length})
+              </Btn>
+            </div>
+          )}
 
           {/* Tagged-records summary strip */}
           {(() => {
@@ -3483,15 +3262,21 @@ function DataReviewScreen() {
             )
           })()}
 
+          {OUTLIERS.length === 0 ? (
+            <EmptyState
+              icon={Icon.checkCircle}
+              title="No anomalies detected"
+              subtitle="The anomaly-detection model did not flag any records in this dataset."
+            />
+          ) : (
           <table className="data-table w-full border-collapse">
             <thead>
               <tr>
-                <SortTh label="Record"        sortKey="record"       current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <SortTh label="Record" sortKey="record" current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <th>NPI</th>
                 <th>Specialty</th>
-                <th>Outlier Reason</th>
-                <SortTh label="Anomaly Score" sortKey="anomalyScore" current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
-                <SortTh label="Severity"      sortKey="severity"     current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
-                <SortTh label="Null %"        sortKey="nullPct"      current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
+                <th>State</th>
+                <SortTh label="Detection Model" sortKey="detectionModel" current={outSort.key} dir={outSort.dir} onSort={k => cycleSort(outSort, setOutSort, k)} />
                 <th>Action</th>
               </tr>
             </thead>
@@ -3504,12 +3289,8 @@ function DataReviewScreen() {
                   <Fragment key={o.id}>
                     <tr style={{
                       opacity:    resolved && action !== 'warned' ? 0.45 : 1,
-                      background: action === 'warned' ? '#FFFBEB'
-                                : o.severity === 'High' && !resolved ? '#FFF9F9'
-                                : undefined,
-                      borderLeft: action === 'warned' ? `3px solid ${C.warning}`
-                                : o.severity === 'High' && !resolved ? `3px solid ${C.danger}`
-                                : '3px solid transparent',
+                      background: action === 'warned' ? '#FFFBEB' : undefined,
+                      borderLeft: action === 'warned' ? `3px solid ${C.warning}` : '3px solid transparent',
                     }}>
                       <td className="font-medium">
                         {action === 'warned' && (
@@ -3518,35 +3299,18 @@ function DataReviewScreen() {
                         )}
                         {o.record}
                       </td>
+                      <td className="mono text-[11px]">{o.npi || <span style={{ color: C.border }}>—</span>}</td>
                       <td><Badge tier={1} color="neutral">{o.specialty}</Badge></td>
+                      <td>{o.state}</td>
                       <td>
                         <div>
-                          <p className="text-[11px]">{o.reason}</p>
+                          <p className="text-[11px]">{o.detectionModel}</p>
                           <button className="text-[10px] mt-0.5 hover:underline" style={{ color: C.corpBlue }}
                             onClick={() => setExpandedOutlier(expandedOutlier === o.id ? null : o.id)}>
-                            {expandedOutlier === o.id ? '▲ Hide reasoning' : '▼ Why flagged?'}
+                            {expandedOutlier === o.id ? '▲ Hide details' : '▼ Why flagged?'}
                           </button>
                         </div>
                       </td>
-                      <td>
-                        <div className="flex items-center gap-2">
-                          <div className="progress-track" style={{ minWidth: 50 }}>
-                            <div className="progress-fill" style={{
-                              width: `${o.anomalyScore * 100}%`,
-                              background: o.anomalyScore >= 0.85 ? C.danger : o.anomalyScore >= 0.7 ? C.warning : C.success,
-                            }} />
-                          </div>
-                          <span className="mono text-[11px] font-bold" style={{
-                            color: o.anomalyScore >= 0.85 ? C.danger : o.anomalyScore >= 0.7 ? C.warning : C.success,
-                          }}>{o.anomalyScore.toFixed(2)}</span>
-                        </div>
-                      </td>
-                      <td>
-                        <Badge tier={2} color={o.severity === 'High' ? 'block' : o.severity === 'Medium' ? 'warning' : 'info'}>
-                          {o.severity}
-                        </Badge>
-                      </td>
-                      <td><NullPctBadge pct={o.nullPct} /></td>
                       <td>
                         {resolved ? (
                           <div className="flex flex-col gap-0.5">
@@ -3587,13 +3351,13 @@ function DataReviewScreen() {
                       </td>
                     </tr>
 
-                    {/* Statistical reasoning drawer */}
+                    {/* Detection details drawer */}
                     {expandedOutlier === o.id && (
                       <tr style={{ background: C.lightTint, borderLeft: '3px solid transparent' }}>
-                        <td colSpan={7} className="px-4 py-3">
-                          <p className="text-[12px] font-semibold mb-1" style={{ color: C.navy }}>Statistical reasoning</p>
+                        <td colSpan={6} className="px-4 py-3">
+                          <p className="text-[12px] font-semibold mb-1" style={{ color: C.navy }}>Why was this record flagged?</p>
                           <p className="text-[12px]" style={{ color: C.darkText }}>
-                            The average monthly claims volume for this specialty is 142 claims/month. This provider submitted 1,847 claims last month — 13× above the 99th percentile (anomaly score {o.anomalyScore.toFixed(2)}). This pattern is consistent with high-volume billing irregularity or a data entry error in the source file.
+                            This record was flagged as a statistical outlier by the {o.detectionModel} anomaly-detection model during ingestion.
                           </p>
                         </td>
                       </tr>
@@ -3602,7 +3366,7 @@ function DataReviewScreen() {
                     {/* Tag: Data Quality Warning drawer */}
                     {isTagOpen && !resolved && (
                       <tr style={{ background: '#FFFBEB', borderLeft: `3px solid ${C.warning}` }}>
-                        <td colSpan={7} className="px-4 py-3">
+                        <td colSpan={6} className="px-4 py-3">
                           <p className="text-[12px] font-semibold mb-1" style={{ color: '#92400E' }}>
                             ⚠ Tag as Data Quality Warning — record stays in the database but is highlighted in red on all analytical exports and reports
                           </p>
@@ -3633,6 +3397,7 @@ function DataReviewScreen() {
               })}
             </tbody>
           </table>
+          )}
         </Card>
       )}
 
@@ -4008,332 +3773,56 @@ function QueryScreen() {
 
 // ─── SEGMENTATION ─────────────────────────────────────────────────────────────
 
-const SEGMENTS = [
-  { name: 'High-Volume Cardiologists', count: 847, specialty: 'Cardiology', geo: 'Southeast US', desc: 'High-prescribing cardiologists with active NPI status and verified practice addresses in FL, GA, NC, SC.', color: C.navy },
-  { name: 'Oncology Academic Centers', count: 312, specialty: 'Oncology', geo: 'Northeast US', desc: 'Oncologists affiliated with academic medical centers. High Sunshine Act exposure. Ideal for peer-to-peer outreach.', color: C.teal },
-  { name: 'Early-Adopter Neurologists', count: 504, specialty: 'Neurology', geo: 'National', desc: 'Neurologists with early uptake of novel therapeutics in the last 24 months. High campaign responsiveness.', color: C.corpBlue },
-  { name: 'Community Rheumatologists', count: 1203, specialty: 'Rheumatology', geo: 'Midwest US', desc: 'Community-based rheumatologists with high patient panels and access to biologics reimbursement.', color: '#5C85C4' },
-  { name: 'High-Value PCPs', count: 2841, specialty: 'Primary Care', geo: 'National', desc: 'Primary care physicians with high prescribing volume and broad formulary access. Strong campaign reach.', color: '#028090' },
-  { name: 'Surgical Specialists', count: 689, specialty: 'Surgery', geo: 'West US', desc: 'Surgical specialists with high procedure volume. Ideal for device and surgical product campaigns.', color: '#6B4FA0' },
-]
-
-function SegmentsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
-  const [running, setRunning] = useState(false)
-  const [done, setDone] = useState(true)
-  const [detail, setDetail] = useState<typeof SEGMENTS[0] | null>(null)
-
-  const run = () => {
-    setRunning(true)
-    setDone(false)
-    setTimeout(() => { setRunning(false); setDone(true) }, 2000)
-  }
-
+function SegmentsScreen() {
   return (
     <div className="p-8">
       <SectionHeader
         title="Segmentation"
         subtitle="AI-powered HCP clustering by specialty, geography, and prescribing behavior"
-        actions={<Btn variant="teal" onClick={run} icon={running ? Icon.spinner : undefined}>
-          {running ? 'Running...' : 'Run Segmentation'}
-        </Btn>}
       />
-
-      {running && (
-        <Banner type="info">Clustering records... Generating segment labels... This may take a few moments.</Banner>
-      )}
-
-      {done && (
-        <div className="grid grid-cols-3 gap-5 mb-6">
-          {SEGMENTS.map((s, i) => (
-            <div key={s.name} className="bg-white rounded-[8px] border border-[#CBD5E0] p-4 cursor-pointer card-hover fade-in-up" style={{ animationDelay: `${i * 80}ms` }} onClick={() => setDetail(s)}>
-              <div className="flex items-start justify-between mb-3">
-                <div className="w-3 h-3 rounded-full mt-0.5" style={{ background: s.color }} />
-                <Badge tier={1} color="info">{s.count.toLocaleString()} records</Badge>
-              </div>
-              <h3 className="text-[14px] font-bold mb-1" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>{s.name}</h3>
-              <div className="flex gap-2 mb-2 flex-wrap">
-                <Badge tier={1} color="neutral">{s.specialty}</Badge>
-                <Badge tier={1} color="neutral">{s.geo}</Badge>
-              </div>
-              <p className="text-[12px]" style={{ color: C.midText }}>{s.desc}</p>
-              <div className="mt-3 pt-3 border-t border-[#EDF2F7] flex justify-between items-center">
-                <Badge tier={1} color="success">Segmented</Badge>
-                <button className="text-[12px] hover:underline font-semibold" style={{ color: C.corpBlue }}>View records →</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {!done && !running && (
-        <EmptyState icon={Icon.users} title="No segments yet" subtitle="Run segmentation on your cleaned dataset to see segments here." action={<Btn variant="teal" onClick={run}>Run Segmentation</Btn>} />
-      )}
-
-      {/* Detail panel */}
-      {detail && (
-        <Modal title={detail.name} onClose={() => setDetail(null)} width={600}>
-          <div className="flex gap-3 mb-4 flex-wrap">
-            <Badge tier={1} color="info">{detail.count.toLocaleString()} records</Badge>
-            <Badge tier={1} color="neutral">{detail.specialty}</Badge>
-            <Badge tier={1} color="neutral">{detail.geo}</Badge>
-          </div>
-          <p className="text-[13px] mb-4" style={{ color: C.darkText }}>{detail.desc}</p>
-          <div className="border rounded-[6px] overflow-hidden mb-4">
-            <table className="data-table w-full border-collapse">
-              <thead><tr><th>Name</th><th>Specialty</th><th>State</th><th>NPI Status</th></tr></thead>
-              <tbody>
-                {[
-                  { name: 'James Morrison, MD', spec: detail.specialty, state: 'FL', status: 'Active' },
-                  { name: 'Patricia Wang, MD', spec: detail.specialty, state: 'GA', status: 'Active' },
-                  { name: 'Robert Chen, DO', spec: detail.specialty, state: 'NC', status: 'Active' },
-                ].map(r => (
-                  <tr key={r.name}>
-                    <td className="font-medium">{r.name}</td>
-                    <td>{r.spec}</td>
-                    <td>{r.state}</td>
-                    <td><Badge tier={1} color="success">{r.status}</Badge></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="flex gap-3">
-            <Btn variant="teal" onClick={() => setDetail(null)}>Generate Campaign</Btn>
-            <Btn variant="ghost" onClick={() => setDetail(null)}>Close</Btn>
-          </div>
-        </Modal>
-      )}
+      <Card>
+        <EmptyState
+          icon={Icon.users}
+          title="Segmentation is not yet available"
+          subtitle="AI-powered HCP clustering is not yet connected to a backend model. Segments will appear here once this capability is available."
+        />
+      </Card>
     </div>
   )
 }
 
 // ─── CAMPAIGN GENERATOR ───────────────────────────────────────────────────────
 
-function CampaignGeneratorScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
-  const [segment, setSegment] = useState('High-Volume Cardiologists')
-  const [goal, setGoal] = useState('')
-  const [channel, setChannel] = useState('Email')
-  const [generating, setGenerating] = useState(false)
-  const [generated, setGenerated] = useState(false)
-  const [subject, setSubject] = useState('Introducing a New Standard of Care in Heart Failure Management')
-  const [body, setBody] = useState(`Dear Dr. [Last Name],
-
-We are pleased to present new Phase III data demonstrating superior outcomes for patients with HFrEF when treated with our novel ARNI therapy versus standard ACE inhibitor therapy.
-
-The PIONEER-HF trial enrolled 1,500 patients across 87 centers. Key findings include:
-• 27% reduction in cardiovascular death or worsening heart failure
-• Significant improvement in KCCQ-OS scores at 8 weeks
-• Well-tolerated safety profile consistent with prior ARNI data
-
-We would welcome the opportunity to discuss these findings and how they may benefit your patients. Your Medical Science Liaison will follow up within the next 5 business days.
-
-Sincerely,
-MedReach Medical Affairs`)
-
-  const generate = () => {
-    if (!goal) return
-    setGenerating(true)
-    setTimeout(() => { setGenerating(false); setGenerated(true) }, 1800)
-  }
-
-  const wordCount = body.split(/\s+/).filter(Boolean).length
-
+function CampaignGeneratorScreen() {
   return (
     <div className="p-8">
       <SectionHeader title="Campaign Generator" subtitle="AI-assisted HCP campaign content creation" />
-      <div className="grid grid-cols-5 gap-6">
-        {/* Left form */}
-        <Card className="col-span-2 flex flex-col gap-4 h-fit">
-          <h3 className="text-[15px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Campaign Setup</h3>
-          <div>
-            <label className="text-[13px] font-semibold block mb-1" style={{ color: C.darkText }}>Target Segment</label>
-            <select className="w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2 bg-white" value={segment} onChange={e => setSegment(e.target.value)} style={{ height: 40, color: C.darkText }}>
-              {SEGMENTS.map(s => <option key={s.name}>{s.name}</option>)}
-            </select>
-          </div>
-          <Input label="Campaign Goal" placeholder="e.g., Introduce new heart failure therapy data from PIONEER-HF trial" value={goal} onChange={setGoal} />
-          <div>
-            <label className="text-[13px] font-semibold block mb-2" style={{ color: C.darkText }}>Channel</label>
-            <div className="flex gap-2">
-              {['Email', 'Detail Piece', 'SMS'].map(c => (
-                <button key={c} onClick={() => setChannel(c)}
-                  className="flex-1 py-2 rounded-[6px] text-[12px] font-semibold border transition-all"
-                  style={{
-                    background: channel === c ? C.navy : 'white',
-                    color: channel === c ? 'white' : C.navy,
-                    borderColor: channel === c ? C.navy : C.border,
-                  }}>
-                  {c}
-                </button>
-              ))}
-            </div>
-          </div>
-          <Btn variant="teal" onClick={generate} disabled={!goal || generating} icon={generating ? Icon.spinner : undefined} className="w-full justify-center">
-            {generating ? 'Generating...' : 'Generate Content'}
-          </Btn>
-        </Card>
-
-        {/* Right panel */}
-        <Card className="col-span-3">
-          {generating && (
-            <div className="flex flex-col items-center justify-center py-20 gap-3">
-              <span style={{ color: C.corpBlue }}>{Icon.spinner}</span>
-              <p className="text-[13px] pulse" style={{ color: C.midText }}>Generating campaign content for {segment}...</p>
-            </div>
-          )}
-
-          {!generating && !generated && (
-            <EmptyState icon={Icon.send} title="Campaign content will appear here" subtitle="Fill in the setup form and click Generate Content." />
-          )}
-
-          {generated && !generating && (
-            <div className="flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-[15px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Generated Content</h3>
-                <div className="flex gap-2">
-                  <Badge tier={1} color="neutral">{wordCount} words</Badge>
-                  <Badge tier={1} color="success">Grade 10 reading level</Badge>
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[12px] font-semibold block mb-1" style={{ color: C.midText }}>Subject Line</label>
-                <input
-                  className="input-field w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2 font-semibold"
-                  value={subject}
-                  onChange={e => setSubject(e.target.value)}
-                  style={{ color: C.darkText, fontFamily: 'Inter, Arial, sans-serif', height: 40 }}
-                />
-              </div>
-
-              <div>
-                <label className="text-[12px] font-semibold block mb-1" style={{ color: C.midText }}>Body Copy</label>
-                <textarea
-                  className="w-full border border-[#CBD5E0] rounded-[7px] text-[13px] px-3 py-2"
-                  rows={12}
-                  value={body}
-                  onChange={e => setBody(e.target.value)}
-                  style={{ color: C.darkText, fontFamily: 'Inter, Arial, sans-serif', resize: 'vertical' }}
-                />
-              </div>
-
-              <div className="flex gap-3">
-                <Btn variant="primary" onClick={onNavigate.bind(null, 'compliance-review')}>Run Compliance Check</Btn>
-                <Btn variant="ghost" onClick={generate}>Regenerate</Btn>
-              </div>
-            </div>
-          )}
-        </Card>
-      </div>
+      <Card>
+        <EmptyState
+          icon={Icon.send}
+          title="Campaign generation is not yet available"
+          subtitle="AI-assisted campaign content generation is not yet connected to a backend model."
+        />
+      </Card>
     </div>
   )
 }
 
 // ─── COMPLIANCE REVIEW ────────────────────────────────────────────────────────
 
-const COMPLIANCE_FLAGS = [
-  { text: 'superior outcomes', violation: 'Off-Label', severity: 'High', ref: 'FDA 21 CFR 201.57(c)(2)', suggestion: 'statistically significant improvement in primary endpoints', status: 'open' as const },
-  { text: 'novel ARNI therapy', violation: 'Off-Label', severity: 'Medium', ref: 'FDA Guidance: Drug Promotional Labeling', suggestion: 'approved ARNI therapy', status: 'open' as const },
-  { text: 'PIONEER-HF trial', violation: 'Sunshine Act', severity: 'Low', ref: '42 CFR Part 403', suggestion: 'Note: disclosure may be required for materials referencing manufacturer-sponsored trials.', status: 'open' as const },
-  { text: 'new Phase III data', violation: 'State Restriction', severity: 'High', ref: 'CA Health & Safety Code 119402', suggestion: 'Published Phase III data (citation required)', status: 'open' as const },
-]
-
 function ComplianceReviewScreen() {
-  const [flags, setFlags] = useState(COMPLIANCE_FLAGS.map(f => ({ ...f, status: 'open' as 'open' | 'accepted' | 'editing' | 'overridden' })))
-  const [justifications, setJustifications] = useState<Record<number, string>>({})
-
-  const resolve = (i: number, status: 'accepted' | 'editing' | 'overridden') => {
-    setFlags(flags.map((f, fi) => fi === i ? { ...f, status } : f))
-  }
-
-  const highOpen = flags.filter(f => f.severity === 'High' && f.status === 'open').length
-  const resolved = flags.filter(f => f.status !== 'open').length
-  const allHighResolved = flags.filter(f => f.severity === 'High').every(f => f.status !== 'open')
-
   return (
     <div className="p-8">
       <SectionHeader
         title="Compliance Review"
         subtitle="Review AI-detected compliance flags before export"
-        actions={
-          <div className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: resolved === flags.length ? C.success : C.midText }}>
-            {resolved} of {flags.length} resolved
-          </div>
-        }
       />
-
-      {!allHighResolved && (
-        <Banner type="error">
-          <strong>Export blocked:</strong> {highOpen} High-severity flag{highOpen > 1 ? 's' : ''} must be resolved before exporting campaign assets.
-        </Banner>
-      )}
-      {allHighResolved && resolved < flags.length && (
-        <Banner type="warning">All critical flags resolved. {flags.length - resolved} lower-severity flag{flags.length - resolved > 1 ? 's' : ''} remaining.</Banner>
-      )}
-      {resolved === flags.length && (
-        <Banner type="success">All compliance flags resolved. Your content is cleared for export.</Banner>
-      )}
-
       <Card>
-        <table className="w-full border-collapse" style={{ tableLayout: 'fixed' }}>
-          <thead>
-            <tr style={{ background: C.navy }}>
-              {['Flagged Text', 'Violation Type', 'Severity', 'Regulatory Reference', 'Suggested Revision', 'Action'].map(h => (
-                <th key={h} className="text-left text-[10px] font-semibold text-white py-2 px-3 uppercase tracking-wide">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {flags.map((f, i) => (
-              <>
-                <tr key={i} style={{ background: f.status !== 'open' ? '#E8F5EF' : i % 2 === 0 ? 'white' : C.lightTint }}>
-                  <td className="px-3 py-3 text-[12px]">
-                    <span className="flag-text font-semibold">"{f.text}"</span>
-                  </td>
-                  <td className="px-3 py-3">
-                    <Badge tier={1} color={f.violation === 'Sunshine Act' ? 'info' : 'danger'}>{f.violation}</Badge>
-                  </td>
-                  <td className="px-3 py-3">
-                    <Badge tier={2} color={f.severity === 'High' ? 'block' : f.severity === 'Medium' ? 'warning' : 'info'}>{f.severity}</Badge>
-                  </td>
-                  <td className="px-3 py-3 text-[11px] mono" style={{ color: C.midText }}>{f.ref}</td>
-                  <td className="px-3 py-3 text-[12px]" style={{ color: C.darkText }}>{f.suggestion}</td>
-                  <td className="px-3 py-3">
-                    {f.status === 'open' && (
-                      <div className="flex flex-col gap-1">
-                        <button onClick={() => resolve(i, 'accepted')} className="text-[11px] font-semibold text-left hover:underline" style={{ color: C.success }}>✓ Accept Suggestion</button>
-                        <button onClick={() => resolve(i, 'editing')} className="text-[11px] font-semibold text-left hover:underline" style={{ color: C.corpBlue }}>✎ Edit Manually</button>
-                        <button onClick={() => resolve(i, 'overridden')} className="text-[11px] font-semibold text-left hover:underline" style={{ color: C.warning }}>⚠ Override</button>
-                      </div>
-                    )}
-                    {f.status !== 'open' && (
-                      <Badge tier={1} color="success">
-                        {f.status === 'accepted' ? 'Accepted' : f.status === 'editing' ? 'Edited' : 'Overridden'}
-                      </Badge>
-                    )}
-                  </td>
-                </tr>
-                {f.status === 'overridden' && (
-                  <tr key={`just-${i}`} style={{ background: '#FEF3C7' }}>
-                    <td colSpan={6} className="px-4 py-3">
-                      <p className="text-[12px] font-semibold mb-1" style={{ color: C.warning }}>Justification required for override (logged to audit trail)</p>
-                      <div className="flex gap-2 items-start">
-                        <textarea
-                          className="flex-1 border border-[#E67E22] rounded text-[12px] px-2 py-1"
-                          rows={2}
-                          placeholder="Enter justification reason..."
-                          value={justifications[i] || ''}
-                          onChange={e => setJustifications({ ...justifications, [i]: e.target.value })}
-                        />
-                        <Btn size="sm" variant="primary">Submit Override</Btn>
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </>
-            ))}
-          </tbody>
-        </table>
+        <EmptyState
+          icon={Icon.alertTriangle}
+          title="Compliance review is not yet available"
+          subtitle="AI-detected compliance flagging is not yet connected to a backend model."
+        />
       </Card>
     </div>
   )
@@ -4341,301 +3830,19 @@ function ComplianceReviewScreen() {
 
 // ─── FINANCIAL DISCLOSURES ────────────────────────────────────────────────────
 
-interface DisclosureRecord {
-  id: number
-  physician: string
-  npi: string
-  specialty: string
-  state: string
-  company: string
-  category: string
-  amount: number
-  date: string
-  status: 'Reported' | 'Pending' | 'Disputed'
-  year: number
-}
-
-const DISCLOSURES: DisclosureRecord[] = [
-  { id:  0, physician: 'Dr. Sarah Chen',       npi: '1234567890', specialty: 'Oncology',          state: 'CA', company: 'Pfizer Inc.',           category: 'Consulting Fee',   amount:  42500, date: '2025-03-15', status: 'Reported', year: 2025 },
-  { id:  1, physician: 'Dr. James Williams',   npi: '9876543210', specialty: 'Cardiology',         state: 'NY', company: 'AstraZeneca',           category: 'Speaking Fee',     amount:  18750, date: '2025-01-22', status: 'Reported', year: 2025 },
-  { id:  2, physician: 'Dr. Priya Patel',      npi: '1122334455', specialty: 'Neurology',          state: 'TX', company: 'Merck & Co.',           category: 'Research Grant',   amount: 125000, date: '2024-11-10', status: 'Reported', year: 2024 },
-  { id:  3, physician: 'Dr. Marcus Okonkwo',   npi: '5566778899', specialty: 'Surgery',            state: 'FL', company: 'Johnson & Johnson',     category: 'Travel & Lodging', amount:   3200, date: '2025-02-08', status: 'Pending',  year: 2025 },
-  { id:  4, physician: 'Dr. Emily Torres',     npi: '6677889900', specialty: 'Internal Medicine',  state: 'IL', company: 'Novartis',              category: 'Food & Beverage',  amount:    890, date: '2025-04-01', status: 'Reported', year: 2025 },
-  { id:  5, physician: 'Dr. Kevin Park',       npi: '7788990011', specialty: 'Dermatology',        state: 'WA', company: 'AbbVie Inc.',           category: 'Consulting Fee',   amount:  31000, date: '2025-05-14', status: 'Disputed', year: 2025 },
-  { id:  6, physician: 'Dr. Maria Santos',     npi: '8899001122', specialty: 'Oncology',           state: 'FL', company: 'Roche',                 category: 'Speaking Fee',     amount:   9500, date: '2024-08-20', status: 'Reported', year: 2024 },
-  { id:  7, physician: 'Dr. Thomas Nguyen',    npi: '9900112233', specialty: 'Cardiology',         state: 'CA', company: 'Sanofi',                category: 'Education',        amount:   4200, date: '2025-06-03', status: 'Reported', year: 2025 },
-  { id:  8, physician: 'Dr. Angela Ruiz',      npi: '0011223344', specialty: 'Oncology',           state: 'TX', company: 'Bristol-Myers Squibb', category: 'Research Grant',   amount:  87000, date: '2024-12-01', status: 'Reported', year: 2024 },
-  { id:  9, physician: 'Dr. Carol Davis',      npi: '1122334456', specialty: 'Orthopedics',        state: 'NY', company: 'Stryker Corp.',         category: 'Consulting Fee',   amount:  22500, date: '2025-03-29', status: 'Pending',  year: 2025 },
-  { id: 10, physician: 'Dr. Steven Park',      npi: '2233445566', specialty: 'Surgery',            state: 'TX', company: 'Medtronic',             category: 'Travel & Lodging', amount:   5800, date: '2025-01-11', status: 'Reported', year: 2025 },
-  { id: 11, physician: 'Dr. Linda Morrison',   npi: '3344556677', specialty: 'Psychiatry',         state: 'MA', company: 'Eli Lilly',             category: 'Speaking Fee',     amount:  14250, date: '2025-04-22', status: 'Reported', year: 2025 },
-  { id: 12, physician: 'Dr. Robert Tanaka',    npi: '4455667789', specialty: 'Dermatology',        state: 'CA', company: 'AbbVie Inc.',           category: 'Consulting Fee',   amount:  58000, date: '2024-09-15', status: 'Disputed', year: 2024 },
-  { id: 13, physician: 'Dr. Jennifer Brown',   npi: '5566778801', specialty: 'Neurology',          state: 'OH', company: 'Biogen',                category: 'Research Grant',   amount: 210000, date: '2024-07-01', status: 'Reported', year: 2024 },
-  { id: 14, physician: 'Dr. David Garcia',     npi: '6677889912', specialty: 'Cardiology',         state: 'GA', company: 'Boehringer Ingelheim',  category: 'Food & Beverage',  amount:   1240, date: '2025-05-30', status: 'Reported', year: 2025 },
-  { id: 15, physician: 'Dr. Susan Martinez',   npi: '7788990023', specialty: 'Oncology',           state: 'PA', company: 'Pfizer Inc.',           category: 'Speaking Fee',     amount:  26750, date: '2025-02-14', status: 'Reported', year: 2025 },
-  { id: 16, physician: 'Dr. Michael Johnson',  npi: '8899001134', specialty: 'Internal Medicine',  state: 'NC', company: 'AstraZeneca',           category: 'Education',        amount:   3100, date: '2024-10-05', status: 'Pending',  year: 2024 },
-  { id: 17, physician: 'Dr. Lisa Wang',        npi: '9900112245', specialty: 'Psychiatry',         state: 'IL', company: 'Janssen',               category: 'Consulting Fee',   amount:  47000, date: '2025-06-18', status: 'Reported', year: 2025 },
-  { id: 18, physician: 'Dr. Andrew Anderson',  npi: '0011223356', specialty: 'Orthopedics',        state: 'WA', company: 'Zimmer Biomet',         category: 'Travel & Lodging', amount:   7800, date: '2025-03-07', status: 'Disputed', year: 2025 },
-  { id: 19, physician: 'Dr. Rachel Kim',       npi: '1122334468', specialty: 'Dermatology',        state: 'NY', company: 'Regeneron',             category: 'Research Grant',   amount:  95000, date: '2024-06-20', status: 'Reported', year: 2024 },
-]
-
-type DisclosureSortKey = 'physician' | 'specialty' | 'company' | 'category' | 'amount' | 'date' | 'status'
-
 function FinancialDisclosureScreen() {
-  const { role } = useRole()
-  const [search, setSearch] = useState('')
-  const [filterCat, setFilterCat] = useState('All')
-  const [filterStatus, setFilterStatus] = useState('All')
-  const [filterYear, setFilterYear] = useState('All')
-  const [sortKey, setSortKey] = useState<DisclosureSortKey>('amount')
-  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
-  const [exporting, setExporting] = useState(false)
-
-  const canExport = role === 'super-admin' || role === 'admin'
-
-  const categories = ['All', ...Array.from(new Set(DISCLOSURES.map(d => d.category))).sort()]
-  const statuses   = ['All', 'Reported', 'Pending', 'Disputed']
-  const years      = ['All', '2025', '2024']
-
-  const filtered = DISCLOSURES.filter(d => {
-    const q = search.toLowerCase()
-    if (q && !d.physician.toLowerCase().includes(q) && !d.company.toLowerCase().includes(q) && !d.npi.includes(q)) return false
-    if (filterCat !== 'All' && d.category !== filterCat) return false
-    if (filterStatus !== 'All' && d.status !== filterStatus) return false
-    if (filterYear !== 'All' && d.year !== Number(filterYear)) return false
-    return true
-  })
-
-  const sorted = [...filtered].sort((a, b) => {
-    const av: string | number = a[sortKey]
-    const bv: string | number = b[sortKey]
-    const al = typeof av === 'string' ? av.toLowerCase() : av
-    const bl = typeof bv === 'string' ? bv.toLowerCase() : bv
-    if (al < bl) return sortDir === 'asc' ? -1 : 1
-    if (al > bl) return sortDir === 'asc' ? 1 : -1
-    return 0
-  })
-
-  const toggleSort = (key: DisclosureSortKey) => {
-    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
-    else { setSortKey(key); setSortDir('desc') }
-  }
-
-  const totalAmount     = filtered.reduce((s, d) => s + d.amount, 0)
-  const pendingCount    = filtered.filter(d => d.status === 'Pending').length
-  const disputedCount   = filtered.filter(d => d.status === 'Disputed').length
-  const uniquePhysicians = new Set(filtered.map(d => d.physician)).size
-
-  const exportExcel = () => {
-    setExporting(true)
-    const headers = ['Physician', 'NPI', 'Specialty', 'State', 'Company', 'Category', 'Amount (USD)', 'Date', 'Status', 'Year']
-    const rows = sorted.map(d => [
-      d.physician, d.npi, d.specialty, d.state, d.company, d.category,
-      d.amount.toFixed(2), d.date, d.status, String(d.year),
-    ])
-    const htmlTable = [
-      `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">`,
-      `<head><meta charset="UTF-8"><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>`,
-      `<x:Name>Financial Disclosures</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>`,
-      `</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--></head>`,
-      `<body><table border="1" style="border-collapse:collapse">`,
-      `<tr>${headers.map(h => `<th style="background:#1B3A6B;color:white;font-weight:bold;padding:6px 10px;white-space:nowrap">${h}</th>`).join('')}</tr>`,
-      ...rows.map((r, i) => `<tr style="background:${i % 2 === 0 ? '#ffffff' : '#EBF4FA'}">${
-        r.map((c, ci) => `<td style="padding:5px 10px${ci === 6 ? ';text-align:right;font-family:monospace' : ''}">${c}</td>`).join('')
-      }</tr>`),
-      `<tr style="background:#F7FAFC;font-weight:bold;border-top:2px solid #CBD5E0">`,
-      `<td colspan="6" style="padding:6px 10px">Total (${sorted.length} records)</td>`,
-      `<td style="padding:6px 10px;text-align:right;font-family:monospace">$${sorted.reduce((s, d) => s + d.amount, 0).toFixed(2)}</td>`,
-      `<td colspan="3"></td></tr>`,
-      `</table></body></html>`,
-    ].join('\n')
-
-    const blob = new Blob([htmlTable], { type: 'application/vnd.ms-excel' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `Financial_Disclosures_${new Date().toISOString().slice(0, 10)}.xls`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    setTimeout(() => URL.revokeObjectURL(url), 2000)
-    setTimeout(() => setExporting(false), 800)
-  }
-
-  const SortBtn = ({ k, label, right = false }: { k: DisclosureSortKey; label: string; right?: boolean }) => (
-    <button
-      className={`flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-white hover:text-[#BEE3F8] transition-colors ${right ? 'ml-auto' : ''}`}
-      onClick={() => toggleSort(k)}>
-      {label}
-      <span className="opacity-70">{sortKey === k ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
-    </button>
-  )
-
-  const catStyle: Record<string, { bg: string; color: string }> = {
-    'Research Grant':   { bg: '#EBF4FA', color: C.corpBlue },
-    'Consulting Fee':   { bg: '#FEF3C7', color: '#92400E' },
-    'Speaking Fee':     { bg: '#F1F5F9', color: '#334155' },
-    'Travel & Lodging': { bg: '#FEE2E2', color: '#991B1B' },
-    'Food & Beverage':  { bg: '#E8F5EF', color: C.success },
-    'Education':        { bg: '#F0FDF4', color: '#166534' },
-  }
-
-  const fmtUSD = (n: number) => n >= 100000 ? `$${(n / 1000).toFixed(0)}k` : n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : `$${n.toLocaleString()}`
-
   return (
     <div className="p-8">
       <SectionHeader
         title="Financial Disclosures"
         subtitle="Open Payments (Sunshine Act) — physician-manufacturer financial relationships requiring mandatory reporting"
-        actions={
-          <Btn
-            variant={canExport ? 'primary' : 'disabled'}
-            disabled={!canExport || exporting}
-            icon={Icon.download}
-            onClick={exportExcel}>
-            {exporting ? 'Exporting…' : 'Export to Excel'}
-          </Btn>
-        }
       />
-
-      {!canExport && (
-        <Banner type="warning">
-          <strong>Export restricted.</strong> Only Admin and Super Admin roles may export mandatory reporting logs.
-        </Banner>
-      )}
-
-      {/* Summary cards */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        {[
-          { label: 'Total Disclosed',  value: `$${totalAmount.toLocaleString()}`,  color: C.navy,    sub: `${filtered.length} transactions` },
-          { label: 'Physicians',       value: String(uniquePhysicians),             color: C.corpBlue, sub: 'unique in current view' },
-          { label: 'Pending Review',   value: String(pendingCount),                 color: C.warning, sub: pendingCount > 0 ? 'Awaiting submission' : 'All submitted' },
-          { label: 'Disputed',         value: String(disputedCount),                color: C.danger,  sub: disputedCount > 0 ? 'Requires attention' : 'No disputes' },
-        ].map(c => (
-          <Card key={c.label}>
-            <p className="text-[10px] font-semibold uppercase tracking-wide mb-1" style={{ color: C.midText }}>{c.label}</p>
-            <p className="text-[26px] font-bold leading-tight" style={{ fontFamily: 'Calibri, Georgia, serif', color: c.color }}>{c.value}</p>
-            <p className="text-[10px] mt-0.5" style={{ color: C.midText }}>{c.sub}</p>
-          </Card>
-        ))}
-      </div>
-
-      {/* Filters */}
-      <Card className="mb-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="relative">
-            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#A0AEC0]">{Icon.search}</span>
-            <input
-              type="text"
-              placeholder="Search physician, company or NPI…"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="border rounded-[6px] text-[12px] pl-8 pr-3 py-1.5"
-              style={{ borderColor: C.border, color: C.darkText, width: 260 }}
-            />
-          </div>
-          {([
-            { label: 'Category', value: filterCat,    opts: categories, set: setFilterCat    },
-            { label: 'Status',   value: filterStatus, opts: statuses,   set: setFilterStatus },
-            { label: 'Year',     value: filterYear,   opts: years,      set: setFilterYear   },
-          ] as { label: string; value: string; opts: string[]; set: (v: string) => void }[]).map(f => (
-            <div key={f.label} className="flex items-center gap-1.5">
-              <span className="text-[11px]" style={{ color: C.midText }}>{f.label}:</span>
-              <select
-                className="border rounded-[6px] text-[12px] px-2 py-1.5"
-                style={{ borderColor: C.border, color: C.darkText }}
-                value={f.value}
-                onChange={e => f.set(e.target.value)}>
-                {f.opts.map(o => <option key={o}>{o}</option>)}
-              </select>
-            </div>
-          ))}
-          <span className="ml-auto text-[11px]" style={{ color: C.midText }}>
-            Showing <strong style={{ color: C.navy }}>{sorted.length}</strong> of {DISCLOSURES.length} records
-          </span>
-          {(search || filterCat !== 'All' || filterStatus !== 'All' || filterYear !== 'All') && (
-            <button className="text-[11px] hover:underline" style={{ color: C.corpBlue }}
-              onClick={() => { setSearch(''); setFilterCat('All'); setFilterStatus('All'); setFilterYear('All') }}>
-              Clear all ×
-            </button>
-          )}
-        </div>
-      </Card>
-
-      {/* Table */}
-      <Card className="p-0 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full border-collapse" style={{ fontSize: 12 }}>
-            <thead>
-              <tr style={{ background: C.navy }}>
-                <th className="px-4 py-3 text-left"><SortBtn k="physician" label="Physician" /></th>
-                <th className="px-3 py-3 text-left"><SortBtn k="specialty" label="Specialty" /></th>
-                <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-white opacity-80">NPI</th>
-                <th className="px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wide text-white opacity-80">State</th>
-                <th className="px-3 py-3 text-left"><SortBtn k="company" label="Company" /></th>
-                <th className="px-3 py-3 text-left"><SortBtn k="category" label="Category" /></th>
-                <th className="px-3 py-3"><div className="flex justify-end"><SortBtn k="amount" label="Amount" right /></div></th>
-                <th className="px-3 py-3 text-left"><SortBtn k="date" label="Date" /></th>
-                <th className="px-3 py-3 text-left"><SortBtn k="status" label="Status" /></th>
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.length === 0 && (
-                <tr>
-                  <td colSpan={9} className="text-center py-14 text-[13px]" style={{ color: C.midText }}>
-                    No disclosures match the current filters.
-                  </td>
-                </tr>
-              )}
-              {sorted.map((d, i) => {
-                const cs = catStyle[d.category] ?? { bg: '#F1F5F9', color: '#334155' }
-                return (
-                  <tr key={d.id}
-                    style={{ background: i % 2 === 0 ? 'white' : C.lightTint, borderBottom: '1px solid #EDF2F7' }}
-                    className="hover:bg-[#EBF4FA] transition-colors">
-                    <td className="px-4 py-3 font-semibold whitespace-nowrap" style={{ color: C.navy }}>{d.physician}</td>
-                    <td className="px-3 py-3"><Badge tier={1} color="neutral">{d.specialty}</Badge></td>
-                    <td className="px-3 py-3 mono text-[11px]" style={{ color: C.midText }}>{d.npi}</td>
-                    <td className="px-3 py-3"><Badge tier={1} color="info">{d.state}</Badge></td>
-                    <td className="px-3 py-3 whitespace-nowrap" style={{ color: C.darkText }}>{d.company}</td>
-                    <td className="px-3 py-3">
-                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded-[4px] whitespace-nowrap"
-                        style={{ background: cs.bg, color: cs.color }}>{d.category}</span>
-                    </td>
-                    <td className="px-3 py-3 text-right">
-                      <span
-                        className="font-bold mono text-[12px]"
-                        title={`$${d.amount.toLocaleString()}`}
-                        style={{ color: d.amount >= 50000 ? C.danger : d.amount >= 10000 ? C.warning : C.success }}>
-                        {fmtUSD(d.amount)}
-                      </span>
-                    </td>
-                    <td className="px-3 py-3 mono text-[11px] whitespace-nowrap" style={{ color: C.midText }}>{d.date}</td>
-                    <td className="px-3 py-3">
-                      <Badge
-                        tier={d.status === 'Reported' ? 1 : 2}
-                        color={d.status === 'Reported' ? 'success' : d.status === 'Pending' ? 'warning' : 'danger'}>
-                        {d.status}
-                      </Badge>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-            {sorted.length > 0 && (
-              <tfoot>
-                <tr style={{ borderTop: '2px solid #EDF2F7', background: '#F7FAFC' }}>
-                  <td colSpan={6} className="px-4 py-3 text-[11px] font-bold" style={{ color: C.midText }}>
-                    Totals — {sorted.length} record{sorted.length !== 1 ? 's' : ''} in current view
-                  </td>
-                  <td className="px-3 py-3 text-right font-bold mono text-[13px]" style={{ color: C.navy }}>
-                    ${sorted.reduce((s, d) => s + d.amount, 0).toLocaleString()}
-                  </td>
-                  <td colSpan={2} />
-                </tr>
-              </tfoot>
-            )}
-          </table>
-        </div>
+      <Card>
+        <EmptyState
+          icon={Icon.download}
+          title="Financial disclosure data is not yet available"
+          subtitle="Open Payments / Sunshine Act reporting is not yet connected to a backend data source."
+        />
       </Card>
     </div>
   )
@@ -4644,16 +3851,6 @@ function FinancialDisclosureScreen() {
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 
 function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
-  const { resolvedOut, warnNotes } = useOutliers()
-  const taggedOutliers = OUTLIERS.filter(o => resolvedOut.get(o.id) === 'warned')
-
-  const states = [
-    { abbr: 'FL', density: 90 }, { abbr: 'CA', density: 85 }, { abbr: 'NY', density: 82 },
-    { abbr: 'TX', density: 78 }, { abbr: 'PA', density: 65 }, { abbr: 'OH', density: 60 },
-    { abbr: 'IL', density: 58 }, { abbr: 'GA', density: 55 }, { abbr: 'NC', density: 52 },
-    { abbr: 'WA', density: 48 }, { abbr: 'AZ', density: 44 }, { abbr: 'MA', density: 72 },
-  ]
-
   return (
     <div className="p-8">
       <SectionHeader
@@ -4661,271 +3858,12 @@ function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         subtitle="Quality trends, specialty distribution, and geographic coverage"
         actions={<Btn variant="secondary" size="sm" onClick={() => onNavigate('data-heatmap')}>View Data Heatmap</Btn>}
       />
-
-      <div className="grid grid-cols-3 gap-6 mb-6">
-        {[
-          { label: 'Total Records', value: '10,412', color: C.navy },
-          { label: 'Average Quality Score', value: '76%', color: C.corpBlue },
-          { label: 'Open Flags', value: '23', color: C.danger },
-        ].map(m => (
-          <Card key={m.label}>
-            <p className="text-[11px] font-semibold uppercase tracking-wide mb-2" style={{ color: C.midText }}>{m.label}</p>
-            <p className="text-[32px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: m.color }}>{m.value}</p>
-          </Card>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-2 gap-6 mb-6">
-        {/* Quality trend bar chart */}
-        <Card>
-          <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Quality Score by Upload</h3>
-          <div className="flex items-end gap-2 h-40">
-            {[
-              { l: 'Q4 \'24', v: 58 }, { l: 'Jan \'25', v: 64 }, { l: 'Mar \'25', v: 72 },
-              { l: 'Jun \'25', v: 69 }, { l: 'Sep \'25', v: 75 }, { l: 'Q1 \'26', v: 80 }, { l: 'Today', v: 84 },
-            ].map((b, i, arr) => (
-              <div key={b.l} className="flex flex-col items-center gap-1 flex-1">
-                <span className="text-[9px] font-bold" style={{ color: i === arr.length - 1 ? C.success : C.midText }}>{b.v}%</span>
-                <div className="w-full rounded-t transition-all" style={{
-                  height: `${(b.v / 100) * 100}%`,
-                  background: i === arr.length - 1 ? C.success : C.corpBlue,
-                  opacity: 0.7 + (i / arr.length) * 0.3,
-                }} />
-                <span className="text-[9px]" style={{ color: C.midText }}>{b.l}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        {/* Recharts Specialty Pie */}
-        <Card>
-          <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Records by Specialty</h3>
-          {(() => {
-            const TOTAL = 10412
-            const SPEC_DATA = [
-              { name: 'Cardiology',   pct: 28, color: C.navy },
-              { name: 'Oncology',     pct: 22, color: C.corpBlue },
-              { name: 'Neurology',    pct: 17, color: C.teal },
-              { name: 'Orthopedics', pct: 14, color: '#5C85C4' },
-              { name: 'Other',        pct: 19, color: '#CBD5E0' },
-            ].map(d => ({ ...d, count: Math.round(d.pct / 100 * TOTAL) }))
-            const SpecTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof SPEC_DATA[0] }> }) => {
-              if (!active || !payload?.length) return null
-              const d = payload[0].payload
-              return (
-                <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
-                  <p className="font-bold mb-1" style={{ color: d.color }}>{d.name}</p>
-                  <p style={{ color: C.darkText }}><strong>{d.count.toLocaleString()}</strong> records</p>
-                  <p style={{ color: C.midText }}>{d.pct}% of total</p>
-                </div>
-              )
-            }
-            return (
-              <div style={{ height: 210 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={SPEC_DATA} dataKey="count" nameKey="name"
-                      cx="40%" cy="50%" innerRadius={48} outerRadius={78}
-                      paddingAngle={2} stroke="none">
-                      {SPEC_DATA.map((s, i) => <Cell key={i} fill={s.color} />)}
-                    </Pie>
-                    <RechartTooltip content={<SpecTooltip />} />
-                    <Legend layout="vertical" align="right" verticalAlign="middle"
-                      iconType="circle" iconSize={8}
-                      formatter={(value: string) => (
-                        <span style={{ fontSize: 11, color: C.darkText }}>{value}</span>
-                      )} />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-            )
-          })()}
-        </Card>
-      </div>
-
-      {/* Data Quality Warning panel — only shown when records are tagged */}
-      {taggedOutliers.length > 0 && (
-        <div className="mb-6 bg-white rounded-[8px] border-2 p-4" style={{ borderColor: C.warning }}>
-          <div className="flex items-center gap-2 mb-3">
-            <span style={{ color: C.warning }}>{Icon.alertTriangle}</span>
-            <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: '#92400E' }}>
-              Data Quality Warnings — {taggedOutliers.length} record{taggedOutliers.length > 1 ? 's' : ''} flagged
-            </h3>
-            <Badge tier={2} color="warning">Retained in dataset</Badge>
-            <span className="ml-auto text-[11px]" style={{ color: C.midText }}>These records are highlighted in red on all exports</span>
-          </div>
-          <table className="w-full border-collapse" style={{ fontSize: 12 }}>
-            <thead>
-              <tr style={{ background: '#FEF3C7' }}>
-                {['Record', 'Specialty', 'Anomaly Score', 'Outlier Reason', 'Warning Note'].map(h => (
-                  <th key={h} className="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: '#92400E' }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {taggedOutliers.map((o, i) => (
-                <tr key={o.id} style={{ background: i % 2 === 0 ? '#FFFBEB' : '#FEF9EC', borderBottom: '1px solid #FDE68A' }}>
-                  <td className="px-3 py-2 font-semibold" style={{ color: C.danger }}>
-                    <span className="inline-block mr-1.5 text-[9px] font-bold px-1 py-0.5 rounded" style={{ background: '#FEE2E2', color: C.danger }}>⚠</span>
-                    {o.record}
-                  </td>
-                  <td className="px-3 py-2"><Badge tier={1} color="neutral">{o.specialty}</Badge></td>
-                  <td className="px-3 py-2 mono font-bold" style={{ color: o.anomalyScore >= 0.85 ? C.danger : C.warning }}>{o.anomalyScore.toFixed(2)}</td>
-                  <td className="px-3 py-2 text-[11px]" style={{ color: C.darkText }}>{o.reason}</td>
-                  <td className="px-3 py-2 text-[11px] italic" style={{ color: C.midText }}>
-                    {warnNotes[o.id] || <span style={{ color: C.border }}>No note provided</span>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* ── OUTLIER DISTRIBUTION CHARTS ───────────────────────────────────── */}
-      <div className="grid grid-cols-2 gap-6 mb-6">
-        {/* Outlier specialty breakdown — pie */}
-        <Card>
-          <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Outlier Distribution by Specialty</h3>
-          {(() => {
-            // Aggregate OUTLIERS + VALIDATION_ERRORS by specialty
-            const allFlagged = [
-              ...OUTLIERS.map(o => o.specialty),
-              ...VALIDATION_ERRORS.map(v => v.specialty),
-            ]
-            const specMap: Record<string, number> = {}
-            for (const s of allFlagged) specMap[s] = (specMap[s] ?? 0) + 1
-            const OUTLIER_SPEC_COLORS: Record<string, string> = {
-              Oncology:           C.danger,
-              Cardiology:         C.corpBlue,
-              Dermatology:        C.teal,
-              Neurology:          '#5C85C4',
-              Surgery:            C.warning,
-              'Internal Medicine': '#A78BFA',
-            }
-            const pieData = Object.entries(specMap)
-              .sort((a, b) => b[1] - a[1])
-              .map(([name, count]) => ({ name, count, color: OUTLIER_SPEC_COLORS[name] ?? '#CBD5E0' }))
-            const total = pieData.reduce((s, d) => s + d.count, 0)
-            const OutlierSpecTip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof pieData[0] }> }) => {
-              if (!active || !payload?.length) return null
-              const d = payload[0].payload
-              return (
-                <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
-                  <p className="font-bold mb-1" style={{ color: d.color }}>{d.name}</p>
-                  <p style={{ color: C.darkText }}><strong>{d.count}</strong> flagged records</p>
-                  <p style={{ color: C.midText }}>{Math.round(d.count / total * 100)}% of all outliers</p>
-                </div>
-              )
-            }
-            return (
-              <div style={{ height: 200 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={pieData} dataKey="count" nameKey="name"
-                      cx="42%" cy="50%" innerRadius={44} outerRadius={72}
-                      paddingAngle={3} stroke="none">
-                      {pieData.map((d, i) => <Cell key={i} fill={d.color} />)}
-                    </Pie>
-                    <RechartTooltip content={<OutlierSpecTip />} />
-                    <Legend layout="vertical" align="right" verticalAlign="middle"
-                      iconType="circle" iconSize={8}
-                      formatter={(value: string) => <span style={{ fontSize: 11, color: C.darkText }}>{value}</span>} />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-            )
-          })()}
-        </Card>
-
-        {/* Geographic outlier concentration — horizontal bar */}
-        <Card>
-          <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Outlier Concentration by State</h3>
-          {(() => {
-            // Build state data: combine validation errors (have state) with density
-            const GEO_DATA = [
-              { state: 'FL', outliers: 3, records: 937  },
-              { state: 'CA', records: 885, outliers: 2 },
-              { state: 'NY', records: 854, outliers: 2 },
-              { state: 'TX', records: 812, outliers: 3 },
-              { state: 'MA', records: 750, outliers: 1 },
-              { state: 'PA', records: 677, outliers: 1 },
-              { state: 'OH', records: 625, outliers: 0 },
-              { state: 'IL', records: 604, outliers: 1 },
-              { state: 'GA', records: 573, outliers: 0 },
-              { state: 'WA', records: 500, outliers: 0 },
-            ].sort((a, b) => b.outliers - a.outliers || b.records - a.records)
-            const GeoTip = ({ active, payload, label }: { active?: boolean; label?: string; payload?: Array<{ name: string; value: number; fill: string }> }) => {
-              if (!active || !payload?.length) return null
-              const rec = GEO_DATA.find(d => d.state === label)
-              return (
-                <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
-                  <p className="font-bold mb-1" style={{ color: C.navy }}>{label}</p>
-                  {payload.map(p => (
-                    <p key={p.name} style={{ color: p.fill }}>
-                      {p.name}: <strong>{p.value}</strong>
-                    </p>
-                  ))}
-                  {rec && <p style={{ color: C.midText }}>Outlier rate: {((rec.outliers / rec.records) * 100).toFixed(2)}%</p>}
-                </div>
-              )
-            }
-            return (
-              <div style={{ height: 200 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={GEO_DATA} layout="vertical"
-                    margin={{ top: 0, right: 48, left: 8, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#EDF2F7" />
-                    <XAxis type="number" tick={{ fontSize: 10, fill: C.midText }} tickLine={false} axisLine={false} />
-                    <YAxis type="category" dataKey="state" width={28} tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} />
-                    <RechartTooltip content={<GeoTip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
-                    <Legend iconType="square" iconSize={8} wrapperStyle={{ fontSize: 10, color: C.midText }} />
-                    <Bar dataKey="records" name="Total Records" fill={C.corpBlue} opacity={0.35} radius={[0, 3, 3, 0]} />
-                    <Bar dataKey="outliers" name="Outlier Flags" fill={C.danger} radius={[0, 3, 3, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            )
-          })()}
-        </Card>
-      </div>
-
-      {/* Geographic record density — horizontal bar replacing old tile grid */}
       <Card>
-        <h3 className="text-[14px] font-bold mb-3" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Record Density by State</h3>
-        {(() => {
-          const densityData = states
-            .slice()
-            .sort((a, b) => b.density - a.density)
-            .map(s => ({ ...s, count: Math.round(s.density / 100 * 10412) }))
-          const DensityTip = ({ active, payload, label }: { active?: boolean; label?: string; payload?: Array<{ value: number }> }) => {
-            if (!active || !payload?.length) return null
-            return (
-              <div className="rounded-[8px] border px-3 py-2 text-[11px] shadow-md" style={{ background: 'white', borderColor: C.border }}>
-                <p className="font-bold mb-1" style={{ color: C.navy }}>{label}</p>
-                <p style={{ color: C.darkText }}><strong>{payload[0].value.toLocaleString()}</strong> records</p>
-                <p style={{ color: C.midText }}>{states.find(s => s.abbr === label)?.density ?? 0}% relative density</p>
-              </div>
-            )
-          }
-          return (
-            <div style={{ height: 260 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={densityData} margin={{ top: 4, right: 16, left: 0, bottom: 8 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EDF2F7" />
-                  <XAxis dataKey="abbr" tick={{ fontSize: 11, fill: C.midText }} tickLine={false} axisLine={false} />
-                  <YAxis tickFormatter={(v: number) => v.toLocaleString()} tick={{ fontSize: 10, fill: C.midText }} tickLine={false} axisLine={false} width={44} />
-                  <RechartTooltip content={<DensityTip />} cursor={{ fill: 'rgba(0,0,0,0.04)' }} />
-                  <Bar dataKey="count" name="Records" radius={[4, 4, 0, 0]}>
-                    {densityData.map((s, i) => (
-                      <Cell key={i} fill={`rgba(27,58,107,${0.25 + (s.density / 100) * 0.75})`} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )
-        })()}
+        <EmptyState
+          icon={Icon.chart}
+          title="Analytics are not yet available"
+          subtitle="Quality trend, specialty distribution, and geographic coverage analytics are not yet connected to a backend data source. See the Data Heatmap for live per-record field completeness."
+        />
       </Card>
     </div>
   )
@@ -5541,46 +4479,51 @@ function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => voi
 // ─── EXPORT ───────────────────────────────────────────────────────────────────
 
 const EXPORT_OPTIONS = [
-  { id: 'csv', icon: Icon.fileCheck, title: 'Clean HCP CSV', desc: 'Deduplicated, validated records ready for CRM import. All PII flags resolved.', size: '2.4 MB', available: true },
-  { id: 'campaign', icon: Icon.send, title: 'Campaign Asset Package', desc: 'Compiled email content, segment lists, and compliance sign-off for campaign deployment.', size: '1.1 MB', available: false, blockReason: 'Resolve 3 compliance flags before exporting campaign assets.' },
-  { id: 'pdf', icon: Icon.audit, title: 'PDF Audit Report', desc: 'Full data quality audit trail including all actions taken, flag resolutions, and operator names.', size: '847 KB', available: true },
+  { id: 'csv', icon: Icon.fileCheck, title: 'Clean HCP CSV', desc: 'Deduplicated, validated records ready for CRM import.', available: true },
+  { id: 'campaign', icon: Icon.send, title: 'Campaign Asset Package', desc: 'Compiled email content, segment lists, and compliance sign-off for campaign deployment.', available: false, blockReason: 'Campaign asset export is not yet available.' },
+  { id: 'pdf', icon: Icon.audit, title: 'PDF Audit Report', desc: 'Full data quality audit trail including flag counts and resolution status.', available: true },
 ]
 
-const EXPORT_HISTORY = [
-  { name: 'HCP_Clean_Q1_2026.csv', date: 'Mar 8, 2026 14:32', by: 'Jane Doe', size: '2.4 MB', expired: false },
-  { name: 'Audit_Report_Feb2026.pdf', date: 'Feb 17, 2026 09:15', by: 'Mark Chen', size: '712 KB', expired: false },
-  { name: 'HCP_Clean_Jan2026.csv', date: 'Jan 4, 2026 11:08', by: 'Jane Doe', size: '3.1 MB', expired: true },
-]
-
-interface ExportHistoryRow { name: string; date: string; by: string; size: string; expired: boolean; live?: boolean }
+interface ExportHistoryRow { name: string; date: string; by: string; size: string }
 
 // States with prescriber-data confidentiality laws (Vermont, Maine) — HCPs here are "privacy-locked" for export
 const PRIVACY_LOCKED_STATES = ['VT', 'ME']
 
-const STAGING_RECORDS = [
-  { npi: '1234567890', firstName: 'James',  lastName: 'Morrison', specialty: 'Cardiology', state: 'FL', email: 'j.morrison@floridahealth.com', phone: '(813) 555-0147', zip: '33602', deaNumber: 'BX1234567' },
-  { npi: '9876543210', firstName: 'Sarah',   lastName: 'Chen',     specialty: 'Oncology',   state: 'NY', email: 'schen@nyoncology.org',          phone: '(212) 555-0388', zip: '10001', deaNumber: 'AX9876543' },
-  { npi: '5544332211', firstName: 'Robert',  lastName: 'Patel',    specialty: 'Neurology',  state: 'CA', email: 'rpatel@stanford.edu',           phone: '(650) 555-0219', zip: '94305', deaNumber: '' },
-  { npi: '4412239087', firstName: 'Emily',   lastName: 'Tran',     specialty: 'Family Medicine', state: 'VT', email: 'etran@greenmountainmed.org', phone: '(802) 555-0163', zip: '05401', deaNumber: 'BT4412239' },
-  { npi: '3301128765', firstName: 'David',   lastName: 'Okafor',   specialty: 'Internal Medicine', state: 'ME', email: 'dokafor@pinetreehealth.org', phone: '(207) 555-0284', zip: '04101', deaNumber: '' },
-]
+const formatBytes = (bytes: number) => bytes >= 1024 * 1024
+  ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  : `${Math.max(1, Math.round(bytes / 1024))} KB`
 
 function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const { role } = useRole()
   const { meta } = useUploadMeta()
   const { resolvedVal: resolvedValCtx } = useValidation()
   const { resolvedOut: resolvedOutCtx, warnNotes } = useOutliers()
+  const { records: processedRecords, loading: recordsLoading, status: recordsStatus } = useExportedRecords('demo-company')
   const [generating, setGenerating] = useState<string | null>(null)
   const [done, setDone] = useState<Set<string>>(new Set())
   const [progress, setProgress] = useState(0)
-  const [history, setHistory] = useState<ExportHistoryRow[]>(EXPORT_HISTORY)
+  const [history, setHistory] = useState<ExportHistoryRow[]>([])
   const [logStatus, setLogStatus] = useState<'idle' | 'logging' | 'ok' | 'err'>('idle')
   const [excludeLockedContacts, setExcludeLockedContacts] = useState(false)
 
-  const lockedRecords = STAGING_RECORDS.filter(r => PRIVACY_LOCKED_STATES.includes(r.state))
+  const allStagingRecords = processedRecords.map((record, index) => ({
+    id: index,
+    npi: reviewValue(record, 'npi'),
+    firstName: reviewValue(record, 'firstName'),
+    lastName: reviewValue(record, 'lastName'),
+    specialty: String(record.specialty || record.pri_spec || 'Not reported'),
+    state: String(record.state || record.State || 'Not reported'),
+    email: reviewValue(record, 'email'),
+    phone: reviewValue(record, 'phone'),
+    zip: String(record.zip || record.zip_code || record.ZIP || ''),
+    deaNumber: String(record.dea || record.dea_number || record.deaNumber || ''),
+  }))
+  const lockedRecords = allStagingRecords.filter(r => PRIVACY_LOCKED_STATES.includes(r.state))
   const stagingRecords = excludeLockedContacts
-    ? STAGING_RECORDS.filter(r => !PRIVACY_LOCKED_STATES.includes(r.state))
-    : STAGING_RECORDS
+    ? allStagingRecords.filter(r => !PRIVACY_LOCKED_STATES.includes(r.state))
+    : allStagingRecords
+  const outlierRecords = outlierFlags(processedRecords)
+  const validationErrors = processedRecords.flatMap((record, index) => npiOutcome(record) === 'invalid' ? [{ id: index }] : [])
 
   const triggerDownload = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob)
@@ -5618,20 +4561,19 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
           setDone(prev => new Set([...prev, id]))
 
           // ── generate & download blob ───────────────────────────────────
-          const opt = EXPORT_OPTIONS.find(o => o.id === id)!
           const now = new Date()
           const dateStr = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
           const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-          const records = meta?.rowCount ?? 10412
+          const records = meta?.rowCount ?? processedRecords.length
           const roleMeta = ROLE_META[role]
 
           let blob: Blob
           let filename: string
 
           if (id === 'csv') {
-            const taggedRows = OUTLIERS
+            const taggedRows = outlierRecords
               .filter(o => resolvedOutCtx.get(o.id) === 'warned')
-              .map(o => `[DATA QUALITY WARNING],${o.record.replace(',','')},${o.specialty},,,,,,, // Anomaly score ${o.anomalyScore.toFixed(2)} — ${o.reason}${warnNotes[o.id] ? ` | Note: ${warnNotes[o.id]}` : ''}`)
+              .map(o => `[DATA QUALITY WARNING],${o.record.replace(',','')},${o.specialty},,,,,,, // Flagged by ${o.detectionModel}${warnNotes[o.id] ? ` | Note: ${warnNotes[o.id]}` : ''}`)
             const csvRows = [
               'DQ_FLAG,NPI,First Name,Last Name,Specialty,State,Email,Phone,ZIP,DEA Number',
               ...stagingRecords.map(r => `,${r.npi},${r.firstName},${r.lastName},${r.specialty},${r.state},${r.email},${r.phone},${r.zip},${r.deaNumber}`),
@@ -5641,28 +4583,30 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             blob = new Blob([csvRows.join('\n')], { type: 'text/csv' })
             filename = `HCP_Clean_${meta?.fileName?.replace(/\..+$/, '') ?? 'Export'}_${now.toISOString().slice(0,10)}.csv`
           } else {
-            const taggedForReport = OUTLIERS.filter(o => resolvedOutCtx.get(o.id) === 'warned')
+            const taggedForReport = outlierRecords.filter(o => resolvedOutCtx.get(o.id) === 'warned')
+            const scores = reviewScores(processedRecords)
             const report = [
               'MedReach AI — PDF Audit Report',
               '='.repeat(40),
               `Generated: ${dateStr} ${timeStr}`,
               `Exported by: ${roleMeta.label} (role: ${role})`,
-              `Source file: ${meta?.fileName ?? 'Q2_HCP_Oncology.csv'}`,
+              `Source file: ${meta?.fileName ?? 'Not available'}`,
               `Total records: ${records.toLocaleString()}`,
               '',
               'Data Quality Summary',
               '-'.repeat(30),
-              'Quality score: 84%',
-              'PII flags resolved: 6',
-              'Duplicates merged: 3',
-              'NPI validation pass rate: 97.2%',
+              `Quality score: ${scores.quality}%`,
+              `PII/PHI flags detected: ${scores.privacy}`,
+              `Contact completeness flags: ${scores.contacts}`,
+              `Duplicate records flagged: ${scores.duplicates}`,
+              `NPI validation failures: ${scores.invalidNpis}`,
               `Data Quality Warnings: ${taggedForReport.length}`,
               '',
               ...(taggedForReport.length > 0 ? [
                 'Data Quality Warning Records (highlighted red on export):',
                 '-'.repeat(30),
                 ...taggedForReport.map(o =>
-                  `  [WARNING] ${o.record} | ${o.specialty} | Score: ${o.anomalyScore.toFixed(2)} | ${o.reason}${warnNotes[o.id] ? `\n           Note: ${warnNotes[o.id]}` : ''}`
+                  `  [WARNING] ${o.record} | ${o.specialty} | Flagged by: ${o.detectionModel}${warnNotes[o.id] ? `\n           Note: ${warnNotes[o.id]}` : ''}`
                 ),
                 '',
               ] : []),
@@ -5672,17 +4616,16 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             filename = `Audit_Report_${now.toISOString().slice(0,10)}.pdf`
           }
 
+          const size = formatBytes(blob.size)
           triggerDownload(blob, filename)
-          logToFirestore(id, filename, opt.size, records)
+          logToFirestore(id, filename, size, records)
 
           // Prepend to live history
           setHistory(h => [{
             name: filename,
             date: `${dateStr} ${timeStr}`,
             by: roleMeta.label,
-            size: opt.size,
-            expired: false,
-            live: true,
+            size,
           }, ...h])
 
           return 100
@@ -5692,12 +4635,18 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
     }, 200)
   }
 
-  const openHighNPI = VALIDATION_ERRORS.filter(v => v.severity === 'High' && !resolvedValCtx.has(v.id)).length
-  const exportOptions = EXPORT_OPTIONS.map(opt =>
-    opt.id === 'csv' && openHighNPI > 0
-      ? { ...opt, available: false, blockReason: `${openHighNPI} High-severity NPI error${openHighNPI > 1 ? 's' : ''} must be resolved in Data Review before export.` }
-      : opt
-  )
+  const openHighNPI = validationErrors.filter(v => !resolvedValCtx.has(v.id)).length
+  const noRecordsYet = !recordsLoading && allStagingRecords.length === 0
+  const exportOptions = EXPORT_OPTIONS.map(opt => {
+    if (opt.id === 'campaign') return opt
+    if (opt.id === 'csv' && openHighNPI > 0) {
+      return { ...opt, available: false, blockReason: `${openHighNPI} High-severity NPI error${openHighNPI > 1 ? 's' : ''} must be resolved in Data Review before export.` }
+    }
+    if (noRecordsYet) {
+      return { ...opt, available: false, blockReason: 'No processed dataset available to export yet.' }
+    }
+    return opt
+  })
 
   return (
     <div className="p-8">
@@ -5738,7 +4687,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
 
       {/* Outlier Data Quality Warning summary */}
       {(() => {
-        const tagged = OUTLIERS.filter(o => resolvedOutCtx.get(o.id) === 'warned')
+        const tagged = outlierRecords.filter(o => resolvedOutCtx.get(o.id) === 'warned')
         if (tagged.length === 0) return null
         return (
           <div className="mb-5 p-4 rounded-[8px] border-2 border-[#E67E22]" style={{ background: '#FFFBEB' }}>
@@ -5783,16 +4732,27 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       <Card className="mb-8">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-[14px] font-bold" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Export Staging Table</h3>
-          <span className="text-[12px]" style={{ color: C.midText }}>{stagingRecords.length} of {STAGING_RECORDS.length} records staged</span>
+          {allStagingRecords.length > 0 && (
+            <span className="text-[12px]" style={{ color: C.midText }}>{stagingRecords.length} of {allStagingRecords.length} records staged</span>
+          )}
         </div>
+        {recordsLoading ? (
+          <p className="text-[12px]" style={{ color: C.midText }}>Loading processed records…</p>
+        ) : allStagingRecords.length === 0 ? (
+          <EmptyState
+            icon={Icon.fileCheck}
+            title={recordsStatus === 404 ? 'No processed dataset yet' : 'No records available'}
+            subtitle="Upload and process a dataset in Data Review before exporting."
+          />
+        ) : (
         <table className="data-table w-full border-collapse">
           <thead>
             <tr><th>NPI</th><th>Name</th><th>Specialty</th><th>State</th></tr>
           </thead>
           <tbody>
             {stagingRecords.map(r => (
-              <tr key={r.npi}>
-                <td className="mono">{r.npi}</td>
+              <tr key={r.id}>
+                <td className="mono">{r.npi || <span style={{ color: C.border }}>—</span>}</td>
                 <td>{r.firstName} {r.lastName}</td>
                 <td>{r.specialty}</td>
                 <td>
@@ -5804,6 +4764,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             ))}
           </tbody>
         </table>
+        )}
       </Card>
 
       <div className="grid grid-cols-3 gap-6 mb-8">
@@ -5817,7 +4778,6 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
               </div>
             </div>
             <div className="flex items-center justify-between mb-3">
-              <span className="text-[11px]" style={{ color: C.midText }}>Est. size: {opt.size}</span>
               {done.has(opt.id) && <Badge tier={1} color="success">Downloaded ✓</Badge>}
             </div>
 
@@ -5830,9 +4790,15 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
             {!opt.available && opt.blockReason && (
               <div className="mb-3">
                 <p className="text-[11px] font-semibold" style={{ color: C.danger }}>{opt.blockReason}</p>
-                <button className="text-[11px] mt-1 hover:underline" style={{ color: C.corpBlue }} onClick={() => onNavigate('compliance-review')}>
-                  → Go to Compliance Review
-                </button>
+                {opt.id === 'campaign' ? null : openHighNPI > 0 ? (
+                  <button className="text-[11px] mt-1 hover:underline" style={{ color: C.corpBlue }} onClick={() => onNavigate('data-review')}>
+                    → Go to Data Review
+                  </button>
+                ) : noRecordsYet ? (
+                  <button className="text-[11px] mt-1 hover:underline" style={{ color: C.corpBlue }} onClick={() => onNavigate('upload')}>
+                    → Go to Upload
+                  </button>
+                ) : null}
               </div>
             )}
 
@@ -5852,31 +4818,33 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
       {/* Export history */}
       <Card>
         <h3 className="text-[15px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Export History</h3>
+        {history.length === 0 ? (
+          <EmptyState
+            icon={Icon.download}
+            title="No exports yet this session"
+            subtitle="Downloads you generate above will appear here."
+          />
+        ) : (
         <table className="data-table w-full border-collapse">
           <thead>
-            <tr><th>File Name</th><th>Date</th><th>Exported By</th><th>Size</th><th>Action</th></tr>
+            <tr><th>File Name</th><th>Date</th><th>Exported By</th><th>Size</th><th>Status</th></tr>
           </thead>
           <tbody>
             {history.map((h, i) => (
-              <tr key={h.name + i} style={{ opacity: h.expired ? 0.55 : 1, background: h.live ? '#F0FFF4' : undefined }}>
-                <td className="font-medium" style={{ color: h.expired ? C.midText : C.corpBlue }}>
-                  {h.live && <span className="inline-block mr-1.5 text-[9px] px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.success, color: 'white' }}>NEW</span>}
+              <tr key={h.name + i} style={{ background: '#F0FFF4' }}>
+                <td className="font-medium" style={{ color: C.corpBlue }}>
+                  <span className="inline-block mr-1.5 text-[9px] px-1.5 py-0.5 rounded-[3px] font-bold" style={{ background: C.success, color: 'white' }}>NEW</span>
                   {h.name}
                 </td>
                 <td>{h.date}</td>
                 <td>{h.by}</td>
                 <td>{h.size}</td>
-                <td>
-                  {h.expired ? (
-                    <span className="text-[11px]" style={{ color: C.midText }}>Expired — generated more than 24 hours ago</span>
-                  ) : (
-                    <button className="text-[11px] font-semibold hover:underline" style={{ color: C.corpBlue }}>Re-download</button>
-                  )}
-                </td>
+                <td><Badge tier={1} color="success">Downloaded ✓</Badge></td>
               </tr>
             ))}
           </tbody>
         </table>
+        )}
       </Card>
     </div>
   )
@@ -5884,26 +4852,15 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
 
 // ─── TEAM MANAGEMENT ─────────────────────────────────────────────────────────
 
-const TEAM_MEMBERS = [
-  { name: 'Jane Doe', email: 'jane@acmepharma.com', role: 'Admin', lastActive: 'Just now', initials: 'JD' },
-  { name: 'Mark Chen', email: 'mchen@acmepharma.com', role: 'Editor', lastActive: '2 hours ago', initials: 'MC' },
-  { name: 'Sarah Kim', email: 'skim@acmepharma.com', role: 'Viewer', lastActive: 'Yesterday', initials: 'SK' },
-]
-
-const PENDING = [
-  { email: 'david@acmepharma.com', role: 'Editor', sent: '3 days ago' },
-]
-
 function TeamScreen({ showToast }: { showToast: (type: ToastType, message: string) => void }) {
   const { role } = useRole()
   const canInviteUsers = isAdminRole(role)
   const adminInviteTooltip = 'Only Admin users can invite team members.'
-  const adminTeamActionTooltip = 'Only Admin users can modify team membership.'
   const [showInvite, setShowInvite] = useState(false)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteRole, setInviteRole] = useState('Editor')
   const [inviting, setInviting] = useState(false)
-  const [pending, setPending] = useState(PENDING)
+  const [pending, setPending] = useState<{ email: string; role: string; sent: string }[]>([])
 
   const sendInvite = async () => {
     if (!canInviteUsers) {
@@ -5946,52 +4903,11 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
 
       <Card className="mb-6">
         <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Team Members</h3>
-        <table className="data-table w-full border-collapse">
-          <thead>
-            <tr><th>Member</th><th>Email</th><th>Role</th><th>Last Active</th><th>Actions</th></tr>
-          </thead>
-          <tbody>
-            {TEAM_MEMBERS.map(m => (
-              <tr key={m.email}>
-                <td>
-                  <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-white shrink-0" style={{ background: C.navy }}>{m.initials}</div>
-                    <span className="font-medium">{m.name}</span>
-                  </div>
-                </td>
-                <td style={{ color: C.midText }}>{m.email}</td>
-                <td>
-                  <Badge tier={1} color={m.role === 'Admin' ? 'info' : m.role === 'Editor' ? 'neutral' : 'neutral'}>{m.role}</Badge>
-                </td>
-                <td style={{ color: C.midText }}>{m.lastActive}</td>
-                <td>
-                  <div className="flex gap-2">
-                    <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
-                      <button
-                        disabled={!canInviteUsers}
-                        className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
-                        style={{ color: canInviteUsers ? C.corpBlue : '#A0AEC0' }}
-                      >
-                        Edit Role
-                      </button>
-                    </span>
-                    {m.role !== 'Admin' && (
-                      <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
-                        <button
-                          disabled={!canInviteUsers}
-                          className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
-                          style={{ color: canInviteUsers ? C.danger : '#A0AEC0' }}
-                        >
-                          Remove
-                        </button>
-                      </span>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <EmptyState
+          icon={Icon.userPlus}
+          title="No team member list available"
+          subtitle="A live roster of team members is not yet available. Invitations you send below are tracked in Pending Invitations."
+        />
       </Card>
 
       {pending.length > 0 && (
@@ -5999,7 +4915,7 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
           <h3 className="text-[14px] font-bold mb-4" style={{ fontFamily: 'Calibri, Georgia, serif', color: C.navy }}>Pending Invitations</h3>
           <table className="data-table w-full border-collapse">
             <thead>
-              <tr><th>Email</th><th>Role</th><th>Sent</th><th>Actions</th></tr>
+              <tr><th>Email</th><th>Role</th><th>Sent</th></tr>
             </thead>
             <tbody>
               {pending.map(p => (
@@ -6007,29 +4923,6 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
                   <td style={{ color: C.midText }}>{p.email}</td>
                   <td><Badge tier={1} color="neutral">{p.role}</Badge></td>
                   <td style={{ color: C.midText }}>{p.sent}</td>
-                  <td>
-                    <div className="flex gap-2">
-                      <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
-                        <button
-                          disabled={!canInviteUsers}
-                          className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
-                          style={{ color: canInviteUsers ? C.corpBlue : '#A0AEC0' }}
-                          onClick={() => canInviteUsers && showToast('info', `Invitation resent to ${p.email}`)}
-                        >
-                          Resend
-                        </button>
-                      </span>
-                      <span title={canInviteUsers ? '' : adminTeamActionTooltip}>
-                        <button
-                          disabled={!canInviteUsers}
-                          className={`text-[11px] font-semibold ${canInviteUsers ? 'hover:underline' : 'cursor-not-allowed'}`}
-                          style={{ color: canInviteUsers ? C.danger : '#A0AEC0' }}
-                        >
-                          Cancel
-                        </button>
-                      </span>
-                    </div>
-                  </td>
                 </tr>
               ))}
             </tbody>
@@ -6067,24 +4960,6 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
 
 // ─── AUDIT LOG ────────────────────────────────────────────────────────────────
 
-const AUDIT_ENTRIES = [
-  { ts: 'Jul 18, 2026 14:32:05', actor: 'Jane Doe', type: 'export', resource: 'HCP_Clean_Q1.csv', detail: 'Exported 10,412 records (Clean HCP CSV)' },
-  { ts: 'Jul 18, 2026 13:18:22', actor: 'Jane Doe', type: 'clean', resource: 'Record #4821', detail: 'Anonymized SSN field — selected action: Hash' },
-  { ts: 'Jul 18, 2026 11:05:47', actor: 'Mark Chen', type: 'upload', resource: 'Q2_HCP_List.csv', detail: 'Uploaded 10,412 records; 23 flags detected' },
-  { ts: 'Jul 17, 2026 16:30:00', actor: 'Jane Doe', type: 'role_change', resource: 'sarah@acmepharma.com', detail: 'Role changed: Viewer → Editor' },
-  { ts: 'Jul 17, 2026 09:12:14', actor: 'Mark Chen', type: 'query', resource: 'AI Query', detail: 'Query: "How many cardiologists are in Florida?" — 847 results' },
-  { ts: 'Jul 16, 2026 15:44:38', actor: 'Admin', type: 'invite', resource: 'david@acmepharma.com', detail: 'Invitation sent — role: Editor' },
-]
-
-const ACTION_COLORS: Record<string, { bg: string; text: string }> = {
-  export: { bg: C.lightTint, text: C.navy },
-  clean: { bg: '#E8F5EF', text: C.success },
-  upload: { bg: '#EBF4FA', text: C.corpBlue },
-  role_change: { bg: '#FEF3C7', text: '#92400E' },
-  query: { bg: '#F1F5F9', text: '#334155' },
-  invite: { bg: '#EBF4FA', text: C.teal },
-}
-
 // ─── SCRUBBING SESSIONS ───────────────────────────────────────────────────────
 
 interface ScrubbingSession {
@@ -6107,44 +4982,11 @@ interface ScrubbingSession {
   notes: string
 }
 
-const SCRUBBING_SESSIONS: ScrubbingSession[] = [
-  {
-    id: 'sess_001', name: 'Q2 2026 Full Scrub', date: '2026-06-15', operator: 'Jane Doe', role: 'Admin',
-    recordsBefore: 10412, recordsAfter: 10238, removed: 174, flagsResolved: 41, piiFlagged: 12,
-    duplicatesMerged: 8, npiFixed: 17, outliersTagged: 4, healthBefore: 71, healthAfter: 84,
-    status: 'Complete', notes: 'Full quarterly scrub prior to Q2 campaign launch. All high-severity flags cleared.',
-  },
-  {
-    id: 'sess_002', name: 'March Duplicate Pass', date: '2026-03-22', operator: 'Mark Chen', role: 'Editor',
-    recordsBefore: 9874, recordsAfter: 9812, removed: 62, flagsResolved: 19, piiFlagged: 0,
-    duplicatesMerged: 19, npiFixed: 0, outliersTagged: 0, healthBefore: 68, healthAfter: 74,
-    status: 'Complete', notes: 'Targeted duplicate-only pass following March upload batch.',
-  },
-  {
-    id: 'sess_003', name: 'NPI Validation Run', date: '2026-02-08', operator: 'Jane Doe', role: 'Admin',
-    recordsBefore: 9812, recordsAfter: 9790, removed: 22, flagsResolved: 26, piiFlagged: 3,
-    duplicatesMerged: 0, npiFixed: 23, outliersTagged: 0, healthBefore: 74, healthAfter: 79,
-    status: 'Complete', notes: 'NPI registry cross-check after NPPES refresh. 4 records overridden with justification.',
-  },
-  {
-    id: 'sess_004', name: 'Q1 2026 Scrub', date: '2026-01-04', operator: 'Jane Doe', role: 'Admin',
-    recordsBefore: 11200, recordsAfter: 9812, removed: 1388, flagsResolved: 53, piiFlagged: 18,
-    duplicatesMerged: 14, npiFixed: 21, outliersTagged: 0, healthBefore: 58, healthAfter: 68,
-    status: 'Complete', notes: 'Large Q1 scrub including deduplication of merged CRM export. Significant record removal.',
-  },
-  {
-    id: 'sess_005', name: 'Outlier Review — Oncology', date: '2025-11-17', operator: 'Sarah Kim', role: 'Viewer',
-    recordsBefore: 11200, recordsAfter: 11200, removed: 0, flagsResolved: 4, piiFlagged: 0,
-    duplicatesMerged: 0, npiFixed: 0, outliersTagged: 4, healthBefore: 62, healthAfter: 62,
-    status: 'Partial', notes: 'Read-only review of oncology outliers. Tags applied but no records removed — pending admin sign-off.',
-  },
-  {
-    id: 'sess_006', name: 'Emergency PII Sweep', date: '2025-10-03', operator: 'Mark Chen', role: 'Editor',
-    recordsBefore: 10800, recordsAfter: 10800, removed: 0, flagsResolved: 7, piiFlagged: 7,
-    duplicatesMerged: 0, npiFixed: 0, outliersTagged: 0, healthBefore: 64, healthAfter: 66,
-    status: 'Aborted', notes: 'PII sweep aborted mid-session due to upstream data quality incident. Partial flags resolved.',
-  },
-]
+// NOTE: GET /api/scrubbing-sessions exists but currently just returns a hardcoded
+// list server-side (not derived from real scrub/merge activity) — until the backend
+// persists real session history, this screen has no real data source and shows an
+// honest empty state rather than fabricated sessions.
+const SCRUBBING_SESSIONS: ScrubbingSession[] = []
 
 function ScrubbingSessionsScreen() {
   const [downloading, setDownloading] = useState<string | null>(null)
@@ -6210,6 +5052,16 @@ function ScrubbingSessionsScreen() {
         <Banner type="error" onClose={() => setDlError(null)}>{dlError}</Banner>
       )}
 
+      {SCRUBBING_SESSIONS.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={Icon.shield}
+            title="No scrubbing sessions recorded yet"
+            subtitle="Session history will appear here once the platform starts logging data-scrub runs."
+          />
+        </Card>
+      ) : (
+      <>
       {/* Summary strip */}
       <div className="grid grid-cols-4 gap-4 mb-6">
         {[
@@ -6375,83 +5227,22 @@ function ScrubbingSessionsScreen() {
           )
         })}
       </div>
+      </>
+      )}
     </div>
   )
 }
 
 function AuditLogScreen() {
-  const [filterType, setFilterType] = useState('All')
-  const [expandedRow, setExpandedRow] = useState<number | null>(null)
-
-  const types = ['All', 'upload', 'clean', 'query', 'export', 'invite', 'role_change']
-  const filtered = filterType === 'All' ? AUDIT_ENTRIES : AUDIT_ENTRIES.filter(e => e.type === filterType)
-
   return (
     <div className="p-8">
       <SectionHeader title="Audit Log" subtitle="Complete chronological record of all platform actions" />
-
       <Card>
-        <div className="flex items-center gap-3 mb-4">
-          <span className="text-[12px] font-semibold" style={{ color: C.midText }}>Filter by action:</span>
-          <div className="flex gap-2 flex-wrap">
-            {types.map(t => (
-              <button key={t} onClick={() => setFilterType(t)}
-                className="text-[11px] px-3 py-1 rounded-[20px] border font-semibold capitalize transition-all"
-                style={{
-                  background: filterType === t ? C.navy : 'white',
-                  color: filterType === t ? 'white' : C.midText,
-                  borderColor: filterType === t ? C.navy : C.border,
-                }}>
-                {t}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <table className="data-table w-full border-collapse">
-          <thead>
-            <tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Resource</th><th>Detail</th></tr>
-          </thead>
-          <tbody>
-            {filtered.map((e, i) => {
-              const ac = ACTION_COLORS[e.type] || ACTION_COLORS.query
-              return (
-                <>
-                  <tr key={i} className="cursor-pointer" onClick={() => setExpandedRow(expandedRow === i ? null : i)}>
-                    <td className="mono">{e.ts}</td>
-                    <td>
-                      <div className="flex items-center gap-2">
-                        <div className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0" style={{ background: C.navy }}>
-                          {e.actor.split(' ').map(n => n[0]).join('')}
-                        </div>
-                        {e.actor}
-                      </div>
-                    </td>
-                    <td>
-                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded capitalize" style={{ background: ac.bg, color: ac.text }}>
-                        {e.type.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="font-medium">{e.resource}</td>
-                    <td style={{ color: C.midText }}>{e.detail}</td>
-                  </tr>
-                  {expandedRow === i && (
-                    <tr key={`exp-${i}`} style={{ background: C.lightTint }}>
-                      <td colSpan={5} className="px-4 py-3">
-                        <p className="text-[12px] font-semibold mb-1" style={{ color: C.navy }}>Full audit record</p>
-                        <div className="grid grid-cols-3 gap-4 text-[11px]">
-                          <div><span className="font-semibold" style={{ color: C.midText }}>Session ID:</span> sess_a3f92bc1</div>
-                          <div><span className="font-semibold" style={{ color: C.midText }}>IP Address:</span> 192.168.1.45</div>
-                          <div><span className="font-semibold" style={{ color: C.midText }}>User Agent:</span> Chrome 124, macOS</div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </>
-              )
-            })}
-          </tbody>
-        </table>
+        <EmptyState
+          icon={Icon.audit}
+          title="No audit log entries available"
+          subtitle="A queryable audit trail is not yet available. Individual actions (exports, uploads, invites) are logged server-side but not yet exposed here."
+        />
       </Card>
     </div>
   )
@@ -6594,93 +5385,19 @@ function SettingsScreen({ showToast }: { showToast: (type: ToastType, message: s
 
 // ─── ORG MANAGEMENT (Super Admin only) ────────────────────────────────────────
 
-const MOCK_ORGS = [
-  { id: 'acme',    name: 'Acme Pharma',        plan: 'Enterprise', users: 14, records: 42800, status: 'active',   joined: 'Jan 2026' },
-  { id: 'novagen', name: 'NovaGen Bio',         plan: 'Pro',        users: 5,  records: 11200, status: 'active',   joined: 'Mar 2026' },
-  { id: 'rx360',   name: 'Rx360 Health',        plan: 'Pro',        users: 8,  records: 9400,  status: 'active',   joined: 'Apr 2026' },
-  { id: 'meditec', name: 'MediTec Solutions',   plan: 'Starter',    users: 2,  records: 2100,  status: 'trial',    joined: 'Jul 2026' },
-  { id: 'alpharx', name: 'AlphaRx Corp',        plan: 'Enterprise', users: 21, records: 88000, status: 'active',   joined: 'Nov 2025' },
-  { id: 'suspended', name: 'Suspended Co.',     plan: 'Starter',    users: 1,  records: 0,     status: 'suspended',joined: 'Jun 2026' },
-]
-
 function OrgManagementScreen() {
-  const [search, setSearch] = useState('')
-  const filtered = MOCK_ORGS.filter(o => o.name.toLowerCase().includes(search.toLowerCase()))
-
-  const statusColor = (s: string) => s === 'active' ? C.success : s === 'trial' ? C.warning : C.danger
-  const planColor   = (p: string) => p === 'Enterprise' ? '#7B2D8B' : p === 'Pro' ? C.corpBlue : C.midText
-
   return (
     <div className="p-8">
       <SectionHeader
         title="Organization Management"
         subtitle="Super Admin view — manage all client organizations on the platform"
-        actions={<Btn variant="primary" size="sm" icon={Icon.userPlus}>Provision New Org</Btn>}
       />
-
-      {/* Platform summary */}
-      <div className="grid grid-cols-4 gap-4 mb-6">
-        {[
-          { label: 'Total Orgs',      value: MOCK_ORGS.length,                               color: C.navy    },
-          { label: 'Active',          value: MOCK_ORGS.filter(o=>o.status==='active').length, color: C.success },
-          { label: 'Total Users',     value: MOCK_ORGS.reduce((a,o)=>a+o.users,0),            color: C.corpBlue},
-          { label: 'Total Records',   value: MOCK_ORGS.reduce((a,o)=>a+o.records,0).toLocaleString(), color: C.teal },
-        ].map(s => (
-          <Card key={s.label}>
-            <p className="text-[11px]" style={{ color: C.midText }}>{s.label}</p>
-            <p className="text-[28px] font-bold mono" style={{ color: s.color }}>{s.value}</p>
-          </Card>
-        ))}
-      </div>
-
       <Card>
-        <div className="mb-4 flex items-center gap-3">
-          <input
-            className="border border-[#CBD5E0] rounded-[6px] text-[12px] px-3 py-1.5 flex-1"
-            placeholder="Search organizations..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-          />
-        </div>
-        <table className="data-table w-full">
-          <thead>
-            <tr>
-              <th>Organization</th>
-              <th>Plan</th>
-              <th>Users</th>
-              <th>Records</th>
-              <th>Status</th>
-              <th>Joined</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map(org => (
-              <tr key={org.id}>
-                <td><span className="font-semibold" style={{ color: C.navy }}>{org.name}</span></td>
-                <td><span className="text-[11px] font-bold" style={{ color: planColor(org.plan) }}>{org.plan}</span></td>
-                <td className="mono">{org.users}</td>
-                <td className="mono">{org.records.toLocaleString()}</td>
-                <td>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
-                    style={{ background: statusColor(org.status) + '22', color: statusColor(org.status) }}>
-                    {org.status}
-                  </span>
-                </td>
-                <td style={{ color: C.midText }}>{org.joined}</td>
-                <td>
-                  <div className="flex gap-2">
-                    <Btn variant="secondary" size="sm">Impersonate</Btn>
-                    {org.status !== 'suspended'
-                      ? <Btn variant="secondary" size="sm">Suspend</Btn>
-                      : <Btn variant="secondary" size="sm">Reinstate</Btn>
-                    }
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <EmptyState
+          icon={Icon.shield}
+          title="Organization management is not yet available"
+          subtitle="A platform-wide view of client organizations is not yet connected to a backend data source."
+        />
       </Card>
     </div>
   )
@@ -6770,8 +5487,8 @@ export default function App() {
       case 'column-mapping': return <ColumnMappingScreen onNavigate={navigate} />
       case 'data-review': return <DataReviewScreen />
       case 'query': return <QueryScreen />
-      case 'segments': return <SegmentsScreen onNavigate={navigate} />
-      case 'campaign-generator': return <CampaignGeneratorScreen onNavigate={navigate} />
+      case 'segments': return <SegmentsScreen />
+      case 'campaign-generator': return <CampaignGeneratorScreen />
       case 'compliance-review': return <ComplianceReviewScreen />
       case 'financial-disclosures': return <FinancialDisclosureScreen />
       case 'analytics': return <AnalyticsScreen onNavigate={navigate} />

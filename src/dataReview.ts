@@ -64,6 +64,44 @@ export function privacyFlags(records: ReviewRecord[]) {
   })
 }
 
+// Row shape intentionally limited to fields the backend actually persists
+// (anomaly_flag/detection_model_used) — no fabricated score, reason, or severity.
+export function outlierFlags(records: ReviewRecord[]) {
+  const isTrue = (value: unknown) => value === true || value === -1 || ['true', '1'].includes(String(value).toLowerCase())
+  return records.flatMap((record, index) => {
+    const flagged = record.anomaly_flag === -1 || record.anomaly_flag === '-1' || isTrue(record.is_anomaly)
+    if (!flagged) return []
+    return [{
+      id: index,
+      record: reviewName(record, index),
+      npi: reviewValue(record, 'npi'),
+      specialty: String(record.specialty || record.pri_spec || 'Not reported'),
+      state: String(record.state || record.State || 'Not reported'),
+      detectionModel: String(record.detection_model_used || 'Not reported'),
+      originalRecord: record,
+    }]
+  })
+}
+
+// Row shape intentionally limited to real fields — the backend only persists a
+// boolean is_duplicate flag per record, not paired/clustered comparison data.
+export function duplicateFlags(records: ReviewRecord[]) {
+  const isTrue = (value: unknown) => value === true || value === -1 || ['true', '1', 'merged'].includes(String(value).toLowerCase())
+  return records.flatMap((record, index) => {
+    const flagged = isTrue(record.is_duplicate) || isTrue(record.merged_from_sources) || record.deduplication_status === 'merged'
+    if (!flagged) return []
+    return [{
+      id: index,
+      record: reviewName(record, index),
+      npi: reviewValue(record, 'npi'),
+      specialty: String(record.specialty || record.pri_spec || 'Not reported'),
+      state: String(record.state || record.State || 'Not reported'),
+      email: reviewValue(record, 'email'),
+      originalRecord: record,
+    }]
+  })
+}
+
 export function reviewScores(records: ReviewRecord[]) {
   const isTrue = (value: unknown) => value === true || value === -1 || ['true', '1', 'merged'].includes(String(value).toLowerCase())
   const total = records.length
