@@ -2675,7 +2675,7 @@ function NullSummaryBar({ tab, records = [] }: { tab: string; records?: Record<s
   )
 }
 
-function DataReviewScreen() {
+function DataReviewScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => void; showToast: (type: ToastType, message: string) => void }) {
   const [processedRecords, setProcessedRecords] = useState<Record<string, unknown>[]>([])
   const [selectedRecord, setSelectedRecord] = useState<Record<string, unknown> | null>(null)
   const [recordsLoading, setRecordsLoading] = useState(true)
@@ -2700,8 +2700,6 @@ function DataReviewScreen() {
   const [valJustifications, setValJustifications] = useState<Record<number, string>>({})
   // Set of validation error ids with override drawer open
   const [overrideOpen, setOverrideOpen] = useState<Set<number>>(new Set())
-  // Set of validation error ids currently re-validating (spinner)
-  const [revalidating, setRevalidating] = useState<Set<number>>(new Set())
   // Duplicate record resolution (local triage only — no backend endpoint persists
   // per-record duplicate resolution yet, so this does not simulate a fake round-trip).
   const [resolvedDup, setResolvedDup] = useState<Map<number, 'kept' | 'removed'>>(new Map())
@@ -2874,7 +2872,7 @@ function DataReviewScreen() {
               }}>
               {quality}/100
             </span>
-            <Btn variant="secondary" size="sm">Export Report</Btn>
+            <Btn variant="secondary" size="sm" onClick={() => onNavigate('export')}>Export Report</Btn>
           </div>
         }
       />
@@ -3463,7 +3461,6 @@ function DataReviewScreen() {
                 const action   = resolvedVal.get(v.id)
                 const isHigh   = v.severity === 'High'
                 const isOvOpen = overrideOpen.has(v.id)
-                const isReval  = revalidating.has(v.id)
                 return (
                   <Fragment key={v.id}>
                     <tr style={{
@@ -3512,12 +3509,10 @@ function DataReviewScreen() {
                         ) : (
                           <div className="flex gap-1 flex-wrap">
                             <Btn size="sm" variant="danger"
-                              disabled={isReval}
                               onClick={() => { const m = new Map(resolvedVal); m.set(v.id, 'removed'); setResolvedVal(m) }}>
                               Remove
                             </Btn>
                             <Btn size="sm" variant="ghost"
-                              disabled={isReval}
                               onClick={() => {
                                 const s = new Set(overrideOpen)
                                 s.has(v.id) ? s.delete(v.id) : s.add(v.id)
@@ -3526,13 +3521,8 @@ function DataReviewScreen() {
                               {isOvOpen ? '✕ Cancel' : 'Override Flag'}
                             </Btn>
                             <Btn size="sm" variant="secondary"
-                              disabled={isReval}
-                              icon={isReval ? Icon.spinner : undefined}
-                              onClick={() => {
-                                setRevalidating(prev => { const s = new Set(prev); s.add(v.id); return s })
-                                setTimeout(() => setRevalidating(prev => { const s = new Set(prev); s.delete(v.id); return s }), 1200)
-                              }}>
-                              {isReval ? 'Checking…' : 'Re-validate'}
+                              onClick={() => showToast('info', 'Single-record NPI re-validation is coming soon.')}>
+                              Re-validate
                             </Btn>
                           </div>
                         )}
@@ -5485,7 +5475,7 @@ export default function App() {
       case 'dashboard': return <DashboardScreen onNavigate={navigate} />
       case 'upload': return <UploadScreen onNavigate={navigate} showToast={showToast} />
       case 'column-mapping': return <ColumnMappingScreen onNavigate={navigate} />
-      case 'data-review': return <DataReviewScreen />
+      case 'data-review': return <DataReviewScreen onNavigate={navigate} showToast={showToast} />
       case 'query': return <QueryScreen />
       case 'segments': return <SegmentsScreen />
       case 'campaign-generator': return <CampaignGeneratorScreen />
