@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, createContext, useContext, Fragment, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User as FirebaseUser } from 'firebase/auth'
-import { auth } from './firebase'
+import { getFirebaseAuth } from './firebase'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
 import RecordDetailDashboard from './RecordDetailDashboard'
 import { contactFlags, hasReviewField, npiOutcome, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
+import { NLPAuthenticationError, searchDataset } from './nlpSearch'
 
 // Backend base URL — empty string means calls are relative (proxied via Firebase Hosting rewrites in prod)
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
@@ -529,7 +530,7 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
 
   const handleLogout = async () => {
     try {
-      await signOut(auth)
+      await signOut(getFirebaseAuth())
     } catch {
       // Clear local session state regardless of whether the network sign-out call succeeds.
     }
@@ -684,9 +685,13 @@ function LoginScreen({ onLogin, onNavigate }: { onLogin: (role: Role) => void; o
       setEmailError('Enter a valid email address')
       return
     }
+    if (!password) {
+      setError('Enter your password')
+      return
+    }
     setLoading(true)
     try {
-      const credential = await signInWithEmailAndPassword(auth, email, password)
+      const credential = await signInWithEmailAndPassword(getFirebaseAuth(), email, password)
       const token = await credential.user.getIdToken()
       localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token)
       onLogin(selectedRole)
@@ -713,7 +718,7 @@ function LoginScreen({ onLogin, onNavigate }: { onLogin: (role: Role) => void; o
 
         {/* ── ROLE PICKER (demo) ── */}
         <div className="mb-5 p-3 rounded-[8px]" style={{ background: '#F7F9FB', border: '1px solid #EDF2F7' }}>
-          <p className="text-[10px] font-bold mb-2" style={{ color: C.midText }}>DEMO: Select role to preview</p>
+          <p className="text-[10px] font-bold mb-2" style={{ color: C.midText }}>DEMO: Select role to preview (does not change Firebase permissions)</p>
           <div className="grid grid-cols-2 gap-2">
             {(Object.entries(ROLE_META) as [Role, typeof ROLE_META[Role]][]).map(([r, m]) => (
               <button
@@ -1699,10 +1704,10 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
     setUploadState('uploading')
 
     try {
-      const urlRes = await fetch(`${API_BASE_URL}/api/upload/generate-url`, {
+      const urlRes = await fetch(`${API_BASE_URL}/api/companies/demo-company/uploads/generate-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
-        body: JSON.stringify({ company_id: 'demo-company', filename: file.name, content_type: file.type || 'text/csv' }),
+        body: JSON.stringify({ filename: file.name, content_type: file.type || 'text/csv' }),
       })
       if (!urlRes.ok) throw new HttpError(urlRes.status, (await urlRes.text()) || 'Could not obtain an upload URL')
       const { upload_url: uploadUrl } = await urlRes.json()
@@ -3840,7 +3845,6 @@ interface NLPQueryResponse {
 type QueryErrorKind = 'auth' | 'not-understood' | 'server' | 'network'
 
 function QueryScreen() {
-  const { role } = useRole()
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [results, setResults] = useState<Record<string, unknown>[] | null>(null)
@@ -3857,11 +3861,7 @@ function QueryScreen() {
     setError(null)
 
     try {
-      const response = await globalThis.fetch(`${API_BASE_URL}/api/dataset/nlp-search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
-        body: JSON.stringify({ query: q, dataset_id: NLP_QUERY_DATASET_ID }),
-      })
+      const response = await searchDataset(API_BASE_URL, q, NLP_QUERY_DATASET_ID)
       const body = await response.json().catch(() => null) as NLPQueryResponse | null
 
       if (response.status === 401 || response.status === 403) {
@@ -3877,8 +3877,10 @@ function QueryScreen() {
       setResults(body.results ?? [])
       setAppliedQuery(body.applied_query ?? null)
       setTotalMatches(body.total_matches ?? body.results?.length ?? 0)
-    } catch {
-      setError({ kind: 'network', message: "Couldn't reach the server. Check your connection and try again." })
+    } catch (error) {
+      setError(error instanceof NLPAuthenticationError
+        ? { kind: 'auth', message: error.message }
+        : { kind: 'network', message: "Couldn't reach the server. Check your connection and try again." })
     } finally {
       setLoading(false)
     }
@@ -6718,7 +6720,7 @@ export default function App() {
   // Mirror the live Firebase Auth session so the sidebar profile/logout stay in sync
   // with sign-in and sign-out, independent of the demo role switcher.
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, user => {
+    const unsubscribe = onAuthStateChanged(getFirebaseAuth(), user => {
       setAuthUser(user)
       setAuthLoading(false)
     })

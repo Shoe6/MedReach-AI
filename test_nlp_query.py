@@ -1,5 +1,9 @@
 """Tests for the Natural Language Query endpoint and service (LLM calls are mocked)."""
 
+import os
+from uuid import uuid4
+
+import httpx
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
@@ -201,3 +205,94 @@ def test_requires_authentication(dataset_dir):
         "/api/dataset/nlp-search", json={"query": "x", "dataset_id": "providers.csv"}
     )
     assert resp.status_code == 401
+
+
+def test_bearer_token_is_passed_to_firebase_verifier(dataset_dir, fake_llm, monkeypatch):
+    from auth import firebase_auth
+
+    fake_llm.response = "State == 'TX'"
+    received_tokens = []
+
+    def verify(token):
+        received_tokens.append(token)
+        return {"uid": "firebase-user"}
+
+    monkeypatch.setattr(firebase_auth, "verify_id_token", verify)
+    response = TestClient(app).post(
+        "/api/dataset/nlp-search",
+        json={"query": "Texas", "dataset_id": "providers.csv"},
+        headers={"Authorization": "Bearer test-id-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["total_matches"] == 2
+    assert received_tokens == ["test-id-token"]
+
+
+def test_invalid_bearer_token_returns_401(dataset_dir, monkeypatch):
+    from auth import firebase_auth
+
+    def verify(token):
+        raise firebase_auth.InvalidIdTokenError("Invalid test token")
+
+    monkeypatch.setattr(firebase_auth, "verify_id_token", verify)
+    response = TestClient(app).post(
+        "/api/dataset/nlp-search",
+        json={"query": "Texas", "dataset_id": "providers.csv"},
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
+def test_nlp_cors_preflight_accepts_authorization(host):
+    origin = f"http://{host}:5173"
+    response = TestClient(app).options(
+        "/api/dataset/nlp-search",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+    assert "authorization" in response.headers["access-control-allow-headers"].lower()
+
+
+@pytest.mark.skipif(
+    os.getenv("MEDREACH_TEST_AUTH_EMULATOR") != "1",
+    reason="Set MEDREACH_TEST_AUTH_EMULATOR=1 with the local Auth emulator running.",
+)
+def test_real_emulator_token_authenticates_nlp_request(dataset_dir, fake_llm):
+    host = os.environ["FIREBASE_AUTH_EMULATOR_HOST"]
+    assert host in {"127.0.0.1:9099", "localhost:9099"}
+    base_url = f"http://{host}/identitytoolkit.googleapis.com/v1"
+    with httpx.Client(timeout=10) as emulator:
+        signup = emulator.post(
+            f"{base_url}/accounts:signUp",
+            params={"key": "local-emulator-key"},
+            json={
+                "email": f"nlp-test-{uuid4().hex}@example.test",
+                "password": uuid4().hex,
+                "returnSecureToken": True,
+            },
+        )
+        signup.raise_for_status()
+        token = signup.json()["idToken"]
+        try:
+            fake_llm.response = "State == 'TX'"
+            response = TestClient(app).post(
+                "/api/dataset/nlp-search",
+                json={"query": "Texas", "dataset_id": "providers.csv"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["total_matches"] == 2
+        finally:
+            deleted = emulator.post(
+                f"{base_url}/accounts:delete",
+                params={"key": "local-emulator-key"},
+                json={"idToken": token},
+            )
+            deleted.raise_for_status()

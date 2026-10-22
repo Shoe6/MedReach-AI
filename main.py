@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import ipaddress
 import io
 import logging
 import os
@@ -23,7 +24,12 @@ from data_health_score_service import calculate_data_health
 from nlp_query_router import router as nlp_query_router
 from bulk_approval_service import approve_low_severity_flags
 from record_merge_service import merge_record_cluster
-from scrubbing_pipeline import DEFAULT_GCS_CHUNK_SIZE, scrub_provider_records, stream_scrubbed_gcs_csv
+from scrubbing_pipeline import (
+    DEFAULT_GCS_CHUNK_SIZE,
+    scrub_provider_records,
+    stream_scrubbed_gcs_csv,
+    stream_scrubbed_local_csv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +59,7 @@ app.add_middleware(
     ],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "X-User-Role"],
 )
 
 app.include_router(nlp_query_router)
@@ -64,6 +70,12 @@ PROCESSING_ROLES = ("editor", "admin", "super-admin")
 require_authenticated_editor = require_role(PROCESSING_ROLES)
 FIRESTORE_PAGE_SIZE = 500
 UPLOAD_BUCKET = "medreach-ai-uploads"
+LOCAL_E2E_MODE = os.getenv("MEDREACH_E2E_LOCAL_MODE") == "1"
+LOCAL_E2E_UID = "local-e2e-user"
+LOCAL_E2E_UPLOAD_DIR = Path(tempfile.gettempdir()) / "medreach-e2e-uploads"
+LOCAL_E2E_UPLOADS: dict[str, Path] = {}
+LOCAL_E2E_UPLOAD_TOKENS: dict[str, str] = {}
+LOCAL_E2E_JOBS: dict[str, dict] = {}
 IS_CLOUD_RUN = bool(os.environ.get("K_SERVICE"))
 GCS_SIGNING_TIMEOUT_SECONDS = 10
 LOCAL_UPLOAD_DIR = Path(tempfile.gettempdir()) / "medreach-local-uploads"
@@ -75,21 +87,62 @@ ALLOW_OFFLINE_FIRESTORE_WRITES = not IS_CLOUD_RUN and os.getenv("MEDREACH_ALLOW_
     "yes",
 )
 
+if LOCAL_E2E_MODE and os.getenv("ENVIRONMENT", "").lower() != "development":
+    raise RuntimeError("Local E2E auth bypass requires ENVIRONMENT=development.")
+
+
+def _local_e2e_identity(request: Request) -> dict[str, str]:
+    client_host = request.client.host if request.client else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not LOCAL_E2E_MODE or not is_loopback:
+        raise HTTPException(status_code=403, detail="Local E2E access is restricted to loopback clients.")
+    return {"uid": LOCAL_E2E_UID, "role": "admin"}
+
+
+if LOCAL_E2E_MODE:
+    app.dependency_overrides[require_authenticated_editor] = _local_e2e_identity
+
+
+class _InMemoryJobSnapshot:
+    def __init__(self, data: dict | None):
+        self.exists = data is not None
+        self._data = data
+
+    def to_dict(self) -> dict | None:
+        return dict(self._data) if self._data is not None else None
+
+
+class _InMemoryJobReference:
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+
+    def set(self, data: dict) -> None:
+        LOCAL_E2E_JOBS[self.job_id] = dict(data)
+
+    def update(self, data: dict) -> None:
+        LOCAL_E2E_JOBS.setdefault(self.job_id, {}).update(data)
+
+    def get(self) -> _InMemoryJobSnapshot:
+        data = LOCAL_E2E_JOBS.get(self.job_id)
+        return _InMemoryJobSnapshot(dict(data) if data is not None else None)
+
+
+def _processing_job_reference(job_id: str):
+    if LOCAL_E2E_MODE:
+        return _InMemoryJobReference(job_id)
+    return db.collection("processing_jobs").document(job_id)
+
 
 async def _firestore_write(write_fn, *, context: str):
-    """Run a blocking Firestore write with a short timeout.
-
-    The default gRPC deadline can block the event loop for ~60s when the
-    emulator is unreachable, so bound the wait ourselves. If the emulator is
-    unreachable and MEDREACH_ALLOW_OFFLINE_FIRESTORE=1, skip the write so the
-    rest of the pipeline (e.g. CSV chunking) can still be tested locally;
-    otherwise fail fast with a clear error.
-    """
+    """Bound blocking Firestore writes, with an explicit local offline opt-in."""
     try:
         return await asyncio.wait_for(asyncio.to_thread(write_fn), timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
     except Exception as exc:
         if USE_EMULATOR and ALLOW_OFFLINE_FIRESTORE_WRITES:
-            logger.warning("Skipping Firestore write (%s) — emulator unreachable: %s", context, exc)
+            logger.warning("Skipping Firestore write (%s) - emulator unreachable: %s", context, exc)
             return None
         hint = (
             "Start the Firestore emulator (`firebase emulators:start --only firestore`), "
@@ -104,8 +157,7 @@ async def _firestore_write(write_fn, *, context: str):
 
 
 async def _firestore_write_best_effort(write_fn, *, context: str) -> None:
-    """Attempt a Firestore write with a short timeout; never raises, so a
-    background job keeps running even when Firestore is unreachable."""
+    """Log failed status updates without interrupting background processing."""
     try:
         await asyncio.wait_for(asyncio.to_thread(write_fn), timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
     except Exception as exc:
@@ -113,10 +165,7 @@ async def _firestore_write_best_effort(write_fn, *, context: str) -> None:
 
 
 def _iam_signing_kwargs() -> dict:
-    """On Cloud Run the attached service account has no private key, so
-    generate_signed_url must be told to sign via the IAM credentials API.
-    Local/dev runs use emulators and never reach real GCS, so skip this.
-    """
+    """Use IAM signing for Cloud Run's keyless service account credentials."""
     if not IS_CLOUD_RUN:
         return {}
     credentials, _ = google.auth.default()
@@ -331,15 +380,18 @@ class SignedUrlPayload(BaseModel):
 class ProcessUploadPayload(BaseModel):
     object_name: str
     skip_npi_validation: bool = False
+    skip_content_analysis: bool = False
     delete_source_on_success: bool = False
 
 
+@app.post("/api/upload/generate-url", include_in_schema=False)
 @app.post("/api/uploads/generate-signed-url")
 async def generate_signed_upload_url(
     payload: SignedUrlPayload,
+    request: Request,
     user: dict = Depends(require_authenticated_editor),
 ):
-    """Generate an owner-scoped short-lived V4 URL for a raw CSV upload."""
+    """Generate an owner-scoped upload URL for a raw CSV upload."""
     filename = payload.filename.strip()
     if not filename or filename in {".", ".."} or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="A valid filename without path components is required.")
@@ -350,10 +402,21 @@ async def generate_signed_upload_url(
     if not owner_uid:
         raise HTTPException(status_code=401, detail="Authenticated user is missing a UID.")
 
-    object_name = f"raw_uploads/{owner_uid}/{uuid4()}_{filename}"
+    upload_token = str(uuid4())
+    object_name = f"raw_uploads/{owner_uid}/{upload_token}_{filename}"
+    if LOCAL_E2E_MODE:
+        LOCAL_E2E_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        LOCAL_E2E_UPLOADS[object_name] = LOCAL_E2E_UPLOAD_DIR / f"{upload_token}.csv"
+        LOCAL_E2E_UPLOAD_TOKENS[upload_token] = object_name
+        return {
+            "signed_url": f"{str(request.base_url).rstrip('/')}/api/e2e/local-uploads/{upload_token}",
+            "object_name": object_name,
+            "expires_in": 900,
+        }
 
     def _sign() -> str:
-        blob = gcs_storage.Client().bucket(UPLOAD_BUCKET).blob(object_name)
+        bucket = gcs_storage.Client().bucket(UPLOAD_BUCKET)
+        blob = bucket.blob(object_name)
         return blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
@@ -380,86 +443,110 @@ async def generate_signed_upload_url(
     }
 
 
+@app.put("/api/e2e/local-uploads/{upload_token}", include_in_schema=False)
+async def receive_local_e2e_upload(upload_token: str, request: Request):
+    """Stream a local-only test upload to disk without buffering the request."""
+    client_host = request.client.host if request.client else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not LOCAL_E2E_MODE or not is_loopback:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    object_name = LOCAL_E2E_UPLOAD_TOKENS.get(upload_token)
+    file_path = LOCAL_E2E_UPLOADS.get(object_name or "")
+    if not object_name or file_path is None:
+        raise HTTPException(status_code=404, detail="Local upload URL not found.")
+
+    uploaded_bytes = 0
+    try:
+        with file_path.open("wb") as output_file:
+            async for chunk in request.stream():
+                output_file.write(chunk)
+                uploaded_bytes += len(chunk)
+    except Exception:
+        file_path.unlink(missing_ok=True)
+        raise
+
+    return {"object_name": object_name, "uploaded_bytes": uploaded_bytes}
+
+
 async def _process_uploaded_csv_job(
     job_id: str,
     object_name: str,
     *,
     skip_npi_validation: bool,
+    skip_content_analysis: bool = False,
     delete_source_on_success: bool,
+    local_file: Path | None = None,
 ) -> None:
-    job_ref = db.collection("processing_jobs").document(job_id)
+    job_ref = _processing_job_reference(job_id)
     total_records = 0
     completed_batches = 0
     max_batch_records = 0
 
     try:
-        await _firestore_write_best_effort(
-            lambda: job_ref.update(
-                {"status": "processing", "started_at": datetime.now(timezone.utc).isoformat()},
-                retry=None,
-                timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
-            ),
-            context=f"job {job_id} start update",
+        job_ref.update({"status": "processing", "started_at": datetime.now(timezone.utc).isoformat()})
+        batches = (
+            stream_scrubbed_local_csv(
+                local_file,
+                batch_size=DEFAULT_GCS_CHUNK_SIZE,
+                validate_npi=not skip_npi_validation,
+                analyze_records=not skip_content_analysis,
+            )
+            if local_file is not None
+            else stream_scrubbed_gcs_csv(
+                object_name,
+                bucket_name=UPLOAD_BUCKET,
+                batch_size=DEFAULT_GCS_CHUNK_SIZE,
+                validate_npi=not skip_npi_validation,
+            )
         )
-        async for records in stream_scrubbed_gcs_csv(
-            object_name,
-            bucket_name=UPLOAD_BUCKET,
-            batch_size=DEFAULT_GCS_CHUNK_SIZE,
-            validate_npi=not skip_npi_validation,
-        ):
+        async for records in batches:
             batch_records = len(records)
             total_records += batch_records
             completed_batches += 1
             max_batch_records = max(max_batch_records, batch_records)
 
             if completed_batches % 20 == 0:
-                await _firestore_write_best_effort(
-                    lambda: job_ref.update(
-                        {
-                            "completed_batches": completed_batches,
-                            "records_processed": total_records,
-                            "max_batch_records": max_batch_records,
-                        },
-                        retry=None,
-                        timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
-                    ),
-                    context=f"job {job_id} progress update",
+                job_ref.update(
+                    {
+                        "completed_batches": completed_batches,
+                        "records_processed": total_records,
+                        "max_batch_records": max_batch_records,
+                    }
                 )
 
         if delete_source_on_success:
-            gcs_storage.Client().bucket(UPLOAD_BUCKET).blob(object_name).delete()
+            if local_file is not None:
+                local_file.unlink(missing_ok=True)
+                LOCAL_E2E_UPLOADS.pop(object_name, None)
+                LOCAL_E2E_UPLOAD_TOKENS.pop(Path(object_name).name.split("_", 1)[0], None)
+            else:
+                gcs_storage.Client().bucket(UPLOAD_BUCKET).blob(object_name).delete()
 
-        await _firestore_write_best_effort(
-            lambda: job_ref.update(
-                {
-                    "status": "completed",
-                    "completed_batches": completed_batches,
-                    "records_processed": total_records,
-                    "max_batch_records": max_batch_records,
-                    "finished_at": datetime.now(timezone.utc).isoformat(),
-                },
-                retry=None,
-                timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
-            ),
-            context=f"job {job_id} completion update",
+        job_ref.update(
+            {
+                "status": "completed",
+                "completed_batches": completed_batches,
+                "records_processed": total_records,
+                "max_batch_records": max_batch_records,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
         )
     except Exception as exc:
         logger.exception("CSV processing job %s failed", job_id)
         failure_reason = f"Processing failed ({type(exc).__name__})."
-        await _firestore_write_best_effort(
-            lambda: job_ref.update(
-                {
-                    "status": "failed",
-                    "error": failure_reason,
-                    "completed_batches": completed_batches,
-                    "records_processed": total_records,
-                    "max_batch_records": max_batch_records,
-                    "finished_at": datetime.now(timezone.utc).isoformat(),
-                },
-                retry=None,
-                timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
-            ),
-            context=f"job {job_id} failure update",
+        job_ref.update(
+            {
+                "status": "failed",
+                "error": failure_reason,
+                "completed_batches": completed_batches,
+                "records_processed": total_records,
+                "max_batch_records": max_batch_records,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
         )
 
 
@@ -475,6 +562,7 @@ async def start_company_upload_processing(
     role = str(user.get("role") or "").strip().lower()
     object_name = payload.object_name.strip()
     owner_prefix = f"raw_uploads/{owner_uid}/"
+    local_file = LOCAL_E2E_UPLOADS.get(object_name) if LOCAL_E2E_MODE else None
 
     if not owner_uid:
         raise HTTPException(status_code=401, detail="Authenticated user is missing a UID.")
@@ -482,37 +570,39 @@ async def start_company_upload_processing(
         raise HTTPException(status_code=403, detail="The upload does not belong to the authenticated user.")
     if not object_name.lower().endswith(".csv") or ".." in object_name.split("/"):
         raise HTTPException(status_code=400, detail="A valid staged CSV object is required.")
+    if LOCAL_E2E_MODE and local_file is None:
+        raise HTTPException(status_code=404, detail="Local staged upload not found.")
     if payload.skip_npi_validation and role not in ADMIN_ROLES:
         raise HTTPException(status_code=403, detail="Skipping NPI validation is limited to administrators.")
+    if payload.skip_content_analysis and (not LOCAL_E2E_MODE or role not in ADMIN_ROLES):
+        raise HTTPException(status_code=403, detail="Skipping content analysis is limited to local E2E mode.")
 
     job_id = str(uuid4())
-    job_ref = db.collection("processing_jobs").document(job_id)
-    await _firestore_write(
-        lambda: job_ref.set(
-            {
-                "job_id": job_id,
-                "company_id": company_id,
-                "owner_uid": owner_uid,
-                "object_name": object_name,
-                "status": "queued",
-                "batch_size": DEFAULT_GCS_CHUNK_SIZE,
-                "skip_npi_validation": payload.skip_npi_validation,
-                "completed_batches": 0,
-                "records_processed": 0,
-                "max_batch_records": 0,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            },
-            retry=None,
-            timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS,
-        ),
-        context=f"queuing upload job for company '{company_id}'",
+    job_ref = _processing_job_reference(job_id)
+    job_ref.set(
+        {
+            "job_id": job_id,
+            "company_id": company_id,
+            "owner_uid": owner_uid,
+            "object_name": object_name,
+            "status": "queued",
+            "batch_size": DEFAULT_GCS_CHUNK_SIZE,
+            "skip_npi_validation": payload.skip_npi_validation,
+            "skip_content_analysis": payload.skip_content_analysis,
+            "completed_batches": 0,
+            "records_processed": 0,
+            "max_batch_records": 0,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
     )
     background_tasks.add_task(
         _process_uploaded_csv_job,
         job_id,
         object_name,
         skip_npi_validation=payload.skip_npi_validation,
+        skip_content_analysis=payload.skip_content_analysis,
         delete_source_on_success=payload.delete_source_on_success,
+        local_file=local_file,
     )
     return {"job_id": job_id, "company_id": company_id, "status": "queued"}
 
@@ -525,7 +615,7 @@ async def get_company_upload_processing_status(
 ):
     """Return processing status only to the user who staged the source object."""
     owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
-    snapshot = db.collection("processing_jobs").document(job_id).get()
+    snapshot = _processing_job_reference(job_id).get()
     job = snapshot.to_dict() if snapshot.exists else None
     if not job or job.get("owner_uid") != owner_uid or job.get("company_id") != company_id:
         raise HTTPException(status_code=404, detail="Processing job not found.")
@@ -541,6 +631,7 @@ async def get_company_upload_processing_status(
             "records_processed",
             "max_batch_records",
             "skip_npi_validation",
+            "skip_content_analysis",
             "error",
         )
         if key in job
@@ -717,13 +808,13 @@ async def download_session_pdf(session_id: str):
 # ── Signed URL direct-to-GCS upload ────────────────────────────────────────────
 
 class GenerateUploadUrlRequest(BaseModel):
-    company_id: str
     filename: str
     content_type: str | None = None
 
 
-@app.post("/api/upload/generate-url")
+@app.post("/api/companies/{company_id}/uploads/generate-url")
 async def generate_upload_url(
+    company_id: str,
     payload: GenerateUploadUrlRequest,
     request: Request,
     _role: str = Depends(require_editor_or_above),
@@ -739,7 +830,7 @@ async def generate_upload_url(
         raise HTTPException(status_code=400, detail="A file name is required.")
 
     upload_id = str(uuid4())
-    storage_path = f"companies/{payload.company_id}/uploads/{upload_id}_{original_filename}"
+    storage_path = f"companies/{company_id}/uploads/{upload_id}_{original_filename}"
     content_type = payload.content_type or "application/octet-stream"
 
     if USE_EMULATOR:

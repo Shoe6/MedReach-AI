@@ -2,7 +2,7 @@
 Cloud Run backend and live Firestore database.
 
 Mirrors exactly what src/App.tsx's uploadRealFile() does:
-  1. POST /api/upload/generate-url  (signed GCS v4 PUT URL)
+  1. POST /api/companies/{company_id}/uploads/generate-url (signed GCS v4 PUT URL)
   2. PUT the raw file bytes to that signed URL
   3. Client-side parse the CSV into JSON records
   4. POST /api/companies/{company_id}/records/merge with those records
@@ -65,9 +65,9 @@ def run_one(path: Path) -> dict:
 
     # Step 1 — signed URL generation (mirrors uploadRealFile's first fetch)
     gen_res = requests.post(
-        f"{BASE_URL}/api/upload/generate-url",
+        f"{BASE_URL}/api/companies/{company_id}/uploads/generate-url",
         headers={**ROLE_HEADER, "Content-Type": "application/json"},
-        json={"company_id": company_id, "filename": path.name, "content_type": "text/csv"},
+        json={"filename": path.name, "content_type": "text/csv"},
         timeout=TIMEOUT,
     )
     result["generate_url_status"] = gen_res.status_code

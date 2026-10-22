@@ -86,6 +86,43 @@ End users do not need to install the software locally. MedReachAI is a web-based
 
 ---
 
+### Local Firebase authentication and NLP queries
+
+Copy the settings from `.env.example` into your local `.env`, then start the
+emulators with `firebase emulators:start --project medreachai-679aa`.
+`FIREBASE_PROJECT_ID` (Admin SDK), `VITE_FIREBASE_PROJECT_ID` (web SDK), and the
+CLI project must match. `FIREBASE_AUTH_EMULATOR_HOST` is `127.0.0.1:9099`
+without a URL scheme; the web SDK emulator URL includes `http://`.
+
+Create an email/password test user in the Emulator UI at `http://127.0.0.1:4000`,
+then sign in through the React login screen with those credentials. The role
+picker previews UI roles only; it does not grant Firebase custom claims.
+The NLP request waits for Firebase session restoration, obtains the current
+user's ID token, and sends `Authorization: Bearer <TOKEN>`. The endpoint requires
+a verified identity, not an `X-User-Role` header. Signed-out users must sign in.
+
+Restart FastAPI and Vite after changing environment variables. The web Auth
+emulator is enabled only for Vite development builds unless explicitly disabled
+with `VITE_USE_AUTH_EMULATOR=false`. Production builds require
+`VITE_FIREBASE_API_KEY` and must not configure `FIREBASE_AUTH_EMULATOR_HOST`.
+Cloud Run removes emulator environment variables before initializing the SDK.
+
+Run the optional live emulator regression with
+`MEDREACH_TEST_AUTH_EMULATOR=1 python -m pytest -q test_nlp_query.py`
+(PowerShell: set `$env:MEDREACH_TEST_AUTH_EMULATOR = '1'` first). It creates and
+deletes a temporary emulator user and verifies an actual emulator ID token.
+
+### Upload URL endpoints
+
+* `POST /api/uploads/generate-signed-url` (alias: `/api/upload/generate-url`)
+  uses a Firebase bearer token and returns `signed_url`, `object_name`, and
+  `expires_in` for owner-scoped CSV processing. Local E2E mode retains its
+  development-only, loopback-restricted upload flow.
+* `POST /api/companies/{company_id}/uploads/generate-url` uses `X-User-Role`
+  (Editor or above) and returns `upload_id`, `upload_url`, and `storage_path`.
+  The request body contains `filename` and optional `content_type`; the company
+  comes from the URL. In emulator mode, the upload URL targets a local receiver.
+
 ## 📜 License
 This project is licensed under the **MIT License**. This permits open use, modification, and distribution, which is appropriate given our use of open-source libraries like scikit-learn and Pandas.
 
