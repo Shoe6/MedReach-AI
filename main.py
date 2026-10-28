@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from firebase_admin import storage
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Header, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import google.auth
@@ -66,8 +66,13 @@ app.include_router(nlp_query_router)
 
 ADMIN_ROLES = frozenset({"admin", "super-admin"})
 EDITOR_ROLES = frozenset({"editor", "admin", "super-admin"})
+VIEWER_ROLES = frozenset({"viewer"}) | EDITOR_ROLES
 PROCESSING_ROLES = ("editor", "admin", "super-admin")
 require_authenticated_editor = require_role(PROCESSING_ROLES)
+# Role checks are driven by the `role` custom claim of the verified Firebase ID token.
+require_admin = require_role(ADMIN_ROLES)
+require_editor_or_above = require_role(EDITOR_ROLES)
+require_viewer_or_above = require_role(VIEWER_ROLES)
 FIRESTORE_PAGE_SIZE = 500
 UPLOAD_BUCKET = "medreach-ai-uploads"
 LOCAL_E2E_MODE = os.getenv("MEDREACH_E2E_LOCAL_MODE") == "1"
@@ -103,7 +108,8 @@ def _local_e2e_identity(request: Request) -> dict[str, str]:
 
 
 if LOCAL_E2E_MODE:
-    app.dependency_overrides[require_authenticated_editor] = _local_e2e_identity
+    for _dependency in (require_authenticated_editor, require_admin, require_editor_or_above, require_viewer_or_above):
+        app.dependency_overrides[_dependency] = _local_e2e_identity
 
 
 class _InMemoryJobSnapshot:
@@ -173,26 +179,7 @@ def _iam_signing_kwargs() -> dict:
     return {"service_account_email": credentials.service_account_email, "access_token": credentials.token}
 
 
-def require_admin(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
-    """Ensure the request is made by an admin-equivalent role."""
-    normalized = (x_user_role or "").strip().lower()
-    if normalized not in ADMIN_ROLES:
-        raise HTTPException(
-            status_code=403,
-            detail="Admin role required for this operation. Set X-User-Role to admin.",
-        )
-    return normalized
 
-
-def require_editor_or_above(x_user_role: str | None = Header(default=None, alias="X-User-Role")) -> str:
-    """Block read-only Viewer roles from data modification/export/cleaning operations."""
-    normalized = (x_user_role or "").strip().lower()
-    if normalized not in EDITOR_ROLES:
-        raise HTTPException(
-            status_code=403,
-            detail="Editor role or higher required for this operation. Viewers are read-only.",
-        )
-    return normalized
 
 async def validate_csv_upload(file: UploadFile) -> None:
     """Validate CSV uploads before writing them to storage."""
@@ -246,7 +233,7 @@ async def health_check():
         return {"status": "unhealthy", "error": str(e)}
 
 
-@app.get("/api/dashboard/summary")
+@app.get("/api/dashboard/summary", dependencies=[Depends(require_viewer_or_above)])
 async def dashboard_summary():
     """
     Aggregate Firestore data into summary metrics for the dashboard cards.
@@ -669,13 +656,13 @@ SCRUBBING_SESSIONS_DATA = [
 ]
 
 
-@app.get("/api/scrubbing-sessions")
+@app.get("/api/scrubbing-sessions", dependencies=[Depends(require_viewer_or_above)])
 async def list_scrubbing_sessions():
     """Return all scrubbing session metadata."""
     return {"sessions": SCRUBBING_SESSIONS_DATA}
 
 
-@app.get("/api/scrubbing-sessions/{session_id}/pdf")
+@app.get("/api/scrubbing-sessions/{session_id}/pdf", dependencies=[Depends(require_viewer_or_above)])
 async def download_session_pdf(session_id: str):
     """Generate and stream a ReportLab PDF audit report for a scrubbing session."""
     session = next((s for s in SCRUBBING_SESSIONS_DATA if s["id"] == session_id), None)
@@ -939,7 +926,7 @@ async def upload_company_file(
     }
 
 
-@app.get("/api/companies/{company_id}/dashboard_metrics")
+@app.get("/api/companies/{company_id}/dashboard_metrics", dependencies=[Depends(require_viewer_or_above)])
 async def get_company_dashboard_metrics(company_id: str):
     """Score processed records, falling back to legacy upload metadata when absent.
 
@@ -1005,13 +992,13 @@ async def get_company_dashboard_metrics(company_id: str):
     }
 
 
-@app.get("/api/companies/{company_name}/records")
+@app.get("/api/companies/{company_name}/records", dependencies=[Depends(require_viewer_or_above)])
 async def get_company_records(company_name: str):
     """Return an empty records collection for the company dashboard."""
     return {"company_name": company_name, "records": []}
 
 
-@app.get("/api/companies/{company_name}/provider_walkthrough")
+@app.get("/api/companies/{company_name}/provider_walkthrough", dependencies=[Depends(require_viewer_or_above)])
 async def get_company_provider_walkthrough(company_name: str):
     """Return an empty provider walkthrough collection for the dashboard."""
     return {"company_name": company_name, "records": []}
@@ -1021,9 +1008,13 @@ async def get_company_provider_walkthrough(company_name: str):
 async def invite_company_user(
     company_id: str,
     payload: InviteUserPayload,
-    admin_role: str = Depends(require_admin),
+    admin: dict = Depends(require_admin),
 ):
     """Create a tenant-scoped invitation, provision the Auth account, and send a verification email. Admin role is required."""
+    admin_role = str(admin.get("role") or "")
+    invited_role = payload.role.strip().lower()
+    if invited_role not in VIEWER_ROLES:
+        raise HTTPException(status_code=400, detail=f"Unsupported role '{payload.role}'.")
     try:
         from firebase_admin import auth
 
@@ -1033,6 +1024,7 @@ async def invite_company_user(
         except auth.EmailAlreadyExistsError:
             user_record = auth.get_user_by_email(payload.email)
 
+        auth.set_custom_user_claims(user_record.uid, {"role": invited_role})
         verification_link = auth.generate_email_verification_link(payload.email)
 
         invitation_id = str(uuid4())
@@ -1059,9 +1051,10 @@ async def invite_company_user(
 async def delete_company_dataset(
     company_id: str,
     upload_id: str,
-    admin_role: str = Depends(require_admin),
+    admin: dict = Depends(require_admin),
 ):
     """Soft-delete a dataset upload. Admin role is required."""
+    admin_role = str(admin.get("role") or "")
     try:
         upload_ref = db.collection("companies").document(company_id).collection("uploads").document(upload_id)
         snapshot = upload_ref.get()
@@ -1086,9 +1079,10 @@ async def delete_company_dataset(
 async def update_company_billing_plan(
     company_id: str,
     payload: BillingPlanUpdatePayload,
-    admin_role: str = Depends(require_admin),
+    admin: dict = Depends(require_admin),
 ):
     """Update a company's billing plan. Admin role is required."""
+    admin_role = str(admin.get("role") or "")
     try:
         company_ref = db.collection("companies").document(company_id)
         company_ref.set(
@@ -1200,7 +1194,7 @@ async def approve_low_severity_flags_endpoint(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/companies/{company_id}/export_data")
+@app.get("/api/companies/{company_id}/export_data", dependencies=[Depends(require_viewer_or_above)])
 async def export_company_data(
     company_id: str,
     page_size: int = Query(FIRESTORE_PAGE_SIZE, ge=1, le=1000),

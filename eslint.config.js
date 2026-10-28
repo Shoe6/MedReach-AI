@@ -30,6 +30,7 @@ export default [
       ...reactPlugin.configs.recommended.rules,
       ...reactHooks.configs.recommended.rules,
       'react/react-in-jsx-scope': 'off',        // not needed with React 17+
+      'no-undef': 'off',                         // tsc already reports undefined identifiers (and knows DOM globals)
       'react/prop-types': 'off',                 // TypeScript handles this
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],

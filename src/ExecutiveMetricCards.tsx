@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, ReactNode } from 'react'
+import { apiFetch } from './apiClient'
 
 // ─── COLOR PALETTE (matches App.tsx) ──────────────────────────────────────────
 const C = {
@@ -115,7 +116,7 @@ export function ExecutiveMetricCards({
     setLoading(true)
     setError(null)
     try {
-      const response = await globalThis.fetch(
+      const response = await apiFetch(
         `${apiBaseUrl}/api/companies/${encodeURIComponent(companyId)}/dashboard_metrics`
       )
 

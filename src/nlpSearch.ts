@@ -1,16 +1,15 @@
 import { getFirebaseAuth } from './firebase'
+import { apiFetch } from './apiClient'
 
 export class NLPAuthenticationError extends Error {}
 
 export async function searchDataset(baseUrl: string, query: string, datasetId: string) {
-  let token: string
   try {
     const auth = getFirebaseAuth()
     await auth.authStateReady()
     if (!auth.currentUser) {
       throw new NLPAuthenticationError('Sign in with your Firebase account before running a query.')
     }
-    token = await auth.currentUser.getIdToken()
   } catch (error) {
     if (error instanceof NLPAuthenticationError) throw error
     throw new NLPAuthenticationError(
@@ -18,9 +17,9 @@ export async function searchDataset(baseUrl: string, query: string, datasetId: s
     )
   }
 
-  return globalThis.fetch(`${baseUrl}/api/dataset/nlp-search`, {
+  return apiFetch(`${baseUrl}/api/dataset/nlp-search`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, dataset_id: datasetId }),
   })
 }

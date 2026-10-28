@@ -29,7 +29,7 @@ def test_dashboard_metrics_returns_mocked_aggregates() -> None:
     )
 
     with patch("main.db", mocked_db):
-        response = client.get("/api/companies/acme/dashboard_metrics")
+        response = client.get("/api/companies/acme/dashboard_metrics", headers={"X-User-Role": "viewer"})
 
     assert response.status_code == 200
     assert response.json() == {
@@ -81,7 +81,7 @@ def test_dashboard_scores_processed_records_including_privacy() -> None:
         MagicMock(to_dict=MagicMock(return_value=record)) for record in records
     ]
     with patch("main.db", mocked_db):
-        response = client.get("/api/companies/acme/dashboard_metrics")
+        response = client.get("/api/companies/acme/dashboard_metrics", headers={"X-User-Role": "viewer"})
     assert response.status_code == 200
     assert response.json()["total_healthcare_professionals"] == 2
     assert response.json()["data_health_score"] == 90

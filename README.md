@@ -101,6 +101,12 @@ The NLP request waits for Firebase session restoration, obtains the current
 user's ID token, and sends `Authorization: Bearer <TOKEN>`. The endpoint requires
 a verified identity, not an `X-User-Role` header. Signed-out users must sign in.
 
+All other `/api/**` calls (except `/api/health`) go through `src/apiClient.ts`, which
+attaches the same ID token. The backend authorizes using the token's `role` custom
+claim (`viewer`, `editor`, `admin`, `super-admin`); `X-User-Role` is no longer honored.
+Assign a role with `python set_user_role.py <email> <role>` (invited users get their
+claim automatically), then sign out and back in to refresh the token.
+
 Restart FastAPI and Vite after changing environment variables. The web Auth
 emulator is enabled only for Vite development builds unless explicitly disabled
 with `VITE_USE_AUTH_EMULATOR=false`. Production builds require

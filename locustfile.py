@@ -33,6 +33,15 @@ pipelines can gate on it directly.
 
 The target upload size (default 50 MB) can be overridden for quick smoke
 tests via the ``LOCUST_CSV_TARGET_BYTES`` environment variable.
+
+Authentication
+--------------
+The API requires a Firebase ID token for a user with an ``editor`` (or higher)
+``role`` claim. Provide either ``TEST_FIREBASE_TOKEN`` or
+``TEST_FIREBASE_EMAIL`` + ``TEST_FIREBASE_PASSWORD`` (plus
+``FIREBASE_AUTH_EMULATOR_HOST`` or ``FIREBASE_WEB_API_KEY``); see
+``firebase_test_token.py``. Use email/password for runs longer than an hour so
+the token is refreshed automatically.
 """
 
 from __future__ import annotations
@@ -42,6 +51,8 @@ import os
 import uuid
 
 from locust import HttpUser, between, events, task
+
+from firebase_test_token import auth_headers, get_test_token
 
 TARGET_FILE_SIZE_BYTES = int(os.environ.get("LOCUST_CSV_TARGET_BYTES", 50 * 1024 * 1024))
 SUCCESS_RATE_TARGET = 0.99
@@ -101,7 +112,7 @@ class ScrubbingPipelineUser(HttpUser):
     @task
     def upload_and_scrub_csv(self) -> None:
         files = {"file": ("providers_50mb.csv", _CSV_PAYLOAD, "text/csv")}
-        headers = {"X-User-Role": "editor"}
+        headers = auth_headers()  # cached; re-signs in shortly before the ID token expires
 
         with self.client.post(
             f"/api/companies/{self.company_id}/upload_file",
@@ -123,6 +134,12 @@ class ScrubbingPipelineUser(HttpUser):
                 response.failure("Scrubbing pipeline returned zero processed rows")
                 return
             response.success()
+
+
+@events.test_start.add_listener
+def _verify_credentials(environment, **kwargs):
+    """Fail fast before generating load if no valid test token can be obtained."""
+    get_test_token()
 
 
 @events.quitting.add_listener

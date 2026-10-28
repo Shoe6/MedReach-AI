@@ -34,14 +34,14 @@ def verify_firebase_token(
 
 def require_role(allowed_roles: Iterable[str]):
     """Return a dependency that enforces the decoded token's `role` claim is in `allowed_roles`."""
-    allowed = frozenset(allowed_roles)
+    allowed = frozenset(role.strip().lower() for role in allowed_roles)
 
     def _check_role(token: dict = Depends(verify_firebase_token)) -> dict:
-        role = token.get("role")
+        role = str(token.get("role") or "").strip().lower()
         if role not in allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Role '{role}' is not permitted to access this resource.",
+                detail=f"Role '{role or 'none'}' is not permitted to access this resource.",
             )
         return token
 
@@ -52,6 +52,6 @@ def require_role(allowed_roles: Iterable[str]):
 #
 # from auth import require_role
 #
-# @app.get("/api/data", dependencies=[Depends(require_role(["Admin", "Super Admin"]))])
+# @app.get("/api/data", dependencies=[Depends(require_role(["admin", "super-admin"]))])
 # def get_data():
 #     ...

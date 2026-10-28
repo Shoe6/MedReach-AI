@@ -5,9 +5,11 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from main import app
+from main import app, require_viewer_or_above
 from database import db
 
+# Standalone script: bypass token verification for the viewer-level dependency.
+app.dependency_overrides[require_viewer_or_above] = lambda: {"uid": "e2e-script", "role": "viewer"}
 client = TestClient(app)
 
 # Create a test company with export data

@@ -1,10 +1,13 @@
 import csv
 import json
+import os
 from pathlib import Path
 
 import requests
 
-SERVER_URL = "http://127.0.0.1:8000"
+from firebase_test_token import auth_headers
+
+SERVER_URL = os.environ.get("PIPELINE_SERVER_URL", "http://127.0.0.1:8000")
 COMPANY_ID = "functional-test-clinic"
 
 
@@ -43,6 +46,7 @@ if __name__ == "__main__":
         valid_response = requests.post(
             f"{SERVER_URL}/api/companies/{COMPANY_ID}/upload_file",
             files={"file": (valid_path.name, valid_file.read(), "text/csv")},
+            headers=auth_headers(),
             timeout=180,
         )
 
@@ -55,6 +59,7 @@ if __name__ == "__main__":
         corrupt_response = requests.post(
             f"{SERVER_URL}/api/companies/{COMPANY_ID}/upload_file",
             files={"file": (corrupt_path.name, corrupt_file.read(), "text/csv")},
+            headers=auth_headers(),
             timeout=180,
         )
 

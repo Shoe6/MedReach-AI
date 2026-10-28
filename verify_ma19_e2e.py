@@ -7,6 +7,7 @@ import io
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from firebase_test_token import auth_headers
 from main import app
 
 client = TestClient(app)
@@ -32,6 +33,7 @@ company_id = f"healthcare-demo-{uuid4()}"
 response = client.post(
     f"/api/companies/{company_id}/upload_file",
     files={"file": ("healthcare_data.csv", healthcare_csv, "text/csv")},
+    headers=auth_headers(),
 )
 
 assert response.status_code == 201, f"Upload failed with status {response.status_code}"

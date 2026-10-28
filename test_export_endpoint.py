@@ -8,7 +8,7 @@ from main import app
 from database import db
 
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-User-Role": "viewer"})
 
 
 def test_export_data_returns_all_stored_records():

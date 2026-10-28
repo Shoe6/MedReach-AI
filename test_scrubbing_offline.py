@@ -158,7 +158,6 @@ def test_authenticated_gcs_processing_jobs_are_owner_scoped():
             unauthenticated_alias = await client.post(
                 "/api/upload/generate-url",
                 json={"filename": "providers.csv"},
-                headers={"X-User-Role": "editor"},
             )
             assert unauthenticated_alias.status_code == 401
 

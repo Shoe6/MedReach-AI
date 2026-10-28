@@ -7,9 +7,8 @@ import ExecutiveMetricCards from './ExecutiveMetricCards'
 import RecordDetailDashboard from './RecordDetailDashboard'
 import { contactFlags, duplicateFlags, hasReviewField, npiOutcome, outlierFlags, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
 import { NLPAuthenticationError, searchDataset } from './nlpSearch'
+import { API_BASE_URL, apiFetch } from './apiClient'
 
-// Backend base URL — empty string means calls are relative (proxied via Firebase Hosting rewrites in prod)
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
 
 // Carries the HTTP status code alongside a fetch failure so callers can branch on 403/404/etc.
 class HttpError extends Error {
@@ -903,7 +902,7 @@ function useDashboardStats() {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(`${API_BASE_URL}/api/dashboard/summary`)
+      const res = await apiFetch(`${API_BASE_URL}/api/dashboard/summary`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json: DashboardStats = await res.json()
       setData(json)
@@ -1189,7 +1188,7 @@ function useProviderWalkthrough(companyId: string) {
 
       for (const endpoint of endpoints) {
         try {
-          const response = await fetch(endpoint)
+          const response = await apiFetch(endpoint)
           if (!response.ok) continue
 
           const payload = await response.json()
@@ -1239,9 +1238,9 @@ function formatUsd(value: number | null): string {
 // Bulk-approves all Low-severity flags for a company via Firestore batched writes (≤500 docs/batch).
 async function approveLowSeverityFlags(companyId: string): Promise<{ approved_count: number; batch_count: number } | null> {
   try {
-    const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/flags/approve-low-severity`, {
+    const response = await apiFetch(`${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/flags/approve-low-severity`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-User-Role': 'editor' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
     })
     if (!response.ok) return null
@@ -1624,7 +1623,7 @@ function useExportedRecords(companyId: string) {
         let cursor: string | undefined
         do {
           const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
-          const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/${companyId}/export_data${query}`)
+          const response = await apiFetch(`${API_BASE_URL}/api/companies/${companyId}/export_data${query}`)
           if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
           if ((response.headers.get('content-type') || '').includes('json')) {
             const data = await response.json() as ExportResponse
@@ -1704,9 +1703,9 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
     const isXlsx = file.name.toLowerCase().endsWith('.xlsx')
 
     try {
-      const urlRes = await fetch(`${API_BASE_URL}/api/companies/demo-company/uploads/generate-url`, {
+      const urlRes = await apiFetch(`${API_BASE_URL}/api/companies/demo-company/uploads/generate-url`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename: file.name, content_type: file.type || (isXlsx ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv') }),
       })
       if (!urlRes.ok) throw new HttpError(urlRes.status, (await urlRes.text()) || 'Could not obtain an upload URL')
@@ -1719,9 +1718,9 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
       const recordsToUpload = isXlsx
         ? parseXlsxRecords(await file.arrayBuffer())
         : parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
-      const mergeResponse = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/records/merge`, {
+      const mergeResponse = await apiFetch(`${API_BASE_URL}/api/companies/demo-company/records/merge`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ records: recordsToUpload }),
       })
       if (!mergeResponse.ok) throw new HttpError(mergeResponse.status, await mergeResponse.text())
@@ -2712,7 +2711,7 @@ function DataReviewScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) =
         let cursor: string | undefined
         do {
           const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
-          const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
+          const response = await apiFetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
           if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
           if ((response.headers.get('content-type') || '').includes('json')) {
             const data = await response.json() as ExportResponse
@@ -3912,7 +3911,7 @@ function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => voi
         let cursor: string | undefined
         do {
           const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
-          const response = await globalThis.fetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
+          const response = await apiFetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
           if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
           if ((response.headers.get('content-type') || '').includes('json')) {
             const data = await response.json() as ExportResponse
@@ -4529,9 +4528,9 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const logToFirestore = async (format: string, filename: string, size: string, records: number) => {
     setLogStatus('logging')
     try {
-      await fetch(`${API_BASE_URL}/api/export/log`, {
+      await apiFetch(`${API_BASE_URL}/api/export/log`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ format, fileName: filename, size, role, records, timestamp: new Date().toISOString() }),
       })
       setLogStatus('ok')
@@ -4859,9 +4858,9 @@ function TeamScreen({ showToast }: { showToast: (type: ToastType, message: strin
     }
     setInviting(true)
     try {
-      const res = await fetch(`${API_BASE_URL}/api/companies/acme/users/invite`, {
+      const res = await apiFetch(`${API_BASE_URL}/api/companies/acme/users/invite`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-User-Role': role },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: inviteEmail, role: inviteRole, invited_by: role }),
       })
       if (!res.ok) {
@@ -4992,7 +4991,7 @@ function ScrubbingSessionsScreen() {
     setDownloading(session.id)
     setDlError(null)
     try {
-      const res = await fetch(`${API_BASE_URL}/api/scrubbing-sessions/${session.id}/pdf`)
+      const res = await apiFetch(`${API_BASE_URL}/api/scrubbing-sessions/${session.id}/pdf`)
       if (!res.ok) throw new Error(`Server returned ${res.status}`)
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)
