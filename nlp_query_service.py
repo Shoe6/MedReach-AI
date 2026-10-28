@@ -113,6 +113,12 @@ class LLMConfigurationError(NLPQueryError):
     status_code = 503
 
 
+class LLMBillingError(NLPQueryError):
+    """The LLM provider rejected the request for billing/quota reasons (HTTP 402)."""
+
+    status_code = 402
+
+
 class LLMServiceError(NLPQueryError):
     status_code = 502
 
@@ -269,6 +275,16 @@ def translate_to_pandas_query(
     except NLPQueryError:
         raise
     except Exception as exc:
+        # google-genai (and most provider SDKs) carry the real upstream HTTP status
+        # on a `.code` attribute (see google.genai.errors.APIError) — preserve a 402
+        # Payment Required distinctly so the frontend can show a billing-specific
+        # message instead of a generic server error.
+        if getattr(exc, "code", None) == 402:
+            logger.warning("LLM provider '%s' rejected request for billing reasons", provider_name)
+            raise LLMBillingError(
+                "The AI provider rejected this request due to a billing or quota "
+                "issue. Please check the API account's billing status."
+            ) from exc
         logger.exception("LLM provider '%s' failed to translate query", provider_name)
         raise LLMServiceError(
             f"The language model service failed to process the request: {exc}"

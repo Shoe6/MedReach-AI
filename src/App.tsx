@@ -3597,7 +3597,7 @@ interface NLPQueryResponse {
   error?: string
 }
 
-type QueryErrorKind = 'auth' | 'not-understood' | 'server' | 'network'
+type QueryErrorKind = 'auth' | 'not-understood' | 'server' | 'network' | 'billing'
 
 function QueryScreen() {
   const [query, setQuery] = useState('')
@@ -3621,6 +3621,10 @@ function QueryScreen() {
 
       if (response.status === 401 || response.status === 403) {
         setError({ kind: 'auth', message: body?.error || 'You are not authorized to run natural-language queries.' })
+        return
+      }
+      if (response.status === 402) {
+        setError({ kind: 'billing', message: body?.error || 'The AI provider rejected this request due to a billing or quota issue.' })
         return
       }
       if (!response.ok || !body?.success) {
@@ -3702,6 +3706,7 @@ function QueryScreen() {
                 {error.kind === 'not-understood' && "Couldn't understand that question"}
                 {error.kind === 'server' && 'Query failed'}
                 {error.kind === 'network' && 'Connection error'}
+                {error.kind === 'billing' && 'AI provider billing issue'}
               </p>
               <p className="text-[12px]" style={{ color: C.darkText }}>{error.message}</p>
             </div>

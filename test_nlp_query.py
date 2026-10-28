@@ -191,6 +191,23 @@ def test_llm_failure_returns_502(client, dataset_dir, monkeypatch):
     assert _search(client).status_code == 502
 
 
+def test_llm_billing_error_returns_402(client, dataset_dir, monkeypatch):
+    """A Gemini billing/quota rejection (HTTP 402) must be passed through distinctly,
+    not swallowed into the generic 502 'service failed' bucket."""
+
+    class FakeBillingError(Exception):
+        code = 402
+
+    def boom(*_args):
+        raise FakeBillingError("Payment Required")
+
+    monkeypatch.setitem(svc.LLM_PROVIDERS, "gemini", boom)
+    monkeypatch.setenv("NLP_LLM_PROVIDER", "gemini")
+    resp = _search(client)
+    assert resp.status_code == 402
+    assert resp.json()["success"] is False
+
+
 def test_missing_api_key_returns_503(client, dataset_dir, monkeypatch):
     monkeypatch.setenv("NLP_LLM_PROVIDER", "gemini")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
