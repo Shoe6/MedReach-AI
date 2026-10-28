@@ -180,3 +180,10 @@ body {
   border-radius: 2px;
   padding: 0 2px;
 }
+
+/* Firebase emulator warning banner (dev-only) intercepts clicks on anything
+   beneath it, including the sidebar's bottom-pinned collapse/logout controls. */
+.firebase-emulator-warning {
+  pointer-events: none;
+}
+
