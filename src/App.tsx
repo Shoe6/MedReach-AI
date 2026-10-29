@@ -553,11 +553,11 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
 
   return (
     <div
-      className="sidebar-scroll flex flex-col h-screen shrink-0 transition-all duration-200"
+      className="flex flex-col h-screen shrink-0 transition-all duration-200"
       style={{ width: collapsed ? 60 : 220, background: isSuperAdmin ? '#3B0764' : C.navy, color: 'white', position: 'sticky', top: 0 }}
     >
       {/* Logo */}
-      <div className="flex items-center gap-3 px-4 py-5 border-b border-white/10">
+      <div className="flex items-center gap-3 px-4 py-5 border-b border-white/10 shrink-0">
         <div className="w-7 h-7 rounded-[6px] flex items-center justify-center shrink-0" style={{ background: isSuperAdmin ? '#9333EA' : C.teal }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
@@ -571,8 +571,9 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
         )}
       </div>
 
-      {/* Nav items */}
-      <nav className="flex-1 py-3 px-2 flex flex-col gap-0.5">
+      {/* Nav items — scrolls independently so the logo header and footer
+          (profile/logout/collapse) stay pinned on shorter viewports. */}
+      <nav className="sidebar-scroll flex-1 min-h-0 overflow-y-auto py-3 px-2 flex flex-col gap-0.5">
         {navItems.map(item => {
           const active = current === item.id
           const badge = navBadges[item.id]
@@ -605,7 +606,7 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
       </nav>
 
       {/* User + role chip + collapse */}
-      <div className="border-t border-white/10 p-3">
+      <div className="border-t border-white/10 p-3 shrink-0">
         {!collapsed && (
           <div className="flex items-center gap-2 mb-2 px-1">
             <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
@@ -3596,7 +3597,7 @@ interface NLPQueryResponse {
   error?: string
 }
 
-type QueryErrorKind = 'auth' | 'not-understood' | 'server' | 'network'
+type QueryErrorKind = 'auth' | 'not-understood' | 'server' | 'network' | 'billing'
 
 function QueryScreen() {
   const [query, setQuery] = useState('')
@@ -3620,6 +3621,10 @@ function QueryScreen() {
 
       if (response.status === 401 || response.status === 403) {
         setError({ kind: 'auth', message: body?.error || 'You are not authorized to run natural-language queries.' })
+        return
+      }
+      if (response.status === 402) {
+        setError({ kind: 'billing', message: body?.error || 'The AI provider rejected this request due to a billing or quota issue.' })
         return
       }
       if (!response.ok || !body?.success) {
@@ -3701,6 +3706,7 @@ function QueryScreen() {
                 {error.kind === 'not-understood' && "Couldn't understand that question"}
                 {error.kind === 'server' && 'Query failed'}
                 {error.kind === 'network' && 'Connection error'}
+                {error.kind === 'billing' && 'AI provider billing issue'}
               </p>
               <p className="text-[12px]" style={{ color: C.darkText }}>{error.message}</p>
             </div>
