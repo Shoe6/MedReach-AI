@@ -124,3 +124,49 @@ def test_role_claim_in_verified_token_controls_access(monkeypatch, claims, path,
         path, headers={"Authorization": "Bearer t", "X-User-Role": "admin"}, **kwargs
     )
     assert response.status_code == expected
+
+
+@pytest.mark.parametrize(
+    "path", ["/api/dashboard/summary", "/api/companies/acme/dashboard_metrics"]
+)
+@pytest.mark.parametrize("claims", [{}, {"role": "viewer"}, {"role": "unknown"}])
+def test_dashboard_metrics_only_require_authenticated_user(monkeypatch, path, claims):
+    import main
+
+    class _EmptyCollection:
+        def where(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def stream(self, *args, **kwargs):
+            return iter(())
+
+        def document(self, *args, **kwargs):
+            return self
+
+        def collection(self, *args, **kwargs):
+            return self
+
+        def get(self, *args, **kwargs):
+            class _Snap:
+                exists = False
+
+                def to_dict(self):
+                    return {}
+
+            return _Snap()
+
+    class _EmptyDb:
+        def collection(self, *args, **kwargs):
+            return _EmptyCollection()
+
+        def collection_group(self, *args, **kwargs):
+            return _EmptyCollection()
+
+    monkeypatch.setattr(main, "db", _EmptyDb())
+    monkeypatch.setattr(firebase_auth, "verify_id_token", lambda _token: {"uid": "u1", **claims})
+    token_header = " ".join(["Bearer", "valid-test-token"])
+    response = client.get(path, headers={"Authorization": token_header})
+    assert response.status_code == 200, response.text

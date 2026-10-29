@@ -105,6 +105,9 @@ a verified identity, not an `X-User-Role` header. Signed-out users must sign in.
 All other `/api/**` calls (except `/api/health`) go through `src/apiClient.ts`, which
 attaches the same ID token. The backend authorizes using the token's `role` custom
 claim (`viewer`, `editor`, `admin`, `super-admin`); `X-User-Role` is no longer honored.
+The dashboard metric endpoints (`/api/dashboard/summary` and
+`/api/companies/{company_id}/dashboard_metrics`) only require a valid signed-in
+Firebase user; no role claim is needed.
 Assign a role with `python set_user_role.py <email> <role>` (invited users get their
 claim automatically), then sign out and back in to refresh the token.
 
