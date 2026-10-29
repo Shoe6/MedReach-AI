@@ -88,13 +88,14 @@ End users do not need to install the software locally. MedReachAI is a web-based
 
 ### Local Firebase authentication and NLP queries
 
-Copy the settings from `.env.example` into your local `.env`, then start the
-emulators with `firebase emulators:start --project medreachai-679aa`.
-`FIREBASE_PROJECT_ID` (Admin SDK), `VITE_FIREBASE_PROJECT_ID` (web SDK), and the
-CLI project must match. `FIREBASE_AUTH_EMULATOR_HOST` is `127.0.0.1:9099`
-without a URL scheme; the web SDK emulator URL includes `http://`.
+Copy the settings from `.env.example` into your local `.env`. Authentication
+always uses the live `medreachai-679aa` project, including local backend runs.
+The Admin SDK project is pinned to that ID and removes
+`FIREBASE_AUTH_EMULATOR_HOST` after loading environment settings. Tokens must have
+the production audience, issuer, and a valid Google signature; unsigned emulator
+tokens are rejected. Firestore and Storage emulation remain independent.
 
-Create an email/password test user in the Emulator UI at `http://127.0.0.1:4000`,
+Create an email/password test user in the Firebase Authentication console,
 then sign in through the React login screen with those credentials. The role
 picker previews UI roles only; it does not grant Firebase custom claims.
 The NLP request waits for Firebase session restoration, obtains the current
@@ -107,16 +108,18 @@ claim (`viewer`, `editor`, `admin`, `super-admin`); `X-User-Role` is no longer h
 Assign a role with `python set_user_role.py <email> <role>` (invited users get their
 claim automatically), then sign out and back in to refresh the token.
 
-Restart FastAPI and Vite after changing environment variables. The web Auth
-emulator is enabled only for Vite development builds unless explicitly disabled
-with `VITE_USE_AUTH_EMULATOR=false`. Production builds require
-`VITE_FIREBASE_API_KEY` and must not configure `FIREBASE_AUTH_EMULATOR_HOST`.
-Cloud Run removes emulator environment variables before initializing the SDK.
+Restart FastAPI and Vite after changing environment variables. Set
+`VITE_FIREBASE_PROJECT_ID=medreachai-679aa`, `VITE_USE_AUTH_EMULATOR=false`, and
+`VITE_FIREBASE_API_KEY` for both development and production. Web Auth defaults to
+live authentication; explicitly enabling its emulator is only useful for isolated
+frontend tests, since this backend rejects emulator tokens. The fetch helper waits
+for session restoration and fails explicitly without sending a request when no
+user/token is available or token retrieval fails.
 
 Run the optional live emulator regression with
 `MEDREACH_TEST_AUTH_EMULATOR=1 python -m pytest -q test_nlp_query.py`
 (PowerShell: set `$env:MEDREACH_TEST_AUTH_EMULATOR = '1'` first). It creates and
-deletes a temporary emulator user and verifies an actual emulator ID token.
+deletes a temporary emulator user and verifies that the backend rejects its ID token.
 
 ### Upload URL endpoints
 

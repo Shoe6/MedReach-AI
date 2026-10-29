@@ -30,6 +30,7 @@ function loadFirebase(env) {
 test('development connects Auth to the emulator once and shares the configured project', () => {
   const { getFirebaseAuth, calls, auth } = loadFirebase({
     DEV: true,
+    VITE_USE_AUTH_EMULATOR: 'true',
     VITE_FIREBASE_PROJECT_ID: 'local-project',
   })
   assert.equal(getFirebaseAuth(), auth)
@@ -57,10 +58,9 @@ test('production without a web API key fails explicitly', () => {
   assert.deepEqual(calls, [])
 })
 
-test('local developers can explicitly opt out of the Auth emulator', () => {
+test('local development uses live Auth by default', () => {
   const { getFirebaseAuth, calls } = loadFirebase({
     DEV: true,
-    VITE_USE_AUTH_EMULATOR: 'false',
     VITE_FIREBASE_API_KEY: 'configured-web-key',
   })
   getFirebaseAuth()

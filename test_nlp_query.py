@@ -264,8 +264,8 @@ def test_nlp_cors_preflight_accepts_authorization(host):
     os.getenv("MEDREACH_TEST_AUTH_EMULATOR") != "1",
     reason="Set MEDREACH_TEST_AUTH_EMULATOR=1 with the local Auth emulator running.",
 )
-def test_real_emulator_token_authenticates_nlp_request(dataset_dir, fake_llm):
-    host = os.environ["FIREBASE_AUTH_EMULATOR_HOST"]
+def test_real_emulator_token_is_rejected_by_production_auth(dataset_dir, fake_llm):
+    host = os.getenv("TEST_FIREBASE_AUTH_EMULATOR_HOST", "127.0.0.1:9099")
     assert host in {"127.0.0.1:9099", "localhost:9099"}
     base_url = f"http://{host}/identitytoolkit.googleapis.com/v1"
     with httpx.Client(timeout=10) as emulator:
@@ -287,8 +287,7 @@ def test_real_emulator_token_authenticates_nlp_request(dataset_dir, fake_llm):
                 json={"query": "Texas", "dataset_id": "providers.csv"},
                 headers={"Authorization": f"Bearer {token}"},
             )
-            assert response.status_code == 200, response.text
-            assert response.json()["total_matches"] == 2
+            assert response.status_code == 401, response.text
         finally:
             deleted = emulator.post(
                 f"{base_url}/accounts:delete",

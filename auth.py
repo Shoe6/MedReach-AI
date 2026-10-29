@@ -1,11 +1,12 @@
 """Firebase Auth JWT verification and role-based access control dependencies (MA-52)."""
+import os
 from typing import Iterable
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from firebase_admin import auth as firebase_auth
 
-import database  # noqa: F401  (ensures firebase_admin app is initialized)
+import database  # ensures firebase_admin app is initialized for the production project
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -19,6 +20,12 @@ def verify_firebase_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing bearer token in Authorization header.",
             headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Firebase Auth emulator mode is not permitted on this backend.",
         )
 
     try:
