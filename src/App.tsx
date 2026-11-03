@@ -36,10 +36,10 @@ const ROLE_META: Record<Role, { label: string; color: string; bg: string; descri
 
 // Which nav items each role can see
 const ROLE_NAV: Record<Role, string[]> = {
-  'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings','org-management'],
-  'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings'],
-  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','export','scrubbing-sessions'],
-  'viewer':      ['dashboard','data-review','data-heatmap','query','analytics','team','scrubbing-sessions','settings'],
+  'super-admin': ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings','org-management','notifications'],
+  'admin':       ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','financial-disclosures','analytics','export','team','audit-log','scrubbing-sessions','settings','notifications'],
+  'editor':      ['dashboard','upload','data-review','data-heatmap','query','segments','campaign-generator','analytics','export','scrubbing-sessions','notifications'],
+  'viewer':      ['dashboard','data-review','data-heatmap','query','analytics','team','scrubbing-sessions','settings','notifications'],
 }
 
 const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
@@ -121,6 +121,7 @@ type Screen =
   | 'data-review' | 'query' | 'segments' | 'campaign-generator'
   | 'compliance-review' | 'financial-disclosures' | 'analytics' | 'data-heatmap'
   | 'export' | 'team' | 'audit-log' | 'scrubbing-sessions' | 'settings' | 'org-management'
+  | 'notifications'
 
 type ToastType = 'success' | 'warning' | 'error' | 'info'
 
@@ -679,7 +680,9 @@ function TopBar({ title, onNavigate, showToast }: {
       <span className="text-[13px] font-semibold" style={{ color: C.darkText }}>{title}</span>
       <div className="flex items-center gap-4" style={{ color: C.navy }}>
         {Icon.search}
-        {Icon.bell}
+        <button onClick={() => onNavigate('notifications')} aria-label="Notifications" className="flex items-center rounded-full hover:bg-[#EBF4FA] transition-colors">
+          {Icon.bell}
+        </button>
         <div className="relative" ref={menuRef}>
           <button
             onClick={() => setMenuOpen(o => !o)}
@@ -5466,6 +5469,70 @@ function OrgManagementScreen() {
   )
 }
 
+// ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+
+interface NotificationItem {
+  id: number
+  type: 'scrub' | 'role_change' | 'export' | 'upload' | 'invite'
+  title: string
+  message: string
+  time: string
+  read: boolean
+}
+
+// Placeholder data for this iteration — not yet wired to a backend notifications feed.
+const NOTIFICATIONS: NotificationItem[] = [
+  { id: 0, type: 'scrub', title: 'Dataset scrub completed', message: 'Q2_HCP_Oncology.csv finished processing with 23 flags detected.', time: '12 min ago', read: false },
+  { id: 1, type: 'role_change', title: 'Role updated', message: "Sarah Kim's role was changed from Viewer to Editor.", time: '2 hr ago', read: false },
+  { id: 2, type: 'export', title: 'Export ready', message: 'Clean HCP CSV export has finished generating and is ready to download.', time: 'Yesterday', read: true },
+  { id: 3, type: 'invite', title: 'Invitation accepted', message: 'david@acmepharma.com accepted their invitation and joined as Editor.', time: '2 days ago', read: true },
+]
+
+const NOTIFICATION_ICONS: Record<NotificationItem['type'], ReactNode> = {
+  scrub: Icon.shield,
+  role_change: Icon.userPlus,
+  export: Icon.download,
+  upload: Icon.upload,
+  invite: Icon.userPlus,
+}
+
+function NotificationsScreen() {
+  return (
+    <div className="p-8">
+      <SectionHeader title="Notifications" subtitle="System alerts for scrubbing, exports, and team activity" />
+      {NOTIFICATIONS.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={Icon.bell}
+            title="No new notifications"
+            subtitle="You're all caught up. New alerts will appear here."
+          />
+        </Card>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {NOTIFICATIONS.map(n => (
+            <Card key={n.id} className={n.read ? 'opacity-70' : undefined}>
+              <div className="flex items-start gap-3">
+                <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: C.lightTint, color: C.corpBlue }}>
+                  {NOTIFICATION_ICONS[n.type]}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-[13px] font-bold" style={{ color: C.navy }}>{n.title}</p>
+                    {!n.read && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: C.corpBlue }} />}
+                  </div>
+                  <p className="text-[12px] mt-0.5" style={{ color: C.darkText }}>{n.message}</p>
+                  <p className="text-[11px] mt-1" style={{ color: C.midText }}>{n.time}</p>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── SCREEN TITLES ────────────────────────────────────────────────────────────
 
 const SCREEN_TITLES: Record<Screen, string> = {
@@ -5480,6 +5547,7 @@ const SCREEN_TITLES: Record<Screen, string> = {
   'scrubbing-sessions': 'Scrubbing Sessions',
   settings: 'Settings',
   'org-management': 'Organization Management',
+  notifications: 'Notifications',
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
@@ -5562,6 +5630,7 @@ export default function App() {
       case 'scrubbing-sessions': return <ScrubbingSessionsScreen />
       case 'settings': return <SettingsScreen showToast={showToast} />
       case 'org-management': return <OrgManagementScreen />
+      case 'notifications': return <NotificationsScreen />
       default: return <DashboardScreen onNavigate={navigate} />
     }
   }
