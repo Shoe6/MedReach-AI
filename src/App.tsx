@@ -643,6 +643,50 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
   )
 }
 
+// ─── GLOBAL SEARCH ───────────────────────────────────────────────────────────
+
+function GlobalSearchModal({ onClose }: { onClose: () => void }) {
+  const [query, setQuery] = useState('')
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    inputRef.current?.focus()
+    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center pt-24"
+      style={{ background: 'rgba(26,26,46,0.45)' }}
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div className="bg-white rounded-[8px] shadow-2xl border border-[#CBD5E0] w-full" style={{ maxWidth: 560 }}>
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-[#EDF2F7]">
+          <span style={{ color: C.midText }}>{Icon.search}</span>
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={e => {
+              setQuery(e.target.value)
+              // Proof-of-concept only — backend search querying will be wired in a future sprint.
+              console.log('Global search query:', e.target.value)
+            }}
+            placeholder="Search HCP records or dataset files…"
+            className="flex-1 text-[14px] outline-none bg-transparent"
+            style={{ color: C.darkText }}
+          />
+          <button onClick={onClose} aria-label="Close search" className="text-[#718096] hover:text-[#1A1A2E]">{Icon.x}</button>
+        </div>
+        <div className="px-5 py-4 text-[12px]" style={{ color: C.midText }}>
+          Search is not yet wired to live results. This is a UI proof-of-concept — backend querying will be connected in a future sprint.
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── TOP BAR ─────────────────────────────────────────────────────────────────
 
 function TopBar({ title, onNavigate, showToast }: {
@@ -651,6 +695,7 @@ function TopBar({ title, onNavigate, showToast }: {
   const { role } = useRole()
   const { user: authUser } = useAuthUser()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
   const demoUser = DEMO_USERS[role]
@@ -679,7 +724,9 @@ function TopBar({ title, onNavigate, showToast }: {
     <div className="h-12 flex items-center justify-between px-8 border-b border-[#EDF2F7] bg-white shrink-0">
       <span className="text-[13px] font-semibold" style={{ color: C.darkText }}>{title}</span>
       <div className="flex items-center gap-4" style={{ color: C.navy }}>
-        {Icon.search}
+        <button onClick={() => setSearchOpen(true)} aria-label="Search" className="flex items-center rounded-full hover:bg-[#EBF4FA] transition-colors">
+          {Icon.search}
+        </button>
         <button onClick={() => onNavigate('notifications')} aria-label="Notifications" className="flex items-center rounded-full hover:bg-[#EBF4FA] transition-colors">
           {Icon.bell}
         </button>
@@ -722,6 +769,7 @@ function TopBar({ title, onNavigate, showToast }: {
           )}
         </div>
       </div>
+      {searchOpen && <GlobalSearchModal onClose={() => setSearchOpen(false)} />}
     </div>
   )
 }
