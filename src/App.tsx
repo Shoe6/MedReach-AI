@@ -59,6 +59,16 @@ const useAuthUser = () => useContext(AuthContext)
 
 const AUTH_TOKEN_STORAGE_KEY = 'medreach_id_token'
 
+async function performLogout(onNavigate: (s: Screen) => void) {
+  try {
+    await signOut(getFirebaseAuth())
+  } catch {
+    // Clear local session state regardless of whether the network sign-out call succeeds.
+  }
+  localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY)
+  onNavigate('login')
+}
+
 function firebaseAuthErrorMessage(err: unknown): string {
   const code = (err as { code?: string } | null)?.code || ''
   switch (code) {
@@ -541,15 +551,7 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
   ) : 0
   const navBadges: Partial<Record<string, number>> = { 'data-review': dataReviewBadge }
 
-  const handleLogout = async () => {
-    try {
-      await signOut(getFirebaseAuth())
-    } catch {
-      // Clear local session state regardless of whether the network sign-out call succeeds.
-    }
-    localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY)
-    onNavigate('login')
-  }
+  const handleLogout = () => performLogout(onNavigate)
 
   return (
     <div
@@ -642,14 +644,80 @@ function Sidebar({ current, onNavigate, collapsed, onToggle }: {
 
 // ─── TOP BAR ─────────────────────────────────────────────────────────────────
 
-function TopBar({ title }: { title: string }) {
+function TopBar({ title, onNavigate, showToast }: {
+  title: string; onNavigate: (s: Screen) => void; showToast: (type: ToastType, message: string) => void
+}) {
+  const { role } = useRole()
+  const { user: authUser } = useAuthUser()
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+
+  const demoUser = DEMO_USERS[role]
+  const displayName = authUser?.displayName || authUser?.email || demoUser.name
+  const initials = authUser ? initialsFromName(displayName) : demoUser.initials
+  const meta = ROLE_META[role]
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const onClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [menuOpen])
+
+  const menuItems: { label: string; onClick: () => void; danger?: boolean }[] = [
+    { label: 'Profile', onClick: () => showToast('info', 'Profile pages are coming soon.') },
+    { label: 'Switch Role', onClick: () => showToast('info', 'Use the role switcher bar below the top navigation to preview access levels.') },
+    { label: 'Preferences', onClick: () => onNavigate('settings') },
+    { label: 'Help & Documentation', onClick: () => showToast('info', 'Help & documentation is coming soon.') },
+    { label: 'Log Out', onClick: () => performLogout(onNavigate), danger: true },
+  ]
+
   return (
     <div className="h-12 flex items-center justify-between px-8 border-b border-[#EDF2F7] bg-white shrink-0">
       <span className="text-[13px] font-semibold" style={{ color: C.darkText }}>{title}</span>
       <div className="flex items-center gap-4" style={{ color: C.navy }}>
         {Icon.search}
         {Icon.bell}
-        {Icon.user}
+        <div className="relative" ref={menuRef}>
+          <button
+            onClick={() => setMenuOpen(o => !o)}
+            aria-label="User menu"
+            aria-expanded={menuOpen}
+            className="flex items-center rounded-full hover:bg-[#EBF4FA] transition-colors"
+          >
+            {Icon.user}
+          </button>
+          {menuOpen && (
+            <div
+              className="absolute right-0 top-full mt-2 w-60 rounded-[8px] border bg-white shadow-lg z-50 overflow-hidden"
+              style={{ borderColor: C.border }}
+            >
+              <div className="flex items-center gap-2.5 px-4 py-3 border-b" style={{ borderColor: '#EDF2F7' }}>
+                <div className="w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-bold text-white shrink-0" style={{ background: C.navy }}>
+                  {initials}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[12px] font-semibold truncate" style={{ color: C.darkText }} title={displayName}>{displayName}</p>
+                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: meta.bg, color: meta.color }}>{meta.label}</span>
+                </div>
+              </div>
+              <div className="py-1">
+                {menuItems.map(item => (
+                  <button
+                    key={item.label}
+                    onClick={() => { setMenuOpen(false); item.onClick() }}
+                    className="w-full text-left px-4 py-2 text-[12px] font-medium hover:bg-[#F7FAFC] transition-colors"
+                    style={{ color: item.danger ? C.danger : C.darkText }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -5524,7 +5592,7 @@ export default function App() {
       <div className="flex h-screen overflow-hidden" style={{ background: C.pageBg }}>
         <Sidebar current={screen} onNavigate={navigate} collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          <TopBar title={SCREEN_TITLES[screen] || ''} />
+          <TopBar title={SCREEN_TITLES[screen] || ''} onNavigate={navigate} showToast={showToast} />
           {/* Role switcher bar — visible while logged in for demo purposes */}
           <div className="flex items-center gap-2 px-6 py-1.5 border-b shrink-0" style={{ background: '#F7F9FB', borderColor: '#EDF2F7' }}>
             <span className="text-[10px] font-bold" style={{ color: C.midText }}>Viewing as:</span>
