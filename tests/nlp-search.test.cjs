@@ -10,9 +10,18 @@ function loadSearch(auth, fetch) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText
   const exports = {}
+  const apiSource = readFileSync(path.join(__dirname, '../src/apiClient.ts'), 'utf8')
+    .replaceAll('import.meta.env', 'env')
+  const apiCompiled = ts.transpileModule(apiSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText
+  const apiExports = {}
+  new Function('exports', 'require', 'globalThis', 'env', apiCompiled)(
+    apiExports, () => ({ getFirebaseAuth: () => auth }), { fetch }, {},
+  )
   new Function('exports', 'require', 'globalThis', compiled)(
     exports,
-    () => ({ getFirebaseAuth: () => auth }),
+    name => name === './apiClient' ? apiExports : { getFirebaseAuth: () => auth },
     { fetch },
   )
   return exports
@@ -32,15 +41,15 @@ test('NLP requests await auth restoration and send the current Firebase ID token
     events.push('fetch')
     assert.equal(url, 'http://localhost:8010/api/dataset/nlp-search')
     assert.equal(options.method, 'POST')
-    assert.deepEqual(options.headers, {
-      'Content-Type': 'application/json',
-      Authorization: 'Bearer fresh-id-token',
+    assert.deepEqual(Object.fromEntries(options.headers), {
+      'content-type': 'application/json',
+      authorization: 'Bearer fresh-id-token',
     })
     assert.deepEqual(JSON.parse(options.body), { query: 'cardiologists', dataset_id: 'providers.csv' })
     return response
   })
   assert.equal(await searchDataset('http://localhost:8010', 'cardiologists', 'providers.csv'), response)
-  assert.deepEqual(events, ['ready', 'token', 'fetch'])
+  assert.deepEqual(events, ['ready', 'ready', 'token', 'fetch'])
 })
 
 test('signed-out users get an authentication error without sending a request', async () => {

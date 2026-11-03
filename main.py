@@ -18,7 +18,7 @@ from google.auth.transport import requests as google_auth_requests
 from google.cloud import storage as gcs_storage
 from pydantic import BaseModel
 
-from auth import require_role
+from auth import require_role, verify_firebase_token
 from database import db, USE_EMULATOR
 from data_health_score_service import calculate_data_health
 from nlp_query_router import router as nlp_query_router
@@ -73,6 +73,8 @@ require_authenticated_editor = require_role(PROCESSING_ROLES)
 require_admin = require_role(ADMIN_ROLES)
 require_editor_or_above = require_role(EDITOR_ROLES)
 require_viewer_or_above = require_role(VIEWER_ROLES)
+# Any signed-in Firebase user, regardless of role claim.
+require_authenticated_user = verify_firebase_token
 FIRESTORE_PAGE_SIZE = 500
 UPLOAD_BUCKET = "medreach-ai-uploads"
 LOCAL_E2E_MODE = os.getenv("MEDREACH_E2E_LOCAL_MODE") == "1"
@@ -233,7 +235,7 @@ async def health_check():
         return {"status": "unhealthy", "error": str(e)}
 
 
-@app.get("/api/dashboard/summary", dependencies=[Depends(require_viewer_or_above)])
+@app.get("/api/dashboard/summary", dependencies=[Depends(require_authenticated_user)])
 async def dashboard_summary():
     """
     Aggregate Firestore data into summary metrics for the dashboard cards.
@@ -926,7 +928,7 @@ async def upload_company_file(
     }
 
 
-@app.get("/api/companies/{company_id}/dashboard_metrics", dependencies=[Depends(require_viewer_or_above)])
+@app.get("/api/companies/{company_id}/dashboard_metrics", dependencies=[Depends(require_authenticated_user)])
 async def get_company_dashboard_metrics(company_id: str):
     """Score processed records, falling back to legacy upload metadata when absent.
 

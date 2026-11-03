@@ -1,7 +1,7 @@
 import { getApp, getApps, initializeApp } from 'firebase/app'
 import { connectAuthEmulator, getAuth, type Auth } from 'firebase/auth'
 
-const useEmulator = import.meta.env.DEV && import.meta.env.VITE_USE_AUTH_EMULATOR !== 'false'
+const useEmulator = import.meta.env.DEV && import.meta.env.VITE_USE_AUTH_EMULATOR === 'true'
 const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || 'medreachai-679aa'
 let authInstance: Auth | undefined
 

@@ -10,16 +10,15 @@ export async function searchDataset(baseUrl: string, query: string, datasetId: s
     if (!auth.currentUser) {
       throw new NLPAuthenticationError('Sign in with your Firebase account before running a query.')
     }
+    return await apiFetch(`${baseUrl}/api/dataset/nlp-search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, dataset_id: datasetId }),
+    })
   } catch (error) {
     if (error instanceof NLPAuthenticationError) throw error
     throw new NLPAuthenticationError(
       error instanceof Error ? error.message : 'Unable to authenticate. Please sign in again.',
     )
   }
-
-  return apiFetch(`${baseUrl}/api/dataset/nlp-search`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, dataset_id: datasetId }),
-  })
 }
