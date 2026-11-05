@@ -4,6 +4,7 @@ import { onIdTokenChanged, signInWithEmailAndPassword, signOut, type User as Fir
 import { read as readWorkbook, utils as xlsxUtils } from 'xlsx'
 import { getFirebaseAuth } from './firebase'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
+import AnalyticsDashboard from './AnalyticsDashboard'
 import RecordDetailDashboard from './RecordDetailDashboard'
 import { contactFlags, duplicateFlags, hasReviewField, npiOutcome, outlierFlags, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
 import { NLPAuthenticationError, searchDataset } from './nlpSearch'
@@ -3994,6 +3995,7 @@ function FinancialDisclosureScreen() {
 // ─── ANALYTICS ────────────────────────────────────────────────────────────────
 
 function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
+  const { companyId, companyError, authLoading, user } = useAuthUser()
   return (
     <div className="p-8">
       <SectionHeader
@@ -4001,13 +4003,13 @@ function AnalyticsScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
         subtitle="Quality trends, specialty distribution, and geographic coverage"
         actions={<Btn variant="secondary" size="sm" onClick={() => onNavigate('data-heatmap')}>View Data Heatmap</Btn>}
       />
-      <Card>
-        <EmptyState
-          icon={Icon.chart}
-          title="Analytics are not yet available"
-          subtitle="Quality trend, specialty distribution, and geographic coverage analytics are not yet connected to a backend data source. See the Data Heatmap for live per-record field completeness."
-        />
-      </Card>
+      {authLoading ? (
+        <div role="status" className="flex items-center gap-2 p-8">{Icon.spinner} Loading your account...</div>
+      ) : !companyId ? (
+        <Banner type="error">{companyError || 'No company is assigned to your account. Contact an Admin.'}</Banner>
+      ) : (
+        <AnalyticsDashboard key={`${user?.uid}:${companyId}`} companyId={companyId} />
+      )}
     </div>
   )
 }
