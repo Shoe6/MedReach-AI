@@ -75,6 +75,26 @@ def require_role(allowed_roles: Iterable[str]) -> Callable[..., dict]:
     return _check_role
 
 
+def get_user_document(uid: str) -> dict | None:
+    """Read the authenticated user's profile with a bounded Firestore deadline."""
+    try:
+        snapshot = (
+            database.db.collection("users")
+            .document(uid)
+            .get(
+                retry=None,
+                timeout=COMPANY_LOOKUP_TIMEOUT_SECONDS,
+            )
+        )
+    except GoogleAPICallError as exc:
+        logger.exception("Unable to verify company access.")
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to verify company access; please try again.",
+        ) from exc
+    return (snapshot.to_dict() or {}) if snapshot.exists else None
+
+
 def get_user_company_id(token: dict) -> str:
     """Resolve the caller's company using the same source as tenant authorization."""
     user_company = token.get("company_id")
@@ -84,24 +104,7 @@ def get_user_company_id(token: dict) -> str:
             raise HTTPException(
                 status_code=401, detail="Authenticated user is missing a UID."
             )
-        try:
-            snapshot = (
-                database.db.collection("users")
-                .document(uid)
-                .get(
-                    retry=None,
-                    timeout=COMPANY_LOOKUP_TIMEOUT_SECONDS,
-                )
-            )
-        except GoogleAPICallError as exc:
-            logger.exception("Unable to verify company access.")
-            raise HTTPException(
-                status_code=503,
-                detail="Unable to verify company access; please try again.",
-            ) from exc
-        user_company = (
-            (snapshot.to_dict() or {}).get("company_id") if snapshot.exists else None
-        )
+        user_company = (get_user_document(uid) or {}).get("company_id")
 
     if not isinstance(user_company, str) or not user_company.strip():
         raise HTTPException(

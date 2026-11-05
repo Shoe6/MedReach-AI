@@ -125,6 +125,10 @@ the role restriction. API 403 responses appear separately as server denials with
 their original details, not as an Editor-only restriction.
 On Firebase token changes, the frontend loads the signed `company_id` claim or
 calls authenticated `GET /api/auth/context` to resolve `users/{uid}.company_id`.
+The endpoint always reads `users/{uid}` and returns `uid`, `role`, and `company_id`.
+Verified token role/company claims remain authoritative; an absent company claim
+falls back to the profile. A missing profile returns 404, an unassigned company
+returns 403, and a failed Firestore lookup returns 503.
 Upload signing, record merge, Data Review, heatmap, and export requests use that
 company instead of `demo-company`. Missing assignments are displayed explicitly;
 even Super Admins need an assigned company for this upload workflow.

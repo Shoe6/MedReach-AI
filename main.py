@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from auth import (
     get_user_company_id,
+    get_user_document,
     require_company_role,
     require_role,
     verify_company_access,
@@ -87,11 +88,21 @@ require_authenticated_user = verify_firebase_token
 
 
 @app.get("/api/auth/context")
-def get_auth_context(user: dict = Depends(verify_firebase_token)):
-    """Return only the signed-in user's role and assigned company for UI routing."""
+def get_auth_context(user: dict = Depends(verify_firebase_token)) -> dict:
+    """Return authenticated routing context after loading users/{uid}."""
+    uid = user.get("uid") or user.get("sub")
+    if not isinstance(uid, str) or not uid.strip():
+        raise HTTPException(status_code=401, detail="Authenticated user is missing a UID.")
+    profile = get_user_document(uid)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Authenticated user profile not found.")
+    company_claims = dict(user)
+    if company_claims.get("company_id") is None:
+        company_claims["company_id"] = profile.get("company_id", "")
     return {
+        "uid": uid,
         "role": str(user.get("role") or "").strip().lower(),
-        "company_id": get_user_company_id(user),
+        "company_id": get_user_company_id(company_claims),
     }
 
 

@@ -221,6 +221,7 @@ def test_missing_bearer_token_remains_401():
 
 @pytest.mark.parametrize("role", ["editor", "admin", "super-admin", "viewer"])
 def test_auth_context_returns_only_current_user_metadata(monkeypatch, role):
+    user_database(monkeypatch, company_id="document-company")
     monkeypatch.setattr(
         firebase_auth,
         "verify_id_token",
@@ -233,7 +234,11 @@ def test_auth_context_returns_only_current_user_metadata(monkeypatch, role):
     )
     response = client.get("/api/auth/context", headers=HEADERS)
     assert response.status_code == 200
-    assert response.json() == {"role": role, "company_id": "real-company"}
+    assert response.json() == {
+        "uid": "user-1",
+        "role": role,
+        "company_id": "real-company",
+    }
 
 
 def test_auth_context_uses_firestore_company_assignment(monkeypatch):
@@ -262,13 +267,51 @@ def test_auth_context_never_guesses_a_company(monkeypatch):
         },
     )
     response = client.get("/api/auth/context", headers=HEADERS)
-    assert response.status_code == 403
-    assert "no company is assigned" in response.json()["detail"]
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Authenticated user profile not found."
 
 
 def test_auth_context_requires_bearer_token():
     response = client.get("/api/auth/context", headers={"X-User-Role": "admin"})
     assert response.status_code == 401
+
+
+def test_auth_context_firestore_failure_is_explicit(monkeypatch):
+    user_database(monkeypatch, failure=ServiceUnavailable("Firestore unavailable"))
+    monkeypatch.setattr(
+        firebase_auth,
+        "verify_id_token",
+        lambda _: {
+            "uid": "user-1",
+            "role": "admin",
+            "company_id": "acme",
+        },
+    )
+    response = client.get("/api/auth/context", headers=HEADERS)
+    assert response.status_code == 503
+    assert "Unable to verify company access" in response.json()["detail"]
+
+
+def test_auth_context_rejects_missing_uid(monkeypatch):
+    monkeypatch.setattr(firebase_auth, "verify_id_token", lambda _: {"role": "admin"})
+    response = client.get("/api/auth/context", headers=HEADERS)
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Authenticated user is missing a UID."
+
+
+def test_auth_context_rejects_unassigned_profile(monkeypatch):
+    user_database(monkeypatch)
+    monkeypatch.setattr(
+        firebase_auth,
+        "verify_id_token",
+        lambda _: {
+            "sub": "user-1",
+            "role": "editor",
+        },
+    )
+    response = client.get("/api/auth/context", headers=HEADERS)
+    assert response.status_code == 403
+    assert "no company is assigned" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("company_id", ["", 123, ["acme"], {"id": "acme"}])
