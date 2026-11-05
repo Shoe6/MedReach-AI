@@ -9,6 +9,62 @@ from main import app
 from scrubbing_pipeline import stream_scrubbed_gcs_csv
 
 
+def test_scrubbing_without_shared_cache_remains_supported():
+    from scrubbing_pipeline import scrub_provider_records
+
+    assert asyncio.run(scrub_provider_records([])) == []
+
+
+def test_chunked_scrubbing_shares_npi_budget_and_offline_results(monkeypatch):
+    import scrubbing_pipeline as pipeline
+
+    calls = []
+
+    class FakeRegistry:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def fetch_many(self, npis):
+            calls.append(list(npis))
+            return [
+                {"number": npi, "results": [{"enumeration_type": "NPI-1"}]}
+                if npi != "offline" else {}
+                for npi in npis
+            ]
+
+    monkeypatch.setattr(pipeline, "CMSNPIRegistryClient", FakeRegistry)
+    monkeypatch.setattr(pipeline, "_run_local_scrubbing", lambda records: [dict(row) for row in records])
+    monkeypatch.setattr(
+        pipeline, "enrich_provider_with_npi_status",
+        lambda record, payload: dict(record, registry_number=payload.get("number")),
+    )
+    monkeypatch.setattr(pipeline, "MAX_LIVE_NPI_LOOKUPS", 2)
+
+    async def scrub_chunks():
+        cache = {}
+        first = await pipeline.scrub_provider_records(
+            [{"npi": "online"}, {"npi": "offline"}], npi_cache=cache
+        )
+        second = await pipeline.scrub_provider_records(
+            [{"npi": "online"}, {"npi": "offline"}, {"npi": "over-budget"}],
+            npi_cache=cache,
+        )
+        return first, second, cache
+
+    first, second, cache = asyncio.run(scrub_chunks())
+    assert calls == [["online", "offline"], []]
+    assert len(cache) == 2
+    assert first[0]["registry_number"] == second[0]["registry_number"] == "online"
+    assert first[1]["npi_status"] == second[1]["npi_status"] == pipeline.OFFLINE_NPI_STATUS
+    assert second[2]["npi_status"] == pipeline.OFFLINE_NPI_STATUS
+
+
 def test_upload_completes_with_local_scrubbing_when_npi_registry_is_offline():
     csv_payload = (
         "npi,first_name,last_name,email,claims_volume\n"
@@ -161,9 +217,10 @@ def test_authenticated_gcs_processing_jobs_are_owner_scoped():
             )
             assert unauthenticated_alias.status_code == 401
 
-            app.dependency_overrides[main_module.require_authenticated_editor] = lambda: {
+            app.dependency_overrides[main_module.verify_firebase_token] = lambda: {
                 "uid": "load-test-user",
                 "role": "admin",
+                "company_id": "load-test-company",
             }
             with patch("main.db", new=FakeDatabase()) as fake_db:
                 with patch("main.gcs_storage.Client", return_value=FakeStorageClient()):
@@ -201,18 +258,20 @@ def test_authenticated_gcs_processing_jobs_are_owner_scoped():
                         assert status.json()["batch_size"] == 500
                         assert status.json()["status"] == "queued"
 
-                        app.dependency_overrides[main_module.require_authenticated_editor] = lambda: {
+                        app.dependency_overrides[main_module.verify_firebase_token] = lambda: {
                             "uid": "another-user",
                             "role": "admin",
+                            "company_id": "load-test-company",
                         }
                         hidden_status = await client.get(
                             f"/api/companies/load-test-company/uploads/process/{job_id}"
                         )
                         assert hidden_status.status_code == 404
 
-                        app.dependency_overrides[main_module.require_authenticated_editor] = lambda: {
+                        app.dependency_overrides[main_module.verify_firebase_token] = lambda: {
                             "uid": "load-test-user",
                             "role": "editor",
+                            "company_id": "load-test-company",
                         }
                         denied_bypass = await client.post(
                             "/api/companies/load-test-company/uploads/process",
@@ -223,7 +282,7 @@ def test_authenticated_gcs_processing_jobs_are_owner_scoped():
                         )
                         assert denied_bypass.status_code == 403
 
-    dependency_key = main_module.require_authenticated_editor
+    dependency_key = main_module.verify_firebase_token
     previous_override = app.dependency_overrides.get(dependency_key)
     try:
         asyncio.run(exercise_routes())
@@ -335,7 +394,7 @@ def test_local_e2e_upload_runs_without_firebase_or_gcs():
             assert not main_module.LOCAL_E2E_UPLOADS
             assert not main_module.LOCAL_E2E_UPLOAD_TOKENS
 
-    dependency_key = main_module.require_authenticated_editor
+    dependency_key = main_module.verify_firebase_token
     previous_override = app.dependency_overrides.get(dependency_key)
     previous_local_mode = main_module.LOCAL_E2E_MODE
     previous_upload_dir = main_module.LOCAL_E2E_UPLOAD_DIR
@@ -349,6 +408,7 @@ def test_local_e2e_upload_runs_without_firebase_or_gcs():
             app.dependency_overrides[dependency_key] = lambda: {
                 "uid": main_module.LOCAL_E2E_UID,
                 "role": "admin",
+                "company_id": "local-e2e",
             }
             asyncio.run(exercise_local_flow(Path(temp_dir)))
     finally:

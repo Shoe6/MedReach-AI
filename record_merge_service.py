@@ -31,7 +31,7 @@ def merge_record_cluster(records: Iterable[dict[str, Any]], master_record_id: st
     - Keep a list of archived records with their original payloads.
     - Return a single merged payload plus archived records metadata.
     """
-    record_list = [deepcopy(record) for record in records if isinstance(record, dict)]
+    record_list = [record for record in records if isinstance(record, dict)]
     if not record_list:
         raise ValueError("No records were provided for merge.")
 
@@ -42,13 +42,15 @@ def merge_record_cluster(records: Iterable[dict[str, Any]], master_record_id: st
         master = next((rec for rec in record_list if str(rec.get("record_id")) == str(master_record_id)), record_list[0])
         archived = [rec for rec in record_list if rec is not master]
 
-    merged = {str(key): _clean_value(value) for key, value in master.items()}
+    merged = {str(key): _clean_value(value) for key, value in deepcopy(master).items()}
+    archived_records = []
 
     for record in archived:
-        for key, value in record.items():
+        cleaned_record = {str(key): _clean_value(value) for key, value in deepcopy(record).items()}
+        archived_records.append(cleaned_record)
+        for key, cleaned_value in cleaned_record.items():
             if key == "record_id":
                 continue
-            cleaned_value = _clean_value(value)
             if cleaned_value in (None, ""):
                 continue
             existing_value = merged.get(key, "")
@@ -56,8 +58,5 @@ def merge_record_cluster(records: Iterable[dict[str, Any]], master_record_id: st
 
     return {
         "master_record": merged,
-        "archived_records": [
-            {str(key): _clean_value(value) for key, value in rec.items()}
-            for rec in archived
-        ],
+        "archived_records": archived_records,
     }

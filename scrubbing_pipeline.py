@@ -49,15 +49,23 @@ def _run_local_scrubbing(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-async def scrub_provider_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Run NPI validation, PII detection, and anomaly detection for a batch."""
+async def scrub_provider_records(
+    records: list[dict[str, Any]],
+    *,
+    npi_cache: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Scrub a batch, optionally sharing the live NPI lookup budget across chunks."""
     if not records:
         return []
 
     npis = [str(record.get("npi") or record.get("NPI") or "").strip() for record in records]
     unique_npis = list(dict.fromkeys(npi for npi in npis if npi))
-    live_npis = unique_npis[:MAX_LIVE_NPI_LOOKUPS]
-    skipped_npis = set(unique_npis[MAX_LIVE_NPI_LOOKUPS:])
+    if npi_cache is None:
+        npi_cache = {}
+    uncached_npis = [npi for npi in unique_npis if npi not in npi_cache]
+    remaining = max(0, MAX_LIVE_NPI_LOOKUPS - len(npi_cache))
+    live_npis = uncached_npis[:remaining]
+    skipped_npis = set(uncached_npis[remaining:])
 
     async with CMSNPIRegistryClient(timeout=2.0) as npi_client:
         local_task = asyncio.create_task(asyncio.to_thread(_run_local_scrubbing, records))
@@ -72,13 +80,14 @@ async def scrub_provider_records(records: list[dict[str, Any]]) -> list[dict[str
             payloads = [{} for _ in live_npis]
         scrubbed_records = await local_task
 
+    npi_cache.update(zip(live_npis, payloads))
     payload_by_npi = {
         str(payload.get("number")): payload
-        for payload in payloads
+        for payload in npi_cache.values()
         if isinstance(payload, dict) and payload.get("number")
     }
     offline_npis = skipped_npis | {
-        npi for npi, payload in zip(live_npis, payloads) if not payload
+        npi for npi, payload in npi_cache.items() if not payload
     }
 
     enriched_records: list[dict[str, Any]] = []

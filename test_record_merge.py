@@ -1,5 +1,6 @@
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 import main as main_module
@@ -174,7 +175,13 @@ class _UnreachableNode:
     def document(self, *args, **kwargs):
         return self
 
+    def batch(self):
+        return self
+
     def set(self, *args, **kwargs):
+        return None
+
+    def commit(self, *args, **kwargs):
         raise ConnectionError("[Errno 10061] Connection refused")
 
 
@@ -224,3 +231,125 @@ def test_merge_records_endpoint_skips_write_when_offline_bypass_enabled(monkeypa
 
     assert response.status_code == 200, response.text
     assert response.json()["merged_record"]["record_id"] == "r1"
+
+
+@pytest.fixture
+def chunked_merge(monkeypatch):
+    from unittest.mock import Mock
+
+    commits = []
+    scrub_sizes = []
+    collections = Mock()
+    collections.collection.return_value.document.return_value.collection.return_value.document.side_effect = (
+        lambda record_id: record_id
+    )
+
+    def make_batch():
+        writes = []
+        batch = Mock()
+        batch.set.side_effect = lambda reference, record: writes.append((reference, dict(record)))
+
+        def commit(**kwargs):
+            assert kwargs == {"retry": None, "timeout": main_module.FIRESTORE_WRITE_TIMEOUT_SECONDS}
+            commits.append(writes)
+
+        batch.commit.side_effect = commit
+        return batch
+
+    collections.batch.side_effect = make_batch
+
+    async def scrub(records, *, npi_cache):
+        scrub_sizes.append(len(records))
+        return [dict(record, pii_flagged=True) for record in records]
+
+    collect = Mock()
+    monkeypatch.setattr(main_module, "db", collections)
+    monkeypatch.setattr(main_module, "scrub_provider_records", scrub)
+    monkeypatch.setattr(main_module.gc, "collect", collect)
+    monkeypatch.setattr(main_module, "ALLOW_OFFLINE_FIRESTORE_WRITES", False)
+    return commits, scrub_sizes, collect, collections
+
+
+@pytest.mark.parametrize("count", [1, 250, 251, 501])
+def test_merge_records_chunks_scrubbing_and_batch_commits(chunked_merge, count):
+    commits, scrub_sizes, collect, _ = chunked_merge
+    records = [
+        {"record_id": f"r{index}", "email": f"provider{index}@example.test"}
+        for index in range(count)
+    ]
+    records[0]["email"] = "duplicate@example.test"
+    records[-1]["email"] = "duplicate@example.test"
+    records[0]["specialty"] = "Cardiology"
+    response = client.post(
+        "/api/companies/chunked-company/records/merge",
+        json={"records": records, "master_record_id": f"r{count - 1}"},
+        headers={"X-User-Role": "admin"},
+    )
+
+    assert response.status_code == 200, response.text
+    expected_sizes = [min(250, count - start) for start in range(0, count, 250)]
+    assert scrub_sizes == expected_sizes
+    assert [len(writes) for writes in commits] == expected_sizes
+    persisted = {reference: record for writes in commits for reference, record in writes}
+    assert set(persisted) == {f"r{index}" for index in range(count)}
+    data = response.json()
+    assert data["master_record_id"] == f"r{count - 1}"
+    assert data["merged_record"]["specialty"] == "Cardiology"
+    assert [record["record_id"] for record in data["archived_records"]] == [
+        f"r{index}" for index in range(count - 1)
+    ]
+    assert all(record["pii_flagged"] for record in persisted.values())
+    assert all(record["merged_at"] == data["merged_record"]["merged_at"] for record in persisted.values())
+    if count > 1:
+        assert persisted["r0"]["is_duplicate"]
+        assert persisted[f"r{count - 1}"]["is_duplicate"]
+    if count > 2:
+        assert not persisted["r1"]["is_duplicate"]
+    assert collect.call_count == len(expected_sizes) * 2 + 1
+
+
+def test_merge_records_stops_after_failed_batch(chunked_merge):
+    commits, _, _, collections = chunked_merge
+    make_batch = collections.batch.side_effect
+
+    def fail_second_batch():
+        batch = make_batch()
+        if collections.batch.call_count == 2:
+            batch.commit.side_effect = ConnectionError("batch unavailable")
+        return batch
+
+    collections.batch.side_effect = fail_second_batch
+    response = client.post(
+        "/api/companies/chunked-company/records/merge",
+        json={"records": [{"record_id": f"r{index}"} for index in range(501)]},
+        headers={"X-User-Role": "admin"},
+    )
+
+    assert response.status_code == 503
+    assert "Firestore is unreachable" in response.json()["detail"]
+    assert len(commits) == 1
+    assert collections.batch.call_count == 2
+
+
+def test_merge_records_rejects_non_object_rows_before_processing(chunked_merge):
+    commits, scrub_sizes, _, _ = chunked_merge
+    response = client.post(
+        "/api/companies/chunked-company/records/merge",
+        json={"records": [{"record_id": "valid"}, None]},
+        headers={"X-User-Role": "admin"},
+    )
+    assert response.status_code == 422
+    assert commits == []
+    assert scrub_sizes == []
+
+
+def test_merge_service_preserves_nested_input_data():
+    from record_merge_service import merge_record_cluster
+
+    records = [
+        {"record_id": "master"},
+        {"record_id": "archive", "metadata": {"tags": ["original"]}},
+    ]
+    merged = merge_record_cluster(records)
+    merged["archived_records"][0]["metadata"]["tags"].append("changed")
+    assert records[1]["metadata"]["tags"] == ["original"]

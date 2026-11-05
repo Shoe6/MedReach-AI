@@ -187,6 +187,24 @@ labels. Empty datasets return empty arrays. Missing company assignments return
 403; Firestore read failures return 503, never synthetic successful metrics.
 The synchronous route runs blocking Firestore work in FastAPI's worker pool.
 
+### Large record merges
+
+`POST /api/companies/{company_id}/records/merge` scrubs records in 250-row
+chunks and commits Firestore batches of at most 250 writes. Blocking merge,
+batch commits, and garbage collection run in worker threads; temporary chunk
+references are released and the request yields between chunks.
+Duplicate matching remains dataset-wide and explicit master selection is
+preserved. Anomaly scores now use chunk-local cohorts rather than the full
+upload, so flags can differ with chunk boundaries.
+
+Each write batch is atomic, but the entire request is not: a later batch failure
+returns 503 and earlier committed batches remain. Use stable `record_id` values
+when retrying. The JSON request, duplicate index, and full response still scale
+with dataset size. A request-scoped NPI cache preserves the 100-lookup cap across
+chunks, including offline results, instead of multiplying network calls.
+For unbounded uploads or processing exceeding the Cloud Run request deadline,
+use the existing GCS streaming/background processing path instead.
+
 ### Upload URL endpoints
 
 * `POST /api/uploads/generate-signed-url` (alias: `/api/upload/generate-url`)

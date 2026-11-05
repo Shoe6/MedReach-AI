@@ -1,11 +1,13 @@
 import asyncio
 import csv
+import gc
 import ipaddress
 import io
 import logging
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
+from itertools import chain, islice
 from pathlib import Path
 from uuid import uuid4
 
@@ -88,6 +90,8 @@ require_company_viewer = require_company_role(["viewer"])
 require_company_admin = require_company_role(["admin"])
 # Any signed-in Firebase user, regardless of role claim.
 require_authenticated_user = verify_firebase_token
+
+MERGE_CHUNK_SIZE = 250
 
 
 @app.get("/api/auth/context")
@@ -1198,21 +1202,32 @@ async def merge_company_records(
         if not isinstance(records, list) or not records:
             raise HTTPException(status_code=422, detail="'records' must be a non-empty list.")
 
-        # Run PII/NPI/anomaly detection before persisting so Data Review reflects
-        # real quality signals instead of raw-field heuristics (this endpoint is
-        # the one the real upload flow calls; other upload paths already scrub).
-        scrubbed_records = await scrub_provider_records(records)
+        if any(not isinstance(record, dict) for record in records):
+            raise HTTPException(status_code=422, detail="'records' must contain only objects.")
 
-        # Duplicate-cluster detection was previously only computed by the legacy
-        # multipart /upload_file path and never reached Firestore here, so every
-        # record from the real upload flow silently reported zero duplicates.
-        duplicate_row_indexes: set[int] = set()
-        for cluster in _get_duplicate_detector()(scrubbed_records):
-            duplicate_row_indexes.update(entry["row_index"] for entry in cluster["records"])
-        for index, record in enumerate(scrubbed_records):
-            record["is_duplicate"] = index in duplicate_row_indexes
+        npi_cache: dict[str, dict] = {}
+        for start in range(0, len(records), MERGE_CHUNK_SIZE):
+            end = start + MERGE_CHUNK_SIZE
+            chunk = records[start:end]
+            scrubbed_chunk = await scrub_provider_records(chunk, npi_cache=npi_cache)
+            records[start:end] = scrubbed_chunk
+            del chunk, scrubbed_chunk
+            await asyncio.to_thread(gc.collect)
+            await asyncio.sleep(0)
+        del npi_cache
 
-        merged = merge_record_cluster(scrubbed_records, master_record_id=master_record_id)
+        def merge_scrubbed_records():
+            # Match across chunks; anomaly detection intentionally uses chunk-local cohorts.
+            duplicate_row_indexes: set[int] = set()
+            for cluster in _get_duplicate_detector()(records):
+                duplicate_row_indexes.update(entry["row_index"] for entry in cluster["records"])
+            for index, record in enumerate(records):
+                record["is_duplicate"] = index in duplicate_row_indexes
+            return merge_record_cluster(records, master_record_id=master_record_id)
+
+        merged = await asyncio.to_thread(merge_scrubbed_records)
+        records.clear()
+        await asyncio.to_thread(gc.collect)
         master = merged["master_record"]
         merged_at = datetime.now(timezone.utc).isoformat()
 
@@ -1220,23 +1235,27 @@ async def merge_company_records(
         master_id = str(master.get("record_id") or master_record_id or uuid4())
         master["record_id"] = master_id
         master["merged_at"] = merged_at
-        await _firestore_write(
-            lambda: records_ref.document(master_id).set(
-                master, retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS
-            ),
-            context=f"merging records for company '{company_id}'",
-        )
-
         for archived_record in merged["archived_records"]:
             archived_id = str(archived_record.get("record_id") or uuid4())
             archived_record["record_id"] = archived_id
             archived_record["merged_at"] = merged_at
+
+        def commit_chunk(chunk):
+            batch = db.batch()
+            for record in chunk:
+                batch.set(records_ref.document(record["record_id"]), record)
+            batch.commit(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
+
+        # Include the master without constructing another full-dataset list.
+        pending = chain([master], merged["archived_records"])
+        while chunk := list(islice(pending, MERGE_CHUNK_SIZE)):
             await _firestore_write(
-                lambda archived_record=archived_record, archived_id=archived_id: records_ref.document(
-                    archived_id
-                ).set(archived_record, retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS),
-                context=f"archiving a duplicate record for company '{company_id}'",
+                lambda chunk=chunk: commit_chunk(chunk),
+                context=f"merging records for company '{company_id}'",
             )
+            del chunk
+            await asyncio.to_thread(gc.collect)
+            await asyncio.sleep(0)
 
         return {
             "company_id": company_id,
