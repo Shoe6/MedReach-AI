@@ -155,6 +155,29 @@ Run the optional live emulator regression with
 (PowerShell: set `$env:MEDREACH_TEST_AUTH_EMULATOR = '1'` first). It creates and
 deletes a temporary emulator user and verifies that the backend rejects its ID token.
 
+### Analytics dashboard (MA-99)
+
+`GET /api/analytics/dashboard` requires a verified Firebase ID token (401 when
+missing/invalid), but no role claim. It derives the company from the signed
+`company_id` claim or `users/{uid}.company_id`; query parameters cannot select
+another tenant, including for Super Admins.
+
+The endpoint reads only `companies/{company_id}/records` and returns
+`company_id`, `total_records`, `undated_records`, and these arrays:
+
+* `quality_trends`: `{date, record_count, quality_score}` ordered by UTC date.
+  Scores reuse `calculate_data_health` for each daily cohort of currently stored
+  records, not historical whole-dataset snapshots. Dates use the first valid
+  merge/process/create/upload timestamp; missing/invalid dates are counted in
+  `undated_records` rather than assigned a fabricated date.
+* `specialty_distribution`: `{specialty, count, percentage}`.
+* `geographic_coverage`: `{state, count, percentage}`.
+
+Distribution totals include undated records and an `Unknown` bucket for missing
+labels. Empty datasets return empty arrays. Missing company assignments return
+403; Firestore read failures return 503, never synthetic successful metrics.
+The synchronous route runs blocking Firestore work in FastAPI's worker pool.
+
 ### Upload URL endpoints
 
 * `POST /api/uploads/generate-signed-url` (alias: `/api/upload/generate-url`)

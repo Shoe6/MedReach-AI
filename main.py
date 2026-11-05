@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from firebase_admin import storage
+from google.api_core.exceptions import GoogleAPICallError
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -29,6 +30,7 @@ from auth import (
 )
 from database import db, USE_EMULATOR
 from data_health_score_service import calculate_data_health
+from analytics_dashboard import aggregate_analytics
 from nlp_query_router import router as nlp_query_router
 from bulk_approval_service import approve_low_severity_flags
 from record_merge_service import merge_record_cluster
@@ -125,6 +127,27 @@ ALLOW_OFFLINE_FIRESTORE_WRITES = not IS_CLOUD_RUN and os.getenv("MEDREACH_ALLOW_
     "true",
     "yes",
 )
+
+
+@app.get("/api/analytics/dashboard")
+def get_analytics_dashboard(user: dict = Depends(verify_firebase_token)) -> dict:
+    """Aggregate only the authenticated account's assigned company records."""
+    company_id = get_user_company_id(user)
+    try:
+        records = [
+            document.to_dict() or {}
+            for document in db.collection("companies")
+            .document(company_id)
+            .collection("records")
+            .stream(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
+        ]
+    except GoogleAPICallError as exc:
+        logger.exception("Unable to load analytics records.")
+        raise HTTPException(
+            status_code=503, detail="Unable to load analytics data; please try again.",
+        ) from exc
+    return {"company_id": company_id, **aggregate_analytics(records)}
+
 
 if LOCAL_E2E_MODE and os.getenv("ENVIRONMENT", "").lower() != "development":
     raise RuntimeError("Local E2E auth bypass requires ENVIRONMENT=development.")
