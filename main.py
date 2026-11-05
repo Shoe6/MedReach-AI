@@ -19,6 +19,7 @@ from google.cloud import storage as gcs_storage
 from pydantic import BaseModel
 
 from auth import (
+    get_user_company_id,
     require_company_role,
     require_role,
     verify_company_access,
@@ -83,6 +84,17 @@ require_company_viewer = require_company_role(["viewer"])
 require_company_admin = require_company_role(["admin"])
 # Any signed-in Firebase user, regardless of role claim.
 require_authenticated_user = verify_firebase_token
+
+
+@app.get("/api/auth/context")
+def get_auth_context(user: dict = Depends(verify_firebase_token)):
+    """Return only the signed-in user's role and assigned company for UI routing."""
+    return {
+        "role": str(user.get("role") or "").strip().lower(),
+        "company_id": get_user_company_id(user),
+    }
+
+
 FIRESTORE_PAGE_SIZE = 500
 UPLOAD_BUCKET = "medreach-ai-uploads"
 LOCAL_E2E_MODE = os.getenv("MEDREACH_E2E_LOCAL_MODE") == "1"

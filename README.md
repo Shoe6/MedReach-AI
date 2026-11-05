@@ -120,6 +120,17 @@ access. Invitations provision both role and company claims while preserving othe
 custom claims. Existing users need a company claim or an assigned Firestore user
 document; frontend preview roles and company IDs never grant access.
 
+The upload UI allows Editor, Admin, and Super Admin; Viewer or missing roles see
+the role restriction. API 403 responses appear separately as server denials with
+their original details, not as an Editor-only restriction.
+On Firebase token changes, the frontend loads the signed `company_id` claim or
+calls authenticated `GET /api/auth/context` to resolve `users/{uid}.company_id`.
+Upload signing, record merge, Data Review, heatmap, and export requests use that
+company instead of `demo-company`. Missing assignments are displayed explicitly;
+even Super Admins need an assigned company for this upload workflow.
+Deploy the backend account-context endpoint with the frontend when using the
+Firestore assignment fallback; building locally does not update Firebase Hosting.
+
 Missing/invalid tokens return 401. Insufficient roles return 403 with `Invalid role`;
 missing/mismatched tenant assignments return 403 with `Company scope mismatch`.
 An unavailable Firestore membership lookup returns 503 rather than allowing access.

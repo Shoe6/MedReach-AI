@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, createContext, useContext, Fragment, type ReactNode } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User as FirebaseUser } from 'firebase/auth'
+import { onIdTokenChanged, signInWithEmailAndPassword, signOut, type User as FirebaseUser } from 'firebase/auth'
 import { read as readWorkbook, utils as xlsxUtils } from 'xlsx'
 import { getFirebaseAuth } from './firebase'
 import ExecutiveMetricCards from './ExecutiveMetricCards'
@@ -48,12 +48,21 @@ const RoleContext = createContext<{ role: Role; setRole: (r: Role) => void }>({
 })
 const useRole = () => useContext(RoleContext)
 const isAdminRole = (role: Role) => role === 'admin' || role === 'super-admin'
+const canUploadData = (role: string | null | undefined) =>
+  ['editor', 'admin', 'super-admin'].includes(role || '')
 
 // Tracks the live Firebase Authentication user so the profile indicator and
 // logout flow reflect the real signed-in session instead of the demo role.
-const AuthContext = createContext<{ user: FirebaseUser | null; authLoading: boolean }>({
+const AuthContext = createContext<{
+  user: FirebaseUser | null
+  authLoading: boolean
+  companyId: string | null
+  companyError: string | null
+}>({
   user: null,
   authLoading: true,
+  companyId: null,
+  companyError: null,
 })
 const useAuthUser = () => useContext(AuthContext)
 
@@ -1658,7 +1667,7 @@ type UploadState =
   | 'error-type'   // wrong file extension
   | 'error-size'   // exceeds MAX_FILE_BYTES
   | 'error-parse'  // malformed CSV (row-level error)
-  | 'error-forbidden' // 403 — caller lacks Editor role or higher
+  | 'error-forbidden' // server denial; not necessarily a UI role restriction
   | 'error-network' // connection dropped, timed out, or other server error mid-upload
 
 // Simulated chunked upload — tracks chunk index and total chunks (demo scenarios only)
@@ -1728,7 +1737,8 @@ function parseXlsxRecords(buffer: ArrayBuffer): Record<string, string>[] {
 
 // Fetches the full processed/export dataset for a company (paginating through
 // export_data cursors). Shared by any screen that needs the real, cleaned record set.
-function useExportedRecords(companyId: string) {
+function useExportedRecords() {
+  const { companyId, companyError, authLoading } = useAuthUser()
   const [records, setRecords] = useState<Record<string, unknown>[]>([])
   const [loading, setLoading] = useState(true)
   const [status, setStatus] = useState<number | null>(null)
@@ -1737,13 +1747,15 @@ function useExportedRecords(companyId: string) {
   useEffect(() => {
     let active = true
     const load = async () => {
+      if (authLoading) return
       try {
+        if (!companyId) throw new Error(companyError || 'No company is assigned to your account.')
         const loaded: Record<string, unknown>[] = []
         const cursors = new Set<string>()
         let cursor: string | undefined
         do {
           const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
-          const response = await apiFetch(`${API_BASE_URL}/api/companies/${companyId}/export_data${query}`)
+          const response = await apiFetch(`${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/export_data${query}`)
           if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
           if ((response.headers.get('content-type') || '').includes('json')) {
             const data = await response.json() as ExportResponse
@@ -1769,13 +1781,15 @@ function useExportedRecords(companyId: string) {
     }
     void load()
     return () => { active = false }
-  }, [companyId])
+  }, [companyId, companyError, authLoading])
 
   return { records, loading, status, error }
 }
 
 function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => void; showToast: (type: ToastType, message: string) => void }) {
   const { role } = useRole()
+  const { companyId, companyError, authLoading } = useAuthUser()
+  const canUpload = canUploadData(role)
   const { setMeta } = useUploadMeta()
   const [uploadState, setUploadState] = useState<UploadState>('idle')
   const [fileName,    setFileName]    = useState('')
@@ -1789,6 +1803,23 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const xhrRef = useRef<XMLHttpRequest | null>(null)
   const pendingFileRef = useRef<File | null>(null)
+  const [previousRole, setPreviousRole] = useState(role)
+  const activeRef = useRef(true)
+
+  useEffect(() => {
+    activeRef.current = true
+    return () => {
+      activeRef.current = false
+      clearInterval(intervalRef.current!)
+      xhrRef.current?.abort()
+    }
+  }, [])
+
+  if (previousRole !== role) {
+    setPreviousRole(role)
+    if (uploadState === 'error-forbidden') setUploadState('idle')
+    setUploadError('')
+  }
 
   const totalPct = chunksTotal > 0 ? Math.round((chunksDone / chunksTotal) * 100) : 0
 
@@ -1813,6 +1844,13 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
   })
 
   const uploadRealFile = async (file: File) => {
+    if (!canUpload || authLoading || !companyId) {
+      showToast('error', !canUpload ? 'Editor, Admin, or Super Admin access is required.'
+        : authLoading ? 'Your account is still loading.'
+        : companyError || 'No company is assigned to your account.')
+      return
+    }
+    const companyPath = `${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}`
     pendingFileRef.current = file
     setFileName(file.name)
     setFileSize(file.size / (1024 * 1024))
@@ -1823,37 +1861,41 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
     const isXlsx = file.name.toLowerCase().endsWith('.xlsx')
 
     try {
-      const urlRes = await apiFetch(`${API_BASE_URL}/api/companies/demo-company/uploads/generate-url`, {
+      const urlRes = await apiFetch(`${companyPath}/uploads/generate-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename: file.name, content_type: file.type || (isXlsx ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv') }),
       })
+      if (!activeRef.current) return
       if (!urlRes.ok) throw new HttpError(urlRes.status, (await urlRes.text()) || 'Could not obtain an upload URL')
       const { upload_url: uploadUrl } = await urlRes.json()
 
       await putFileToSignedUrl(file, uploadUrl)
+      if (!activeRef.current) return
       xhrRef.current = null
       setUploadState('processing')
 
       const recordsToUpload = isXlsx
         ? parseXlsxRecords(await file.arrayBuffer())
         : parseCsvRecords(await file.text(), { header: true, skipEmptyLines: true })
-      const mergeResponse = await apiFetch(`${API_BASE_URL}/api/companies/demo-company/records/merge`, {
+      const mergeResponse = await apiFetch(`${companyPath}/records/merge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ records: recordsToUpload }),
       })
+      if (!activeRef.current) return
       if (!mergeResponse.ok) throw new HttpError(mergeResponse.status, await mergeResponse.text())
 
       setMeta({ fileName: file.name, fileSize: file.size, rowCount: recordsToUpload.length, fileType: isXlsx ? 'XLSX' : 'CSV', uploadedAt: new Date().toLocaleString() })
       setUploadState('done')
       onNavigate('data-review')
     } catch (error) {
+      if (!activeRef.current) return
       xhrRef.current = null
       if (error instanceof HttpError && error.status === 403) {
-        setUploadError('Unauthorized: Editor role required to upload data. Ask an Admin to upgrade your access.')
+        setUploadError(error.message)
         setUploadState('error-forbidden')
-        showToast('error', 'Unauthorized: Editor role required')
+        showToast('error', 'Upload denied by server. Check your account permissions and company assignment.')
         return
       }
       if (error instanceof HttpError && error.status === 404) {
@@ -1867,6 +1909,10 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
 
   // ── core upload simulator ──────────────────────────────────────────────────
   const runUpload = (name: string, sizeMB: number, rowCount = 10412, fileType = 'CSV') => {
+    if (!canUpload) {
+      showToast('error', 'Editor, Admin, or Super Admin access is required.')
+      return
+    }
     const total = Math.max(1, Math.ceil(sizeMB / CHUNK_SIZE_MB))
     setIsRealUpload(false)
     setFileName(name)
@@ -1929,11 +1975,13 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const handleZoneClick = () => {
+    if (!canUpload) return
     if (uploadState === 'uploading' || uploadState === 'processing') return
     fileInputRef.current?.click()
   }
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canUpload) return
     const file = e.target.files?.[0]
     if (!file) return
     const sizeMB = file.size / (1024 * 1024)
@@ -1951,6 +1999,7 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
   // is still hovering so the error banner appears before the user drops.
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault()
+    if (!canUpload) return
     if (uploadState === 'uploading' || uploadState === 'processing') return
     const dt = e.dataTransfer
     // DataTransferItem gives us filename+size during dragover in most browsers
@@ -1979,6 +2028,7 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
+    if (!canUpload) return
     const file = e.dataTransfer.files[0]
     if (!file) { setUploadState('idle'); return }
     const sizeMB = file.size / (1024 * 1024)
@@ -2016,16 +2066,26 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
       />
 
       {/* ── DEMO SCENARIO BUTTONS ─────────────────────────────────────────── */}
-      <div className="mb-5 p-4 rounded-[8px] border flex flex-wrap items-center gap-3" style={{ background: '#F0F4FF', borderColor: C.corpBlue }}>
+      {canUpload && <div className="mb-5 p-4 rounded-[8px] border flex flex-wrap items-center gap-3" style={{ background: '#F0F4FF', borderColor: C.corpBlue }}>
         <span className="text-[11px] font-bold" style={{ color: C.navy }}>Test scenarios:</span>
         <button onClick={triggerNormal}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.success,  color: 'white', borderColor: C.success  }}>✓ Normal upload</button>
         <button onClick={triggerBadType}  className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.danger,   color: 'white', borderColor: C.danger   }}>✕ Wrong file type (.pdf)</button>
         <button onClick={triggerParse}    className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: C.warning,  color: 'white', borderColor: C.warning  }}>⚠ Parse error (corrupt CSV)</button>
         <button onClick={triggerNetworkError} className="text-[11px] px-3 py-1.5 rounded-[6px] border font-medium transition-all hover:opacity-80" style={{ background: '#6B7280', color: 'white', borderColor: '#6B7280'  }}>⚡ Network drop</button>
-      </div>
+      </div>}
+
+      {authLoading && <Banner type="info">Loading your account and company assignment...</Banner>}
+      {!authLoading && !companyId && (
+        <Banner type="error">{companyError || 'No company is assigned to your account. Contact an Admin.'}</Banner>
+      )}
 
       {/* ── DROP ZONE ──────────────────────────────────────────────────────── */}
       <Card className="mb-6">
+        {authLoading ? (
+          <p className="text-center text-[13px]" style={{ color: C.midText }}>Loading upload permissions...</p>
+        ) : !canUpload ? (
+          <Banner type="error">Unauthorized: Editor role required. Editor, Admin, or Super Admin access is required to upload data.</Banner>
+        ) : (
         <div
           className={`border-2 border-dashed rounded-[6px] transition-all cursor-pointer select-none`}
           style={{
@@ -2241,9 +2301,9 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
                 style={{ background: '#FEE2E2', color: C.danger }}>
                 {Icon.shield}
               </div>
-              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>Unauthorized: Editor role required</p>
+              <p className="text-[15px] font-bold mb-1" style={{ color: C.danger }}>Upload denied by server</p>
               <p className="text-[12px] mb-5" style={{ color: C.midText }}>
-                {uploadError || 'Your current role does not have permission to upload data. Ask an Admin to upgrade your access to Editor or higher.'}
+                {uploadError || 'Verify your Firebase permissions and company assignment. The role switcher only previews UI access.'}
               </p>
               <div className="flex gap-2 justify-center">
                 <Btn variant="primary" size="sm" onClick={() => setUploadState('idle')}>
@@ -2287,8 +2347,9 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
 
         </div>
 
+        )}
         {/* File format note below drop zone */}
-        {(uploadState === 'idle' || uploadState === 'dragging') && (
+        {canUpload && (uploadState === 'idle' || uploadState === 'dragging') && (
           <div className="mt-3 flex items-center gap-6 justify-center">
             {[
               { fmt: 'CSV', note: 'Comma-separated values' },
@@ -2795,11 +2856,9 @@ function NullSummaryBar({ tab, records = [] }: { tab: string; records?: Record<s
 }
 
 function DataReviewScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => void; showToast: (type: ToastType, message: string) => void }) {
-  const [processedRecords, setProcessedRecords] = useState<Record<string, unknown>[]>([])
+  const { companyId } = useAuthUser()
+  const { records: processedRecords, loading: recordsLoading, error: recordsError, status: recordsStatus } = useExportedRecords()
   const [selectedRecord, setSelectedRecord] = useState<Record<string, unknown> | null>(null)
-  const [recordsLoading, setRecordsLoading] = useState(true)
-  const [recordsError, setRecordsError] = useState<string | null>(null)
-  const [recordsStatus, setRecordsStatus] = useState<number | null>(null)
   const [tab, setTab] = useState<'pii' | 'contacts' | 'duplicates' | 'outliers' | 'validation'>('pii')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [expandedOutlier, setExpandedOutlier] = useState<number | null>(null)
@@ -2822,39 +2881,6 @@ function DataReviewScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) =
   // Duplicate record resolution (local triage only — no backend endpoint persists
   // per-record duplicate resolution yet, so this does not simulate a fake round-trip).
   const [resolvedDup, setResolvedDup] = useState<Map<number, 'kept' | 'removed'>>(new Map())
-
-  useEffect(() => {
-    const loadProcessedRecords = async () => {
-      try {
-        const records: Record<string, unknown>[] = []
-        const cursors = new Set<string>()
-        let cursor: string | undefined
-        do {
-          const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
-          const response = await apiFetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
-          if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
-          if ((response.headers.get('content-type') || '').includes('json')) {
-            const data = await response.json() as ExportResponse
-            if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
-            records.push(...data.records)
-            cursor = data.next_cursor
-            if (cursor && cursors.has(cursor)) throw new Error('Export returned a repeated pagination cursor')
-            if (cursor) cursors.add(cursor)
-          } else {
-            records.push(...parseCsvRecords(await response.text(), { header: true, skipEmptyLines: true }))
-            cursor = undefined
-          }
-        } while (cursor)
-        setProcessedRecords(records)
-      } catch (error) {
-        setRecordsStatus(error instanceof HttpError ? error.status : null)
-        setRecordsError(error instanceof Error ? error.message : 'Unable to load processed records')
-      } finally {
-        setRecordsLoading(false)
-      }
-    }
-    loadProcessedRecords()
-  }, [])
 
   const resolveDup = (id: number, action: 'kept' | 'removed') => {
     setResolvedDup(prev => { const m = new Map(prev); m.set(id, action); return m })
@@ -3144,7 +3170,8 @@ function DataReviewScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) =
               <div className="flex justify-end mb-3">
                 <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
                   onClick={async () => {
-                    await approveLowSeverityFlags('demo-company')
+                    if (!companyId) throw new Error('No company is assigned to your account.')
+                    await approveLowSeverityFlags(companyId)
                     setResolvedPII(prev => {
                       const m = new Map(prev)
                       lowSeverityIds.forEach(id => m.set(id, 'approved'))
@@ -3344,7 +3371,8 @@ function DataReviewScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) =
             <div className="flex justify-end mb-3">
               <Btn size="sm" variant="teal" disabled={OUTLIERS.every(o => resolvedOut.has(o.id))}
                 onClick={async () => {
-                  await approveLowSeverityFlags('demo-company')
+                  if (!companyId) throw new Error('No company is assigned to your account.')
+                  await approveLowSeverityFlags(companyId)
                   const m = new Map(resolvedOut)
                   OUTLIERS.forEach(o => { if (!m.has(o.id)) m.set(o.id, 'approved') })
                   setResolvedOut(m)
@@ -3549,7 +3577,8 @@ function DataReviewScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) =
               <div className="flex justify-end mb-3">
                 <Btn size="sm" variant="teal" disabled={lowSeverityIds.length === 0}
                   onClick={async () => {
-                    await approveLowSeverityFlags('demo-company')
+                    if (!companyId) throw new Error('No company is assigned to your account.')
+                    await approveLowSeverityFlags(companyId)
                     const m = new Map(resolvedVal)
                     lowSeverityIds.forEach(id => m.set(id, 'approved'))
                     setResolvedVal(m)
@@ -4017,52 +4046,12 @@ const HEATMAP_FIELD_LABELS: Record<string, string> = {
 }
 
 function DataHeatmapScreen({ onNavigate }: { onNavigate: (screen: Screen) => void }) {
-  const [records, setRecords] = useState<Record<string, unknown>[]>([])
-  const [recordsLoading, setRecordsLoading] = useState(true)
-  const [recordsError, setRecordsError] = useState<string | null>(null)
-  const [recordsStatus, setRecordsStatus] = useState<number | null>(null)
+  const { records, loading: recordsLoading, error: recordsError, status: recordsStatus } = useExportedRecords()
   const [hover, setHover] = useState<{ r: number; c: number } | null>(null)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [filterField, setFilterField] = useState<string>('All fields')
   const [filterStatus, setFilterStatus] = useState<CellStatus | 'all'>('all')
   const [viewMode, setViewMode] = useState<'matrix' | 'field' | 'chart'>('matrix')
-
-  useEffect(() => {
-    let active = true
-    const loadRecords = async () => {
-      try {
-        const loadedRecords: Record<string, unknown>[] = []
-        const cursors = new Set<string>()
-        let cursor: string | undefined
-        do {
-          const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
-          const response = await apiFetch(`${API_BASE_URL}/api/companies/demo-company/export_data${query}`)
-          if (!response.ok) throw new HttpError(response.status, `Export request failed (${response.status})`)
-          if ((response.headers.get('content-type') || '').includes('json')) {
-            const data = await response.json() as ExportResponse
-            if (!Array.isArray(data.records)) throw new Error('Export response did not contain a records array')
-            loadedRecords.push(...data.records)
-            cursor = data.next_cursor
-            if (cursor && cursors.has(cursor)) throw new Error('Export returned a repeated pagination cursor')
-            if (cursor) cursors.add(cursor)
-          } else {
-            loadedRecords.push(...parseCsvRecords(await response.text(), { header: true, skipEmptyLines: true }))
-            cursor = undefined
-          }
-        } while (cursor)
-        if (active) setRecords(loadedRecords)
-      } catch (error) {
-        if (active) {
-          setRecordsStatus(error instanceof HttpError ? error.status : null)
-          setRecordsError(error instanceof Error ? error.message : 'Unable to load processed records')
-        }
-      } finally {
-        if (active) setRecordsLoading(false)
-      }
-    }
-    void loadRecords()
-    return () => { active = false }
-  }, [])
 
   const fieldKeys = [...new Set(records.flatMap(record => Object.keys(record)))].filter(key =>
     !HEATMAP_METADATA_FIELDS.has(key.toLowerCase()) && !key.toLowerCase().startsWith('validation_')
@@ -4612,7 +4601,7 @@ function ExportScreen({ onNavigate }: { onNavigate: (s: Screen) => void }) {
   const { meta } = useUploadMeta()
   const { resolvedVal: resolvedValCtx } = useValidation()
   const { resolvedOut: resolvedOutCtx, warnNotes } = useOutliers()
-  const { records: processedRecords, loading: recordsLoading, status: recordsStatus } = useExportedRecords('demo-company')
+  const { records: processedRecords, loading: recordsLoading, status: recordsStatus } = useExportedRecords()
   const [generating, setGenerating] = useState<string | null>(null)
   const [done, setDone] = useState<Set<string>>(new Set())
   const [progress, setProgress] = useState(0)
@@ -5612,15 +5601,76 @@ export default function App() {
   const [warnNotesApp,   setWarnNotesApp]   = useState<Record<number, string>>({})
   const [authUser, setAuthUser] = useState<FirebaseUser | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [companyId, setCompanyId] = useState<string | null>(null)
+  const [companyError, setCompanyError] = useState<string | null>(null)
 
   // Mirror the live Firebase Auth session so the sidebar profile/logout stay in sync
   // with sign-in and sign-out, independent of the demo role switcher.
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(getFirebaseAuth(), user => {
+    let generation = 0
+    let activeUid: string | null = null
+    let assignedCompany: string | null = null
+    const updateCompany = (nextCompany: string | null) => {
+      if (assignedCompany !== nextCompany) {
+        setUploadMeta(null)
+        setResolvedValApp(new Map())
+        setResolvedOutApp(new Map())
+        setWarnNotesApp({})
+      }
+      assignedCompany = nextCompany
+      setCompanyId(nextCompany)
+    }
+    const unsubscribe = onIdTokenChanged(getFirebaseAuth(), user => {
+      const current = ++generation
+      const nextUid = user?.uid || null
+      if (nextUid !== activeUid) {
+        updateCompany(null)
+        setRole('viewer')
+      }
+      activeUid = nextUid
       setAuthUser(user)
-      setAuthLoading(false)
+      setCompanyError(null)
+      setAuthLoading(true)
+      if (!user) {
+        setRole('viewer')
+        setAuthLoading(false)
+        return
+      }
+      const loadAccount = async () => {
+        try {
+          const { claims } = await user.getIdTokenResult()
+          if (current !== generation) return
+          const claimedRole = typeof claims.role === 'string' ? claims.role.trim().toLowerCase() : null
+          if (claimedRole === 'editor' || claimedRole === 'admin' || claimedRole === 'super-admin' || claimedRole === 'viewer') {
+            setRole(claimedRole)
+          }
+          if (claims.company_id != null) {
+            if (typeof claims.company_id !== 'string' || !claims.company_id.trim()) {
+              throw new Error('Your account has an invalid company assignment. Contact an Admin.')
+            }
+            updateCompany(claims.company_id)
+            return
+          }
+          const response = await apiFetch(`${API_BASE_URL}/api/auth/context`)
+          if (!response.ok) throw new Error((await response.text()) || `Account lookup failed (${response.status})`)
+          const account: unknown = await response.json()
+          if (!account || typeof account !== 'object' || !('company_id' in account)
+            || typeof account.company_id !== 'string' || !account.company_id.trim()) {
+            throw new Error('No company is assigned to your account. Contact an Admin.')
+          }
+          if (current === generation) updateCompany(account.company_id)
+        } catch (error) {
+          if (current === generation) {
+            updateCompany(null)
+            setCompanyError(error instanceof Error ? error.message : 'Unable to load your company assignment.')
+          }
+        } finally {
+          if (current === generation) setAuthLoading(false)
+        }
+      }
+      void loadAccount()
     })
-    return unsubscribe
+    return () => { generation += 1; unsubscribe() }
   }, [])
 
   // Derive current Screen from URL path (e.g. /dashboard → 'dashboard')
@@ -5638,10 +5688,10 @@ export default function App() {
   // If role changes and current screen is no longer allowed, redirect to dashboard
   useEffect(() => {
     const allowed = ROLE_NAV[role]
-    if (!AUTH_SCREENS.includes(screen) && !allowed.includes(screen)) {
+    if (!authLoading && !AUTH_SCREENS.includes(screen) && !allowed.includes(screen)) {
       routerNavigate('/dashboard', { replace: true })
     }
-  }, [role, screen, routerNavigate])
+  }, [role, screen, routerNavigate, authLoading])
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -5662,17 +5712,17 @@ export default function App() {
       case 'register': return <RegisterScreen onNavigate={navigate} />
       case 'forgot-password': return <ForgotPasswordScreen onNavigate={navigate} />
       case 'dashboard': return <DashboardScreen onNavigate={navigate} />
-      case 'upload': return <UploadScreen onNavigate={navigate} showToast={showToast} />
+      case 'upload': return <UploadScreen key={`${authUser?.uid}:${companyId}`} onNavigate={navigate} showToast={showToast} />
       case 'column-mapping': return <ColumnMappingScreen onNavigate={navigate} />
-      case 'data-review': return <DataReviewScreen onNavigate={navigate} showToast={showToast} />
+      case 'data-review': return <DataReviewScreen key={`${authUser?.uid}:${companyId}`} onNavigate={navigate} showToast={showToast} />
       case 'query': return <QueryScreen />
       case 'segments': return <SegmentsScreen />
       case 'campaign-generator': return <CampaignGeneratorScreen />
       case 'compliance-review': return <ComplianceReviewScreen />
       case 'financial-disclosures': return <FinancialDisclosureScreen />
       case 'analytics': return <AnalyticsScreen onNavigate={navigate} />
-      case 'data-heatmap': return <DataHeatmapScreen onNavigate={navigate} />
-      case 'export': return <ExportScreen onNavigate={navigate} />
+      case 'data-heatmap': return <DataHeatmapScreen key={`${authUser?.uid}:${companyId}`} onNavigate={navigate} />
+      case 'export': return <ExportScreen key={`${authUser?.uid}:${companyId}`} onNavigate={navigate} />
       case 'team': return <TeamScreen showToast={showToast} />
       case 'audit-log': return <AuditLogScreen />
       case 'scrubbing-sessions': return <ScrubbingSessionsScreen />
@@ -5685,7 +5735,7 @@ export default function App() {
 
   if (isAuth) {
     return (
-      <AuthContext.Provider value={{ user: authUser, authLoading }}>
+      <AuthContext.Provider value={{ user: authUser, authLoading, companyId, companyError }}>
       <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
       <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
       <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>
@@ -5701,7 +5751,7 @@ export default function App() {
   }
 
   return (
-    <AuthContext.Provider value={{ user: authUser, authLoading }}>
+    <AuthContext.Provider value={{ user: authUser, authLoading, companyId, companyError }}>
     <OutlierContext.Provider value={{ resolvedOut: resolvedOutApp, setResolvedOut: setResolvedOutApp, warnNotes: warnNotesApp, setWarnNotes: setWarnNotesApp }}>
     <ValidationContext.Provider value={{ resolvedVal: resolvedValApp, setResolvedVal: setResolvedValApp }}>
     <UploadContext.Provider value={{ meta: uploadMeta, setMeta: setUploadMeta }}>

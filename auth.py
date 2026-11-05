@@ -75,13 +75,8 @@ def require_role(allowed_roles: Iterable[str]) -> Callable[..., dict]:
     return _check_role
 
 
-def verify_company_access(
-    company_id: str, token: dict = Depends(verify_firebase_token)
-) -> dict:
-    """Scope users to a signed company claim or, when absent, their user document."""
-    if str(token.get("role") or "").strip().lower() == "super-admin":
-        return token
-
+def get_user_company_id(token: dict) -> str:
+    """Resolve the caller's company using the same source as tenant authorization."""
     user_company = token.get("company_id")
     if user_company is None:
         uid = token.get("uid") or token.get("sub")
@@ -108,11 +103,22 @@ def verify_company_access(
             (snapshot.to_dict() or {}).get("company_id") if snapshot.exists else None
         )
 
-    if (
-        not isinstance(user_company, str)
-        or not user_company
-        or user_company != company_id
-    ):
+    if not isinstance(user_company, str) or not user_company.strip():
+        raise HTTPException(
+            status_code=403,
+            detail="Company scope mismatch: no company is assigned to the authenticated user.",
+        )
+    return user_company
+
+
+def verify_company_access(
+    company_id: str, token: dict = Depends(verify_firebase_token)
+) -> dict:
+    """Scope users to a signed company claim or, when absent, their user document."""
+    if str(token.get("role") or "").strip().lower() == "super-admin":
+        return token
+
+    if get_user_company_id(token) != company_id:
         raise HTTPException(
             status_code=403,
             detail=(

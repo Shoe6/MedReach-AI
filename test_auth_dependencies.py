@@ -219,6 +219,58 @@ def test_missing_bearer_token_remains_401():
     assert "Missing bearer token" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("role", ["editor", "admin", "super-admin", "viewer"])
+def test_auth_context_returns_only_current_user_metadata(monkeypatch, role):
+    monkeypatch.setattr(
+        firebase_auth,
+        "verify_id_token",
+        lambda _: {
+            "uid": "user-1",
+            "role": role,
+            "company_id": "real-company",
+            "unrelated_claim": "not-returned",
+        },
+    )
+    response = client.get("/api/auth/context", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json() == {"role": role, "company_id": "real-company"}
+
+
+def test_auth_context_uses_firestore_company_assignment(monkeypatch):
+    user_database(monkeypatch, company_id="assigned-company")
+    monkeypatch.setattr(
+        firebase_auth,
+        "verify_id_token",
+        lambda _: {
+            "uid": "user-1",
+            "role": "editor",
+        },
+    )
+    response = client.get("/api/auth/context", headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json()["company_id"] == "assigned-company"
+
+
+def test_auth_context_never_guesses_a_company(monkeypatch):
+    user_database(monkeypatch, exists=False)
+    monkeypatch.setattr(
+        firebase_auth,
+        "verify_id_token",
+        lambda _: {
+            "uid": "user-1",
+            "role": "super-admin",
+        },
+    )
+    response = client.get("/api/auth/context", headers=HEADERS)
+    assert response.status_code == 403
+    assert "no company is assigned" in response.json()["detail"]
+
+
+def test_auth_context_requires_bearer_token():
+    response = client.get("/api/auth/context", headers={"X-User-Role": "admin"})
+    assert response.status_code == 401
+
+
 @pytest.mark.parametrize("company_id", ["", 123, ["acme"], {"id": "acme"}])
 def test_malformed_company_claim_is_not_authorized(monkeypatch, company_id):
     monkeypatch.setattr(
