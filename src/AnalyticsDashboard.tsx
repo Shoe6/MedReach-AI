@@ -72,7 +72,7 @@ function parseAnalytics(value: unknown, companyId: string): Analytics {
 
 async function fetchAnalytics(companyId: string, signal: AbortSignal): Promise<Analytics> {
   const response = await apiFetch(
-    `${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}/analytics`,
+    `${API_BASE_URL}/api/analytics/dashboard`,
     { signal },
   )
   if (!response.ok) {
@@ -121,6 +121,12 @@ export default function AnalyticsDashboard({ companyId }: { companyId: string })
   const [loading, setLoading] = useState(true)
   const [attempt, setAttempt] = useState(0)
 
+  const retry = () => {
+    setLoading(true)
+    setError(null)
+    setAttempt(value => value + 1)
+  }
+
   useEffect(() => {
     const controller = new AbortController()
     const load = async () => {
@@ -156,7 +162,7 @@ export default function AnalyticsDashboard({ companyId }: { companyId: string })
         <p className="font-bold text-[#C0392B]">Unable to load analytics</p>
         <p className="text-[13px] mt-1 whitespace-pre-wrap">{error || 'No analytics response received.'}</p>
         <button type="button" className="mt-3 text-[13px] font-bold text-[#1B3A6B] underline"
-          onClick={() => setAttempt(value => value + 1)}>Retry</button>
+          onClick={retry}>Retry</button>
       </div>
     )
   }

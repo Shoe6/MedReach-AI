@@ -20,6 +20,7 @@ function load(fetch) {
   const effects = []
   const requests = []
   let slot = 0
+  let previousDependencies
   const react = {
     ...React,
     useState(initial) {
@@ -29,7 +30,12 @@ function load(fetch) {
         states[index] = typeof value === 'function' ? value(states[index]) : value
       }]
     },
-    useEffect(effect) { effects.push(effect) },
+    useEffect(effect, dependencies) {
+      if (!previousDependencies || dependencies.some((value, index) => !Object.is(value, previousDependencies[index]))) {
+        effects.push(effect)
+        previousDependencies = dependencies
+      }
+    },
   }
   const modules = {
     react,
@@ -79,13 +85,13 @@ function text(node) {
 
 const settle = () => new Promise(resolve => setImmediate(resolve))
 
-test('fetches the encoded company endpoint and renders all three metrics', async () => {
+test('fetches the exact backend analytics route and renders all three metrics', async () => {
   const app = load(async () => Response.json(payload))
   assert.match(text(app.render()), /Loading analytics/)
   app.effect()
   await settle()
   const tree = expand(app.render())
-  assert.equal(app.requests[0][0], '/api/companies/company%20%26%20one/analytics')
+  assert.equal(app.requests[0][0], '/api/analytics/dashboard')
   assert.ok(app.requests[0][1].signal instanceof AbortSignal)
   assert.match(text(tree), /Cardiology/)
   assert.match(text(tree), /CA/)
@@ -101,18 +107,21 @@ for (const status of [401, 403, 404, 503]) {
     const app = load(async () => ++attempts === 1
       ? Response.json({ detail: 'Request denied' }, { status })
       : Response.json(payload))
-    app.render()
+    assert.match(text(app.render()), /Loading analytics/)
     app.effect()
     await settle()
     const error = app.render()
     assert.match(text(error), new RegExp(String(status)))
     assert.match(text(error), /Request denied/)
     elements(error).find(node => node.type === 'button').props.onClick()
-    app.render()
+    assert.match(text(app.render()), /Loading analytics/)
     app.effect()
     await settle()
     assert.doesNotMatch(text(expand(app.render())), /Unable to load analytics/)
     assert.equal(attempts, 2)
+    assert.deepEqual(app.requests.map(([url]) => url), [
+      '/api/analytics/dashboard', '/api/analytics/dashboard',
+    ])
   })
 }
 
@@ -143,7 +152,8 @@ for (const invalid of [
 
 test('cancelled stale response cannot replace the next company data', async () => {
   let finish
-  const app = load(async url => url.includes('old-company')
+  let requests = 0
+  const app = load(async () => ++requests === 1
     ? new Promise(resolve => { finish = resolve })
     : Response.json({ ...payload, company_id: 'new-company' }))
   app.render('old-company')

@@ -157,13 +157,14 @@ deletes a temporary emulator user and verifies that the backend rejects its ID t
 
 ### Analytics dashboard (MA-99)
 
-The React Analytics page uses authenticated
-`GET /api/companies/{companyId}/analytics` with the signed-in account's company.
+The React Analytics page uses authenticated `GET /api/analytics/dashboard`.
+The backend derives the company from the signed-in account; the frontend does not
+send a company path parameter and verifies the returned company matches its context.
 It renders a quality trend line chart (with a data table), specialty and geographic
 tables, and explicit loading, retryable error, and per-series empty states.
 Responses are validated before charting; unmounted requests are cancelled.
-The deployed backend must expose that company-scoped route. The endpoint below
-is the original account-scoped backend route, not an automatic client fallback.
+Retry immediately shows loading and sends a fresh authenticated request to the
+same endpoint. Company changes cancel outstanding requests and reload analytics.
 
 `GET /api/analytics/dashboard` requires a verified Firebase ID token (401 when
 missing/invalid), but no role claim. It derives the company from the signed
