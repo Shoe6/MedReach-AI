@@ -166,7 +166,9 @@ def test_dashboard_metrics_only_require_authenticated_user(monkeypatch, path, cl
             return _EmptyCollection()
 
     monkeypatch.setattr(main, "db", _EmptyDb())
-    monkeypatch.setattr(firebase_auth, "verify_id_token", lambda _token: {"uid": "u1", **claims})
+    monkeypatch.setattr(firebase_auth, "verify_id_token", lambda _token: {
+        "uid": "u1", "company_id": "acme", **claims,
+    })
     token_header = " ".join(["Bearer", "valid-test-token"])
     response = client.get(path, headers={"Authorization": token_header})
     assert response.status_code == 200, response.text

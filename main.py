@@ -18,7 +18,12 @@ from google.auth.transport import requests as google_auth_requests
 from google.cloud import storage as gcs_storage
 from pydantic import BaseModel
 
-from auth import require_role, verify_firebase_token
+from auth import (
+    require_company_role,
+    require_role,
+    verify_company_access,
+    verify_firebase_token,
+)
 from database import db, USE_EMULATOR
 from data_health_score_service import calculate_data_health
 from nlp_query_router import router as nlp_query_router
@@ -73,6 +78,9 @@ require_authenticated_editor = require_role(PROCESSING_ROLES)
 require_admin = require_role(ADMIN_ROLES)
 require_editor_or_above = require_role(EDITOR_ROLES)
 require_viewer_or_above = require_role(VIEWER_ROLES)
+require_company_editor = require_company_role(["editor"])
+require_company_viewer = require_company_role(["viewer"])
+require_company_admin = require_company_role(["admin"])
 # Any signed-in Firebase user, regardless of role claim.
 require_authenticated_user = verify_firebase_token
 FIRESTORE_PAGE_SIZE = 500
@@ -110,7 +118,15 @@ def _local_e2e_identity(request: Request) -> dict[str, str]:
 
 
 if LOCAL_E2E_MODE:
-    for _dependency in (require_authenticated_editor, require_admin, require_editor_or_above, require_viewer_or_above):
+    for _dependency in (
+        require_authenticated_editor,
+        require_admin,
+        require_editor_or_above,
+        require_viewer_or_above,
+        require_company_editor,
+        require_company_viewer,
+        require_company_admin,
+    ):
         app.dependency_overrides[_dependency] = _local_e2e_identity
 
 
@@ -544,7 +560,7 @@ async def start_company_upload_processing(
     company_id: str,
     payload: ProcessUploadPayload,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(require_authenticated_editor),
+    user: dict = Depends(require_company_editor),
 ):
     """Queue an owner-scoped GCS CSV for bounded, asynchronous scrubbing."""
     owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
@@ -600,7 +616,7 @@ async def start_company_upload_processing(
 async def get_company_upload_processing_status(
     company_id: str,
     job_id: str,
-    user: dict = Depends(require_authenticated_editor),
+    user: dict = Depends(require_company_editor),
 ):
     """Return processing status only to the user who staged the source object."""
     owner_uid = str(user.get("uid") or user.get("sub") or "").strip()
@@ -806,7 +822,7 @@ async def generate_upload_url(
     company_id: str,
     payload: GenerateUploadUrlRequest,
     request: Request,
-    _role: str = Depends(require_editor_or_above),
+    _user: dict = Depends(require_company_editor),
 ):
     """Return an upload URL for the client to PUT the raw file to.
 
@@ -879,7 +895,7 @@ async def receive_local_upload(upload_id: str, request: Request):
 async def upload_company_file(
     company_id: str,
     file: UploadFile = File(...),
-    _role: str = Depends(require_editor_or_above),
+    _user: dict = Depends(require_company_editor),
 ):
     """Upload a file for a specific company tenant and return its upload metadata. Viewers are blocked."""
     if not file.filename:
@@ -928,7 +944,10 @@ async def upload_company_file(
     }
 
 
-@app.get("/api/companies/{company_id}/dashboard_metrics", dependencies=[Depends(require_authenticated_user)])
+@app.get(
+    "/api/companies/{company_id}/dashboard_metrics",
+    dependencies=[Depends(verify_company_access)],
+)
 async def get_company_dashboard_metrics(company_id: str):
     """Score processed records, falling back to legacy upload metadata when absent.
 
@@ -994,23 +1013,29 @@ async def get_company_dashboard_metrics(company_id: str):
     }
 
 
-@app.get("/api/companies/{company_name}/records", dependencies=[Depends(require_viewer_or_above)])
-async def get_company_records(company_name: str):
+@app.get(
+    "/api/companies/{company_id}/records",
+    dependencies=[Depends(require_company_viewer)],
+)
+async def get_company_records(company_id: str):
     """Return an empty records collection for the company dashboard."""
-    return {"company_name": company_name, "records": []}
+    return {"company_name": company_id, "records": []}
 
 
-@app.get("/api/companies/{company_name}/provider_walkthrough", dependencies=[Depends(require_viewer_or_above)])
-async def get_company_provider_walkthrough(company_name: str):
+@app.get(
+    "/api/companies/{company_id}/provider_walkthrough",
+    dependencies=[Depends(require_company_viewer)],
+)
+async def get_company_provider_walkthrough(company_id: str):
     """Return an empty provider walkthrough collection for the dashboard."""
-    return {"company_name": company_name, "records": []}
+    return {"company_name": company_id, "records": []}
 
 
 @app.post("/api/companies/{company_id}/users/invite", status_code=201)
 async def invite_company_user(
     company_id: str,
     payload: InviteUserPayload,
-    admin: dict = Depends(require_admin),
+    admin: dict = Depends(require_company_admin),
 ):
     """Create a tenant-scoped invitation, provision the Auth account, and send a verification email. Admin role is required."""
     admin_role = str(admin.get("role") or "")
@@ -1026,7 +1051,11 @@ async def invite_company_user(
         except auth.EmailAlreadyExistsError:
             user_record = auth.get_user_by_email(payload.email)
 
-        auth.set_custom_user_claims(user_record.uid, {"role": invited_role})
+        auth.set_custom_user_claims(user_record.uid, {
+            **(user_record.custom_claims or {}),
+            "role": invited_role,
+            "company_id": company_id,
+        })
         verification_link = auth.generate_email_verification_link(payload.email)
 
         invitation_id = str(uuid4())
@@ -1053,7 +1082,7 @@ async def invite_company_user(
 async def delete_company_dataset(
     company_id: str,
     upload_id: str,
-    admin: dict = Depends(require_admin),
+    admin: dict = Depends(require_company_admin),
 ):
     """Soft-delete a dataset upload. Admin role is required."""
     admin_role = str(admin.get("role") or "")
@@ -1081,7 +1110,7 @@ async def delete_company_dataset(
 async def update_company_billing_plan(
     company_id: str,
     payload: BillingPlanUpdatePayload,
-    admin: dict = Depends(require_admin),
+    admin: dict = Depends(require_company_admin),
 ):
     """Update a company's billing plan. Admin role is required."""
     admin_role = str(admin.get("role") or "")
@@ -1102,7 +1131,11 @@ async def update_company_billing_plan(
 
 
 @app.post("/api/companies/{company_id}/records/merge")
-async def merge_company_records(company_id: str, payload: dict, _role: str = Depends(require_editor_or_above)):
+async def merge_company_records(
+    company_id: str,
+    payload: dict,
+    _user: dict = Depends(require_company_editor),
+):
     """Merge a duplicate cluster into a master record and archive the rest. Viewers are blocked.
 
     Request body should look like:
@@ -1181,7 +1214,7 @@ class BulkApproveLowSeverityPayload(BaseModel):
 async def approve_low_severity_flags_endpoint(
     company_id: str,
     payload: BulkApproveLowSeverityPayload,
-    _role: str = Depends(require_editor_or_above),
+    _user: dict = Depends(require_company_editor),
 ):
     """Bulk-approve all Low-severity flags for a company. Viewers are blocked.
 
@@ -1196,7 +1229,10 @@ async def approve_low_severity_flags_endpoint(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/companies/{company_id}/export_data", dependencies=[Depends(require_viewer_or_above)])
+@app.get(
+    "/api/companies/{company_id}/export_data",
+    dependencies=[Depends(require_company_viewer)],
+)
 async def export_company_data(
     company_id: str,
     page_size: int = Query(FIRESTORE_PAGE_SIZE, ge=1, le=1000),

@@ -107,9 +107,22 @@ attaches the same ID token. The backend authorizes using the token's `role` cust
 claim (`viewer`, `editor`, `admin`, `super-admin`); `X-User-Role` is no longer honored.
 The dashboard metric endpoints (`/api/dashboard/summary` and
 `/api/companies/{company_id}/dashboard_metrics`) only require a valid signed-in
-Firebase user; no role claim is needed.
+Firebase user; no role claim is needed. The company-specific endpoint also
+requires tenant access.
 Assign a role with `python set_user_role.py <email> <role>` (invited users get their
 claim automatically), then sign out and back in to refresh the token.
+
+Backend role requirements inherit higher roles: Viewer < Editor < Admin <
+Super Admin. Company routes check the verified token's `company_id` claim; when
+absent, they read `users/{uid}.company_id` in Firestore. Admin, Editor, and Viewer
+must match the path company ID exactly. Verified Super Admins retain cross-company
+access. Invitations provision both role and company claims while preserving other
+custom claims. Existing users need a company claim or an assigned Firestore user
+document; frontend preview roles and company IDs never grant access.
+
+Missing/invalid tokens return 401. Insufficient roles return 403 with `Invalid role`;
+missing/mismatched tenant assignments return 403 with `Company scope mismatch`.
+An unavailable Firestore membership lookup returns 503 rather than allowing access.
 
 Restart FastAPI and Vite after changing environment variables. Set
 `VITE_FIREBASE_PROJECT_ID=medreachai-679aa`, `VITE_USE_AUTH_EMULATOR=false`, and
@@ -130,8 +143,8 @@ deletes a temporary emulator user and verifies that the backend rejects its ID t
   uses a Firebase bearer token and returns `signed_url`, `object_name`, and
   `expires_in` for owner-scoped CSV processing. Local E2E mode retains its
   development-only, loopback-restricted upload flow.
-* `POST /api/companies/{company_id}/uploads/generate-url` uses `X-User-Role`
-  (Editor or above) and returns `upload_id`, `upload_url`, and `storage_path`.
+* `POST /api/companies/{company_id}/uploads/generate-url` uses a Firebase bearer token
+  (Editor or above, with company access) and returns `upload_id`, `upload_url`, and `storage_path`.
   The request body contains `filename` and optional `content_type`; the company
   comes from the URL. In emulator mode, the upload URL targets a local receiver.
 

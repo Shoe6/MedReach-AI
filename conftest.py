@@ -23,7 +23,10 @@ def _header_claims(
     role = request.headers.get("x-user-role")
     if role is None:
         raise HTTPException(status_code=401, detail="Missing bearer token in Authorization header.")
-    return {"uid": "test-user", "role": role.strip().lower()}
+    return {
+        "uid": "test-user", "role": role.strip().lower(),
+        "company_id": request.path_params.get("company_id"),
+    }
 
 
 _real_verify = auth.verify_firebase_token
