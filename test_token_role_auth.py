@@ -117,6 +117,8 @@ def test_invalid_token_is_rejected(monkeypatch):
     ],
 )
 def test_role_claim_in_verified_token_controls_access(monkeypatch, claims, path, expected):
+    import auth
+    monkeypatch.setattr(auth, "get_user_document", lambda _uid: None)
     monkeypatch.setattr(firebase_auth, "verify_id_token", lambda _token: {"uid": "u1", **claims})
     method = "patch" if path.endswith("billing-plan") else "get"
     kwargs = {"json": {"plan": "Pro"}} if method == "patch" else {}
@@ -131,6 +133,8 @@ def test_role_claim_in_verified_token_controls_access(monkeypatch, claims, path,
 )
 @pytest.mark.parametrize("claims", [{}, {"role": "viewer"}, {"role": "unknown"}])
 def test_dashboard_metrics_only_require_authenticated_user(monkeypatch, path, claims):
+    import auth
+    monkeypatch.setattr(auth, "get_user_document", lambda _uid: None)
     import main
 
     class _EmptyCollection:

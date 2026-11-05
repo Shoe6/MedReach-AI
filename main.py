@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from auth import (
     get_user_company_id,
     get_user_document,
+    get_user_role,
     require_company_role,
     require_role,
     verify_company_access,
@@ -76,7 +77,7 @@ EDITOR_ROLES = frozenset({"editor", "admin", "super-admin"})
 VIEWER_ROLES = frozenset({"viewer"}) | EDITOR_ROLES
 PROCESSING_ROLES = ("editor", "admin", "super-admin")
 require_authenticated_editor = require_role(PROCESSING_ROLES)
-# Role checks are driven by the `role` custom claim of the verified Firebase ID token.
+# Signed roles take precedence; unassigned claims fall back to users/{uid}.role.
 require_admin = require_role(ADMIN_ROLES)
 require_editor_or_above = require_role(EDITOR_ROLES)
 require_viewer_or_above = require_role(VIEWER_ROLES)
@@ -101,7 +102,7 @@ def get_auth_context(user: dict = Depends(verify_firebase_token)) -> dict:
         company_claims["company_id"] = profile.get("company_id", "")
     return {
         "uid": uid,
-        "role": str(user.get("role") or "").strip().lower(),
+        "role": get_user_role(user, profile),
         "company_id": get_user_company_id(company_claims),
     }
 

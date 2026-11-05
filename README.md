@@ -105,6 +105,9 @@ a verified identity, not an `X-User-Role` header. Signed-out users must sign in.
 All other `/api/**` calls (except `/api/health`) go through `src/apiClient.ts`, which
 attaches the same ID token. The backend authorizes using the token's `role` custom
 claim (`viewer`, `editor`, `admin`, `super-admin`); `X-User-Role` is no longer honored.
+Missing, empty, whitespace-only, or `none` role claims fall back to
+`users/{uid}.role`. Explicit Viewer or unknown claims are never upgraded from the
+profile. Resolved roles are passed to downstream handlers and tenant checks.
 The dashboard metric endpoints (`/api/dashboard/summary` and
 `/api/companies/{company_id}/dashboard_metrics`) only require a valid signed-in
 Firebase user; no role claim is needed. The company-specific endpoint also
@@ -126,8 +129,8 @@ their original details, not as an Editor-only restriction.
 On Firebase token changes, the frontend loads the signed `company_id` claim or
 calls authenticated `GET /api/auth/context` to resolve `users/{uid}.company_id`.
 The endpoint always reads `users/{uid}` and returns `uid`, `role`, and `company_id`.
-Verified token role/company claims remain authoritative; an absent company claim
-falls back to the profile. A missing profile returns 404, an unassigned company
+Explicit token role/company claims remain authoritative; unassigned role claims
+and absent company claims fall back to the profile. A missing profile returns 404, an unassigned company
 returns 403, and a failed Firestore lookup returns 503.
 Upload signing, record merge, Data Review, heatmap, and export requests use that
 company instead of `demo-company`. Missing assignments are displayed explicitly;

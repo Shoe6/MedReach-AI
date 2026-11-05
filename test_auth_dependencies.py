@@ -17,11 +17,13 @@ HEADERS = {"Authorization": "Bearer test-token"}
 @pytest.mark.parametrize("role", ["editor", "admin", "super-admin", " Admin "])
 def test_editor_requirement_inherits_higher_roles(role):
     token = {"uid": "user-1", "role": role}
-    assert auth.require_role(["editor"])(token) is token
+    result = auth.require_role(["editor"])(token)
+    assert result == {**token, "role": role.strip().lower()}
 
 
 @pytest.mark.parametrize("role", ["viewer", "unknown", "", None])
-def test_editor_requirement_rejects_invalid_roles_clearly(role):
+def test_editor_requirement_rejects_invalid_roles_clearly(monkeypatch, role):
+    user_database(monkeypatch)
     with pytest.raises(HTTPException) as error:
         auth.require_role(["editor"])({"uid": "user-1", "role": role})
     assert error.value.status_code == 403
@@ -151,13 +153,13 @@ def test_viewer_upload_reports_role_failure_before_scope(monkeypatch):
     assert "Company scope" not in response.json()["detail"]
 
 
-def user_database(monkeypatch, company_id=None, exists=True, failure=None):
+def user_database(monkeypatch, company_id=None, exists=True, failure=None, role=None):
     class Snapshot:
         def __init__(self):
             self.exists = exists
 
         def to_dict(self):
-            return {"company_id": company_id}
+            return {"company_id": company_id, "role": role}
 
     class Reference:
         def get(self, **kwargs):
@@ -312,6 +314,89 @@ def test_auth_context_rejects_unassigned_profile(monkeypatch):
     response = client.get("/api/auth/context", headers=HEADERS)
     assert response.status_code == 403
     assert "no company is assigned" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("claim", [None, "", " ", "none", " None "])
+@pytest.mark.parametrize("role", ["Editor", "Admin", "Super-Admin"])
+def test_missing_role_uses_firestore_for_context_and_upload(monkeypatch, claim, role):
+    user_database(monkeypatch, company_id="acme", role=role)
+    token = {"uid": "user-1", "role": claim}
+    monkeypatch.setattr(firebase_auth, "verify_id_token", lambda _: token)
+    context = client.get("/api/auth/context", headers=HEADERS)
+    assert context.status_code == 200, context.text
+    assert context.json() == {
+        "uid": "user-1",
+        "role": role.lower(),
+        "company_id": "acme",
+    }
+
+    class Blob:
+        def generate_signed_url(self, **kwargs):
+            return "https://storage.example.test/signed-upload"
+
+    class Bucket:
+        def blob(self, object_name):
+            assert object_name.startswith("companies/acme/uploads/")
+            return Blob()
+
+    monkeypatch.setattr(main, "USE_EMULATOR", False)
+    monkeypatch.setattr(main, "_iam_signing_kwargs", lambda: {})
+    monkeypatch.setattr(main.storage, "bucket", lambda: Bucket())
+    response = client.post(
+        "/api/companies/acme/uploads/generate-url",
+        headers=HEADERS,
+        json={"filename": "data.csv"},
+    )
+    assert response.status_code == 200, response.text
+    assert token["role"] == claim
+
+
+@pytest.mark.parametrize("claim", ["viewer", "unknown"])
+def test_explicit_role_is_never_upgraded_by_profile(monkeypatch, claim):
+    user_database(monkeypatch, company_id="acme", role="super-admin")
+    token = {"uid": "user-1", "role": claim}
+    monkeypatch.setattr(firebase_auth, "verify_id_token", lambda _: token)
+    response = client.post(
+        "/api/companies/acme/uploads/generate-url",
+        headers=HEADERS,
+        json={"filename": "data.csv"},
+    )
+    assert response.status_code == 403
+    assert "Invalid role" in response.json()["detail"]
+    context = client.get("/api/auth/context", headers=HEADERS)
+    assert context.status_code == 200
+    assert context.json()["role"] == claim
+
+
+@pytest.mark.parametrize("profile_role", [None, "", "none", "viewer", "unknown"])
+def test_unprivileged_profile_does_not_authorize_editor(monkeypatch, profile_role):
+    user_database(monkeypatch, company_id="acme", role=profile_role)
+    with pytest.raises(HTTPException) as error:
+        auth.require_role(["editor"])({"uid": "user-1"})
+    assert error.value.status_code == 403
+    assert "Invalid role" in error.value.detail
+
+
+def test_firestore_role_failure_does_not_authorize(monkeypatch):
+    user_database(monkeypatch, failure=ServiceUnavailable("unavailable"))
+    with pytest.raises(HTTPException) as error:
+        auth.require_role(["editor"])({"uid": "user-1"})
+    assert error.value.status_code == 503
+
+
+def test_firestore_super_admin_retains_cross_company_access(monkeypatch):
+    user_database(monkeypatch, company_id="other-company", role="Super-Admin")
+    token = {"uid": "user-1"}
+    result = auth.verify_company_access("acme", token)
+    assert result == {"uid": "user-1", "role": "super-admin"}
+
+
+def test_firestore_admin_is_still_tenant_scoped(monkeypatch):
+    user_database(monkeypatch, company_id="other-company", role="Admin")
+    monkeypatch.setattr(firebase_auth, "verify_id_token", lambda _: {"uid": "user-1"})
+    response = client.get("/api/companies/acme/records", headers=HEADERS)
+    assert response.status_code == 403
+    assert "Company scope mismatch" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("company_id", ["", 123, ["acme"], {"id": "acme"}])

@@ -61,7 +61,7 @@ def require_role(allowed_roles: Iterable[str]) -> Callable[..., dict]:
     )
 
     def _check_role(token: dict = Depends(verify_firebase_token)) -> dict:
-        role = str(token.get("role") or "").strip().lower()
+        role = get_user_role(token)
         if role not in allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -70,7 +70,7 @@ def require_role(allowed_roles: Iterable[str]) -> Callable[..., dict]:
                     f"requires one of {', '.join(sorted(allowed))}."
                 ),
             )
-        return token
+        return token if token.get("role") == role else {**token, "role": role}
 
     return _check_role
 
@@ -93,6 +93,21 @@ def get_user_document(uid: str) -> dict | None:
             detail="Unable to verify company access; please try again.",
         ) from exc
     return (snapshot.to_dict() or {}) if snapshot.exists else None
+
+
+def get_user_role(token: dict, profile: dict | None = None) -> str:
+    """Use a signed role when present, otherwise resolve it from users/{uid}."""
+    role = str(token.get("role") or "").strip().lower()
+    if role not in {"", "none"}:
+        return role
+    if profile is None:
+        uid = token.get("uid") or token.get("sub")
+        if not isinstance(uid, str) or not uid.strip():
+            raise HTTPException(
+                status_code=401, detail="Authenticated user is missing a UID."
+            )
+        profile = get_user_document(uid) or {}
+    return str(profile.get("role") or "").strip().lower()
 
 
 def get_user_company_id(token: dict) -> str:
@@ -118,8 +133,10 @@ def verify_company_access(
     company_id: str, token: dict = Depends(verify_firebase_token)
 ) -> dict:
     """Scope users to a signed company claim or, when absent, their user document."""
-    if str(token.get("role") or "").strip().lower() == "super-admin":
-        return token
+    role = get_user_role(token)
+    resolved = token if token.get("role") == role else {**token, "role": role}
+    if role == "super-admin":
+        return resolved
 
     if get_user_company_id(token) != company_id:
         raise HTTPException(
@@ -129,7 +146,7 @@ def verify_company_access(
                 "to the authenticated user."
             ),
         )
-    return token
+    return resolved
 
 
 def require_company_role(allowed_roles: Iterable[str]) -> Callable[..., dict]:
