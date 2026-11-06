@@ -194,6 +194,11 @@ Distribution totals include undated records and an `Unknown` bucket for missing
 labels. Empty datasets return empty arrays. Missing company assignments return
 403; Firestore read failures return 503, never synthetic successful metrics.
 The synchronous route runs blocking Firestore work in FastAPI's worker pool.
+Analytics reads use document-ID ordering and `start_after` snapshot cursors,
+fetching at most 1,000 records per stream with a separate 30-second read deadline.
+Pages are combined before aggregation; a failed page returns 503 rather than
+partial metrics. Combined records still occupy memory proportional to dataset
+size, and concurrent record changes are not a point-in-time snapshot across pages.
 
 ### Large record merges
 

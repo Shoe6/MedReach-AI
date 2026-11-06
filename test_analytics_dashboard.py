@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 from firebase_admin import auth as firebase_auth
-from google.api_core.exceptions import ServiceUnavailable
+from google.api_core.exceptions import DeadlineExceeded, ServiceUnavailable
 
 import auth
 import main
@@ -16,22 +16,43 @@ client = TestClient(main.app)
 HEADERS = {"Authorization": "Bearer analytics-test-token"}
 
 
-def database(monkeypatch, records, failure=None):
+def database(monkeypatch, records, failure=None, page_calls=None, failure_page=0):
     calls = []
 
     class Snapshot:
-        def __init__(self, value):
+        def __init__(self, value, index):
             self.value = value
+            self.index = index
 
         def to_dict(self):
             return self.value
 
     class Records:
+        def __init__(self, start=0):
+            self.start = start
+
+        def order_by(self, field):
+            assert field == "__name__"
+            return self
+
+        def limit(self, count):
+            assert count == 1000
+            return self
+
+        def start_after(self, snapshot):
+            assert isinstance(snapshot, Snapshot)
+            return Records(snapshot.index + 1)
+
         def stream(self, **kwargs):
-            assert kwargs == {"retry": None, "timeout": 3.0}
-            if failure:
+            assert kwargs == {"retry": None, "timeout": 30.0}
+            if page_calls is not None:
+                page_calls.append(self.start)
+            if failure and self.start // 1000 == failure_page:
                 raise failure
-            return iter(Snapshot(record) for record in records)
+            return iter(
+                Snapshot(records[index], index)
+                for index in range(self.start, min(self.start + 1000, len(records)))
+            )
 
     class Company:
         def collection(self, name):
@@ -149,6 +170,40 @@ def test_firestore_failure_is_not_a_success_shaped_empty_response(monkeypatch):
     response = client.get("/api/analytics/dashboard", headers=HEADERS)
     assert response.status_code == 503
     assert "Unable to load analytics data" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("count", [0, 999, 1000, 1001, 2000, 30000])
+def test_endpoint_reads_all_pages_without_skipping_or_double_counting(monkeypatch, count):
+    records = [
+        {
+            "specialty": "Cardiology" if index % 2 == 0 else "Oncology",
+            "state": "CA" if index % 3 == 0 else "NY",
+            "created_at": f"2026-11-{index % 3 + 1:02d}",
+        }
+        for index in range(count)
+    ]
+    pages = []
+    calls = database(monkeypatch, records, page_calls=pages)
+    authenticate(monkeypatch, company_id="assigned-company")
+    response = client.get("/api/analytics/dashboard", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    assert calls == ["assigned-company"]
+    assert pages == list(range(0, count + 1, 1000))
+    assert response.json() == {"company_id": "assigned-company", **aggregate_analytics(records)}
+
+
+def test_later_page_timeout_returns_503_not_partial_analytics(monkeypatch, caplog):
+    pages = []
+    database(
+        monkeypatch, [{} for _ in range(1001)], page_calls=pages,
+        failure=DeadlineExceeded("504 Stream removed"), failure_page=1,
+    )
+    authenticate(monkeypatch, company_id="assigned-company")
+    response = client.get("/api/analytics/dashboard", headers=HEADERS)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Unable to load analytics data; please try again."}
+    assert pages == [0, 1000]
+    assert "Unable to load analytics records." in caplog.text
 
 
 def test_aggregation_normalizes_labels_scores_cohorts_and_tracks_undated_records():

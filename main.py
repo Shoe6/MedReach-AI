@@ -127,6 +127,8 @@ def get_auth_context(user: dict = Depends(verify_firebase_token)) -> dict:
 
 
 FIRESTORE_PAGE_SIZE = 500
+ANALYTICS_PAGE_SIZE = 1000
+ANALYTICS_READ_TIMEOUT_SECONDS = 30.0
 UPLOAD_BUCKET = "medreach-ai-uploads"
 LOCAL_E2E_MODE = os.getenv("MEDREACH_E2E_LOCAL_MODE") == "1"
 LOCAL_E2E_UID = "local-e2e-user"
@@ -151,13 +153,22 @@ def get_analytics_dashboard(user: dict = Depends(verify_firebase_token)) -> dict
     """Aggregate only the authenticated account's assigned company records."""
     company_id = get_user_company_id(user)
     try:
-        records = [
-            document.to_dict() or {}
-            for document in db.collection("companies")
+        records_query = (
+            db.collection("companies")
             .document(company_id)
             .collection("records")
-            .stream(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
-        ]
+            .order_by("__name__")
+            .limit(ANALYTICS_PAGE_SIZE)
+        )
+        records = []
+        cursor = None
+        while True:
+            page_query = records_query if cursor is None else records_query.start_after(cursor)
+            page = list(page_query.stream(retry=None, timeout=ANALYTICS_READ_TIMEOUT_SECONDS))
+            records.extend(document.to_dict() or {} for document in page)
+            if len(page) < ANALYTICS_PAGE_SIZE:
+                break
+            cursor = page[-1]
     except GoogleAPICallError as exc:
         logger.exception("Unable to load analytics records.")
         raise HTTPException(
