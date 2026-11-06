@@ -12,7 +12,7 @@ from itertools import chain, islice
 from pathlib import Path
 from uuid import uuid4
 
-from firebase_admin import storage
+from firebase_admin import get_app, storage
 from google.api_core.exceptions import Aborted, DeadlineExceeded, GoogleAPICallError, ServiceUnavailable
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 import google.auth
 from google.auth.transport import requests as google_auth_requests
 from google.cloud import storage as gcs_storage
+from google.cloud.firestore import Client as FirestoreClient
 from pydantic import BaseModel
 
 from auth import (
@@ -92,9 +93,18 @@ require_company_admin = require_company_role(["admin"])
 # Any signed-in Firebase user, regardless of role claim.
 require_authenticated_user = verify_firebase_token
 
-MERGE_CHUNK_SIZE = 250
+MERGE_CHUNK_SIZE = 100
 MERGE_COMMIT_ATTEMPTS = 3
 MERGE_CHUNK_PAUSE_SECONDS = 0.5
+
+
+def _new_merge_firestore_client() -> FirestoreClient:
+    firebase_app = get_app()
+    # firebase_admin.firestore.client() caches clients; construct one to get a fresh channel.
+    return FirestoreClient(
+        project=firebase_app.project_id,
+        credentials=firebase_app.credential.get_credential(),
+    )
 
 
 @app.get("/api/auth/context")
@@ -1237,7 +1247,6 @@ async def merge_company_records(
         master = merged["master_record"]
         merged_at = datetime.now(timezone.utc).isoformat()
 
-        records_ref = db.collection("companies").document(company_id).collection("records")
         master_id = str(master.get("record_id") or master_record_id or uuid4())
         master["record_id"] = master_id
         master["merged_at"] = merged_at
@@ -1246,9 +1255,13 @@ async def merge_company_records(
             archived_record["record_id"] = archived_id
             archived_record["merged_at"] = merged_at
 
+        merge_db = db
+
         def commit_chunk(chunk):
+            nonlocal merge_db
             for attempt in range(1, MERGE_COMMIT_ATTEMPTS + 1):
-                batch = db.batch()
+                records_ref = merge_db.collection("companies").document(company_id).collection("records")
+                batch = merge_db.batch()
                 for record in chunk:
                     batch.set(records_ref.document(record["record_id"]), record)
                 try:
@@ -1262,6 +1275,8 @@ async def merge_company_records(
                         "Transient merge batch commit failure for company '%s' (attempt %s/%s)",
                         company_id, attempt, MERGE_COMMIT_ATTEMPTS, exc_info=True,
                     )
+                    # Replace only this request's client, including its document references.
+                    merge_db = _new_merge_firestore_client()
                     # This runs in a worker thread; stable IDs and timestamps make replay safe.
                     time.sleep(MERGE_CHUNK_PAUSE_SECONDS * attempt)
 

@@ -200,14 +200,17 @@ The synchronous route runs blocking Firestore work in FastAPI's worker pool.
 Merge batch commits retry transient unavailable/deadline/aborted or connection
 errors up to three total attempts, with 0.5s then 1s backoff in the worker thread.
 Each attempt rebuilds the same batch using stable document IDs and timestamps.
+After a transient failure, the request constructs a fresh Firestore client with
+the configured Firebase project's credentials and rebuilds its document references.
+Later chunks reuse the recovered client; the shared application client is not replaced.
 Permanent errors are not retried; exhausted retries retain the existing 503.
 The outer write deadline allows all three RPC deadlines plus backoff.
 Scrubbing and write loops pause asynchronously for 0.5s after each chunk.
 These measures improve resilience but do not establish missed gRPC keepalives
 as the cause of an observed 503; inspect backend logs for the underlying error.
 
-`POST /api/companies/{company_id}/records/merge` scrubs records in 250-row
-chunks and commits Firestore batches of at most 250 writes. Blocking merge,
+`POST /api/companies/{company_id}/records/merge` scrubs records in 100-row
+chunks and commits Firestore batches of at most 100 writes. Blocking merge,
 batch commits, and garbage collection run in worker threads; temporary chunk
 references are released and the request yields between chunks.
 Duplicate matching remains dataset-wide and explicit master selection is

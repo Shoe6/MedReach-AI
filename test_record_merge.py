@@ -187,6 +187,7 @@ class _UnreachableNode:
 
 def test_merge_records_endpoint_fails_fast_when_firestore_unreachable(monkeypatch):
     monkeypatch.setattr(main_module, "db", _UnreachableNode())
+    monkeypatch.setattr(main_module, "_new_merge_firestore_client", _UnreachableNode)
     monkeypatch.setattr(main_module, "ALLOW_OFFLINE_FIRESTORE_WRITES", False)
 
     payload = {
@@ -212,6 +213,7 @@ def test_merge_records_endpoint_fails_fast_when_firestore_unreachable(monkeypatc
 
 def test_merge_records_endpoint_skips_write_when_offline_bypass_enabled(monkeypatch):
     monkeypatch.setattr(main_module, "db", _UnreachableNode())
+    monkeypatch.setattr(main_module, "_new_merge_firestore_client", _UnreachableNode)
     monkeypatch.setattr(main_module, "USE_EMULATOR", True)
     monkeypatch.setattr(main_module, "ALLOW_OFFLINE_FIRESTORE_WRITES", True)
 
@@ -257,6 +259,19 @@ def chunked_merge(monkeypatch):
         return batch
 
     collections.batch.side_effect = make_batch
+    fresh_clients = []
+
+    def new_client():
+        fresh = Mock()
+        fresh.collection.return_value.document.return_value.collection.return_value.document.side_effect = (
+            lambda record_id: record_id
+        )
+        # Share failure sequencing, but use separate clients and references for retries.
+        fresh.batch.side_effect = collections.batch
+        fresh_clients.append(fresh)
+        return fresh
+
+    monkeypatch.setattr(main_module, "_new_merge_firestore_client", Mock(side_effect=new_client))
 
     async def scrub(records, *, npi_cache):
         scrub_sizes.append(len(records))
@@ -270,7 +285,7 @@ def chunked_merge(monkeypatch):
     return commits, scrub_sizes, collect, collections
 
 
-@pytest.mark.parametrize("count", [1, 250, 251, 501])
+@pytest.mark.parametrize("count", [1, 100, 101, 201])
 def test_merge_records_chunks_scrubbing_and_batch_commits(chunked_merge, count):
     commits, scrub_sizes, collect, _ = chunked_merge
     records = [
@@ -287,7 +302,7 @@ def test_merge_records_chunks_scrubbing_and_batch_commits(chunked_merge, count):
     )
 
     assert response.status_code == 200, response.text
-    expected_sizes = [min(250, count - start) for start in range(0, count, 250)]
+    expected_sizes = [min(100, count - start) for start in range(0, count, 100)]
     assert scrub_sizes == expected_sizes
     assert [len(writes) for writes in commits] == expected_sizes
     persisted = {reference: record for writes in commits for reference, record in writes}
@@ -306,6 +321,7 @@ def test_merge_records_chunks_scrubbing_and_batch_commits(chunked_merge, count):
     if count > 2:
         assert not persisted["r1"]["is_duplicate"]
     assert collect.call_count == len(expected_sizes) * 2 + 1
+    main_module._new_merge_firestore_client.assert_not_called()
 
 
 def test_merge_records_stops_after_failed_batch(chunked_merge):
@@ -329,6 +345,7 @@ def test_merge_records_stops_after_failed_batch(chunked_merge):
     assert "Firestore is unreachable" in response.json()["detail"]
     assert len(commits) == 1
     assert collections.batch.call_count == 4
+    assert main_module._new_merge_firestore_client.call_count == 2
 
 
 @pytest.mark.parametrize("error_type", [
@@ -365,6 +382,7 @@ def test_merge_retries_transient_commit_failures(chunked_merge, monkeypatch, err
     assert all(batch.commit.call_count == 1 for batch in batches)
     assert all(batch.set.call_args_list == batches[0].set.call_args_list for batch in batches)
     assert "Transient merge batch commit failure" in caplog.text
+    assert main_module._new_merge_firestore_client.call_count == 2
 
 
 def test_merge_does_not_retry_permanent_commit_errors(chunked_merge, monkeypatch):
@@ -390,6 +408,7 @@ def test_merge_does_not_retry_permanent_commit_errors(chunked_merge, monkeypatch
     assert collections.batch.call_count == 1
     assert commits == []
     assert retry_delays == []
+    main_module._new_merge_firestore_client.assert_not_called()
 
 
 def test_merge_pauses_after_each_scrubbing_and_write_chunk(chunked_merge, monkeypatch):
@@ -403,7 +422,7 @@ def test_merge_pauses_after_each_scrubbing_and_write_chunk(chunked_merge, monkey
     monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
     response = client.post(
         "/api/companies/pause-company/records/merge",
-        json={"records": [{"record_id": f"r{i}"} for i in range(251)]},
+        json={"records": [{"record_id": f"r{i}"} for i in range(101)]},
         headers={"X-User-Role": "admin"},
     )
     assert response.status_code == 200, response.text
@@ -435,6 +454,62 @@ def test_merge_retry_budget_exceeds_single_rpc_deadline(chunked_merge, monkeypat
     assert response.status_code == 200, response.text
     assert collections.batch.call_count == 3
     assert len(commits) == 1
+
+
+def test_merge_rebuilds_references_and_reuses_recovered_client(chunked_merge, monkeypatch):
+    from unittest.mock import Mock
+
+    _, _, _, shared = chunked_merge
+    recovered = Mock()
+    recovered.collection.return_value.document.return_value.collection.return_value.document.side_effect = (
+        lambda record_id: f"fresh/{record_id}"
+    )
+    shared_batch = Mock()
+    shared_batch.commit.side_effect = main_module.DeadlineExceeded("Stream removed")
+    shared.batch.side_effect = None
+    shared.batch.return_value = shared_batch
+    fresh_batches = []
+
+    def fresh_batch():
+        batch = Mock()
+        fresh_batches.append(batch)
+        return batch
+
+    recovered.batch.side_effect = fresh_batch
+    factory = Mock(return_value=recovered)
+    monkeypatch.setattr(main_module, "_new_merge_firestore_client", factory)
+    monkeypatch.setattr(main_module.time, "sleep", lambda delay: None)
+    response = client.post(
+        "/api/companies/reconnect-company/records/merge",
+        json={"records": [{"record_id": f"r{i}"} for i in range(101)]},
+        headers={"X-User-Role": "admin"},
+    )
+    assert response.status_code == 200, response.text
+    assert main_module.db is shared
+    shared.batch.assert_called_once()
+    factory.assert_called_once_with()
+    assert [batch.set.call_count for batch in fresh_batches] == [100, 1]
+    assert [call.args[0] for batch in fresh_batches for call in batch.set.call_args_list] == [
+        f"fresh/r{i}" for i in range(101)
+    ]
+    assert [call.args[1] for call in fresh_batches[0].set.call_args_list] == [
+        call.args[1] for call in shared_batch.set.call_args_list
+    ]
+    recovered.collection.assert_called_with("companies")
+    recovered.collection.return_value.document.assert_called_with("reconnect-company")
+
+
+def test_new_merge_client_uses_configured_firebase_identity(monkeypatch):
+    from unittest.mock import Mock
+
+    firebase_app = Mock(project_id="configured-project")
+    credentials = object()
+    firebase_app.credential.get_credential.return_value = credentials
+    constructor = Mock()
+    monkeypatch.setattr(main_module, "get_app", Mock(return_value=firebase_app))
+    monkeypatch.setattr(main_module, "FirestoreClient", constructor)
+    assert main_module._new_merge_firestore_client() is constructor.return_value
+    constructor.assert_called_once_with(project="configured-project", credentials=credentials)
 
 
 def test_merge_records_rejects_non_object_rows_before_processing(chunked_merge):
