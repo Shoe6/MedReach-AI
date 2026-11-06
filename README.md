@@ -135,6 +135,14 @@ returns 403, and a failed Firestore lookup returns 503.
 Upload signing, record merge, Data Review, heatmap, and export requests use that
 company instead of `demo-company`. Missing assignments are displayed explicitly;
 even Super Admins need an assigned company for this upload workflow.
+Production upload signing and merge requests go directly to
+`https://medreach-ai-894235176706.us-east1.run.app`, bypassing Firebase Hosting's
+60-second proxy timeout while retaining Firebase bearer authentication.
+Other API requests keep using `VITE_API_URL` or relative Hosting paths.
+Development uploads still use `VITE_API_URL` or the local Vite proxy.
+FastAPI CORS allows both `https://medreachai-679aa.web.app` and
+`https://medreachai-679aa.firebaseapp.com`, including Authorization and
+Content-Type headers. Cloud Run's own request timeout and memory limits still apply.
 Deploy the backend account-context endpoint with the frontend when using the
 Firestore assignment fallback; building locally does not update Firebase Hosting.
 
@@ -188,6 +196,15 @@ labels. Empty datasets return empty arrays. Missing company assignments return
 The synchronous route runs blocking Firestore work in FastAPI's worker pool.
 
 ### Large record merges
+
+Merge batch commits retry transient unavailable/deadline/aborted or connection
+errors up to three total attempts, with 0.5s then 1s backoff in the worker thread.
+Each attempt rebuilds the same batch using stable document IDs and timestamps.
+Permanent errors are not retried; exhausted retries retain the existing 503.
+The outer write deadline allows all three RPC deadlines plus backoff.
+Scrubbing and write loops pause asynchronously for 0.5s after each chunk.
+These measures improve resilience but do not establish missed gRPC keepalives
+as the cause of an observed 503; inspect backend logs for the underlying error.
 
 `POST /api/companies/{company_id}/records/merge` scrubs records in 250-row
 chunks and commits Firestore batches of at most 250 writes. Blocking merge,

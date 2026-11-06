@@ -4,7 +4,7 @@ const path = require('node:path')
 const test = require('node:test')
 const ts = require('typescript')
 
-function loadClient(auth, fetch) {
+function loadClient(auth, fetch, env = {}) {
   const source = readFileSync(path.join(__dirname, '../src/apiClient.ts'), 'utf8')
     .replaceAll('import.meta.env', 'env')
   const compiled = ts.transpileModule(source, {
@@ -12,10 +12,25 @@ function loadClient(auth, fetch) {
   }).outputText
   const exports = {}
   new Function('exports', 'require', 'globalThis', 'env', compiled)(
-    exports, () => ({ getFirebaseAuth: () => auth }), { fetch }, {},
+    exports, () => ({ getFirebaseAuth: () => auth }), { fetch }, env,
   )
   return exports
 }
+
+test('production uploads use Cloud Run even when other API calls use Hosting or a configured proxy', () => {
+  for (const VITE_API_URL of [undefined, '', 'https://proxy.example.test']) {
+    const client = loadClient(null, null, { DEV: false, VITE_API_URL })
+    assert.equal(client.UPLOAD_API_BASE_URL, 'https://medreach-ai-894235176706.us-east1.run.app')
+    assert.equal(client.API_BASE_URL, VITE_API_URL ?? '')
+  }
+})
+
+test('development uploads preserve local proxy and configured API routing', () => {
+  for (const VITE_API_URL of [undefined, '', 'http://localhost:8010']) {
+    const client = loadClient(null, null, { DEV: true, VITE_API_URL })
+    assert.equal(client.UPLOAD_API_BASE_URL, VITE_API_URL ?? '')
+  }
+})
 
 test('waits for auth restoration and preserves headers while replacing stale authorization', async () => {
   const events = []

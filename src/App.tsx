@@ -8,7 +8,7 @@ import AnalyticsDashboard from './AnalyticsDashboard'
 import RecordDetailDashboard from './RecordDetailDashboard'
 import { contactFlags, duplicateFlags, hasReviewField, npiOutcome, outlierFlags, privacyFlags, reviewName, reviewScores, reviewValue } from './dataReview'
 import { NLPAuthenticationError, searchDataset } from './nlpSearch'
-import { API_BASE_URL, apiFetch } from './apiClient'
+import { API_BASE_URL, UPLOAD_API_BASE_URL, apiFetch } from './apiClient'
 
 
 // Carries the HTTP status code alongside a fetch failure so callers can branch on 403/404/etc.
@@ -1851,7 +1851,7 @@ function UploadScreen({ onNavigate, showToast }: { onNavigate: (s: Screen) => vo
         : companyError || 'No company is assigned to your account.')
       return
     }
-    const companyPath = `${API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}`
+    const companyPath = `${UPLOAD_API_BASE_URL}/api/companies/${encodeURIComponent(companyId)}`
     pendingFileRef.current = file
     setFileName(file.name)
     setFileSize(file.size / (1024 * 1024))

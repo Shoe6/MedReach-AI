@@ -6,13 +6,14 @@ import io
 import logging
 import os
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from itertools import chain, islice
 from pathlib import Path
 from uuid import uuid4
 
 from firebase_admin import storage
-from google.api_core.exceptions import GoogleAPICallError
+from google.api_core.exceptions import Aborted, DeadlineExceeded, GoogleAPICallError, ServiceUnavailable
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -92,6 +93,8 @@ require_company_admin = require_company_role(["admin"])
 require_authenticated_user = verify_firebase_token
 
 MERGE_CHUNK_SIZE = 250
+MERGE_COMMIT_ATTEMPTS = 3
+MERGE_CHUNK_PAUSE_SECONDS = 0.5
 
 
 @app.get("/api/auth/context")
@@ -211,10 +214,13 @@ def _processing_job_reference(job_id: str):
     return db.collection("processing_jobs").document(job_id)
 
 
-async def _firestore_write(write_fn, *, context: str):
+async def _firestore_write(write_fn, *, context: str, timeout_seconds: float | None = None):
     """Bound blocking Firestore writes, with an explicit local offline opt-in."""
     try:
-        return await asyncio.wait_for(asyncio.to_thread(write_fn), timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
+        return await asyncio.wait_for(
+            asyncio.to_thread(write_fn),
+            timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds,
+        )
     except Exception as exc:
         if USE_EMULATOR and ALLOW_OFFLINE_FIRESTORE_WRITES:
             logger.warning("Skipping Firestore write (%s) - emulator unreachable: %s", context, exc)
@@ -1213,7 +1219,7 @@ async def merge_company_records(
             records[start:end] = scrubbed_chunk
             del chunk, scrubbed_chunk
             await asyncio.to_thread(gc.collect)
-            await asyncio.sleep(0)
+            await asyncio.sleep(MERGE_CHUNK_PAUSE_SECONDS)
         del npi_cache
 
         def merge_scrubbed_records():
@@ -1241,10 +1247,23 @@ async def merge_company_records(
             archived_record["merged_at"] = merged_at
 
         def commit_chunk(chunk):
-            batch = db.batch()
-            for record in chunk:
-                batch.set(records_ref.document(record["record_id"]), record)
-            batch.commit(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
+            for attempt in range(1, MERGE_COMMIT_ATTEMPTS + 1):
+                batch = db.batch()
+                for record in chunk:
+                    batch.set(records_ref.document(record["record_id"]), record)
+                try:
+                    batch.commit(retry=None, timeout=FIRESTORE_WRITE_TIMEOUT_SECONDS)
+                    return
+                except (ServiceUnavailable, DeadlineExceeded, Aborted, ConnectionError, TimeoutError):
+                    if attempt == MERGE_COMMIT_ATTEMPTS:
+                        logger.exception("Merge batch commit exhausted retries for company '%s'", company_id)
+                        raise
+                    logger.warning(
+                        "Transient merge batch commit failure for company '%s' (attempt %s/%s)",
+                        company_id, attempt, MERGE_COMMIT_ATTEMPTS, exc_info=True,
+                    )
+                    # This runs in a worker thread; stable IDs and timestamps make replay safe.
+                    time.sleep(MERGE_CHUNK_PAUSE_SECONDS * attempt)
 
         # Include the master without constructing another full-dataset list.
         pending = chain([master], merged["archived_records"])
@@ -1252,10 +1271,16 @@ async def merge_company_records(
             await _firestore_write(
                 lambda chunk=chunk: commit_chunk(chunk),
                 context=f"merging records for company '{company_id}'",
+                # Allow every RPC deadline plus backoff and a small scheduling margin.
+                timeout_seconds=(
+                    MERGE_COMMIT_ATTEMPTS * FIRESTORE_WRITE_TIMEOUT_SECONDS
+                    + MERGE_CHUNK_PAUSE_SECONDS * sum(range(1, MERGE_COMMIT_ATTEMPTS))
+                    + 1.0
+                ),
             )
             del chunk
             await asyncio.to_thread(gc.collect)
-            await asyncio.sleep(0)
+            await asyncio.sleep(MERGE_CHUNK_PAUSE_SECONDS)
 
         return {
             "company_id": company_id,

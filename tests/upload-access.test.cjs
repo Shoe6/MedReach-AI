@@ -4,6 +4,7 @@ const path = require('node:path')
 const test = require('node:test')
 const ts = require('typescript')
 const React = require('react')
+const uploadBaseUrl = 'https://medreach-ai-894235176706.us-east1.run.app'
 
 const source = readFileSync(path.join(__dirname, '../src/App.tsx'), 'utf8')
 const compiled = ts.transpileModule(source + '\nexport { UploadScreen, canUploadData };', {
@@ -59,6 +60,7 @@ function harness({ role = 'admin', companyId = 'real-company', authLoading = fal
     './firebase': { getFirebaseAuth: () => ({}) },
     './apiClient': {
       API_BASE_URL: '',
+      UPLOAD_API_BASE_URL: uploadBaseUrl,
       async apiFetch(...args) {
         requests.push(args)
         if (fetch) return fetch(...args)
@@ -113,8 +115,8 @@ for (const role of ['editor', 'admin', 'super-admin']) {
     selectFile(tree)
     await settle()
     assert.deepEqual(app.requests.map(([url]) => url), [
-      '/api/companies/company%20%26%20one/uploads/generate-url',
-      '/api/companies/company%20%26%20one/records/merge',
+      `${uploadBaseUrl}/api/companies/company%20%26%20one/uploads/generate-url`,
+      `${uploadBaseUrl}/api/companies/company%20%26%20one/records/merge`,
     ])
     assert.deepEqual(app.storageUploads, [['PUT', 'https://storage.example.test/upload']])
     assert.deepEqual(app.navigations, ['data-review'])
@@ -138,7 +140,8 @@ test('drop handler uses the same real company as file selection', async () => {
   const zone = elements(app.render()).find(node => node.props.onDrop)
   zone.props.onDrop({ preventDefault() {}, dataTransfer: { files: [file] } })
   await settle()
-  assert.ok(app.requests.every(([url]) => url.startsWith('/api/companies/drop-company/')))
+  assert.equal(app.requests.length, 2)
+  assert.ok(app.requests.every(([url]) => url.startsWith(`${uploadBaseUrl}/api/companies/drop-company/`)))
 })
 
 test('a server 403 preserves its detail without mislabeling the UI role', async () => {

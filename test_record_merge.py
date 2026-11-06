@@ -314,7 +314,7 @@ def test_merge_records_stops_after_failed_batch(chunked_merge):
 
     def fail_second_batch():
         batch = make_batch()
-        if collections.batch.call_count == 2:
+        if collections.batch.call_count >= 2:
             batch.commit.side_effect = ConnectionError("batch unavailable")
         return batch
 
@@ -328,7 +328,113 @@ def test_merge_records_stops_after_failed_batch(chunked_merge):
     assert response.status_code == 503
     assert "Firestore is unreachable" in response.json()["detail"]
     assert len(commits) == 1
-    assert collections.batch.call_count == 2
+    assert collections.batch.call_count == 4
+
+
+@pytest.mark.parametrize("error_type", [
+    ConnectionError,
+    TimeoutError,
+    main_module.ServiceUnavailable,
+    main_module.DeadlineExceeded,
+    main_module.Aborted,
+])
+def test_merge_retries_transient_commit_failures(chunked_merge, monkeypatch, error_type, caplog):
+    commits, _, _, collections = chunked_merge
+    make_batch = collections.batch.side_effect
+    retry_delays = []
+    monkeypatch.setattr(main_module.time, "sleep", retry_delays.append)
+    batches = []
+
+    def fail_until_third_attempt():
+        batch = make_batch()
+        batches.append(batch)
+        if len(batches) < 3:
+            batch.commit.side_effect = error_type("connection dropped")
+        return batch
+
+    collections.batch.side_effect = fail_until_third_attempt
+    response = client.post(
+        "/api/companies/retry-company/records/merge",
+        json={"records": [{"record_id": "stable-record"}]},
+        headers={"X-User-Role": "admin"},
+    )
+    assert response.status_code == 200, response.text
+    assert len(commits) == 1
+    assert len(batches) == 3
+    assert retry_delays == [0.5, 1.0]
+    assert all(batch.commit.call_count == 1 for batch in batches)
+    assert all(batch.set.call_args_list == batches[0].set.call_args_list for batch in batches)
+    assert "Transient merge batch commit failure" in caplog.text
+
+
+def test_merge_does_not_retry_permanent_commit_errors(chunked_merge, monkeypatch):
+    commits, _, _, collections = chunked_merge
+    make_batch = collections.batch.side_effect
+    retry_delays = []
+    monkeypatch.setattr(main_module.time, "sleep", retry_delays.append)
+
+    def denied_batch():
+        from google.api_core.exceptions import PermissionDenied
+
+        batch = make_batch()
+        batch.commit.side_effect = PermissionDenied("not allowed")
+        return batch
+
+    collections.batch.side_effect = denied_batch
+    response = client.post(
+        "/api/companies/retry-company/records/merge",
+        json={"records": [{"record_id": "r1"}]},
+        headers={"X-User-Role": "admin"},
+    )
+    assert response.status_code == 503
+    assert collections.batch.call_count == 1
+    assert commits == []
+    assert retry_delays == []
+
+
+def test_merge_pauses_after_each_scrubbing_and_write_chunk(chunked_merge, monkeypatch):
+    delays = []
+    original_sleep = main_module.asyncio.sleep
+
+    async def record_sleep(delay):
+        delays.append(delay)
+        await original_sleep(0)
+
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    response = client.post(
+        "/api/companies/pause-company/records/merge",
+        json={"records": [{"record_id": f"r{i}"} for i in range(251)]},
+        headers={"X-User-Role": "admin"},
+    )
+    assert response.status_code == 200, response.text
+    assert delays == [0.5, 0.5, 0.5, 0.5]
+
+
+def test_merge_retry_budget_exceeds_single_rpc_deadline(chunked_merge, monkeypatch):
+    commits, _, _, collections = chunked_merge
+    make_batch = collections.batch.side_effect
+    monkeypatch.setattr(main_module, "FIRESTORE_WRITE_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(main_module, "MERGE_CHUNK_PAUSE_SECONDS", 0.001)
+
+    def slow_batch():
+        batch = make_batch()
+        if collections.batch.call_count < 3:
+            def timeout(**kwargs):
+                time.sleep(kwargs["timeout"])
+                raise main_module.DeadlineExceeded("RPC deadline")
+
+            batch.commit.side_effect = timeout
+        return batch
+
+    collections.batch.side_effect = slow_batch
+    response = client.post(
+        "/api/companies/retry-company/records/merge",
+        json={"records": [{"record_id": "r1"}]},
+        headers={"X-User-Role": "admin"},
+    )
+    assert response.status_code == 200, response.text
+    assert collections.batch.call_count == 3
+    assert len(commits) == 1
 
 
 def test_merge_records_rejects_non_object_rows_before_processing(chunked_merge):

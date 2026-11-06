@@ -2,6 +2,10 @@ import { getFirebaseAuth } from './firebase'
 
 // Empty string means calls are relative (proxied via the Vite dev server or Firebase Hosting rewrites).
 export const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
+// Production uploads bypass Firebase Hosting's 60-second proxy deadline.
+export const UPLOAD_API_BASE_URL = import.meta.env.DEV
+  ? API_BASE_URL
+  : 'https://medreach-ai-894235176706.us-east1.run.app'
 
 export class APIAuthenticationError extends Error {}
 
